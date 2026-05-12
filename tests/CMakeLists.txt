@@ -40,6 +40,12 @@ add_executable(GKProofTests test_gk_proof.cpp)
 add_executable(MLSAGTests test_mlsag.cpp)
 add_executable(TxBalanceTests test_transaction_balance.cpp)
 add_executable(CTIntegrationTests test_ct_integration.cpp)
+add_executable(CTBench bench_ct_validation.cpp)
+# CT serializer fuzz harness, standalone PRNG-driven mode.
+# For coverage-guided fuzzing rebuild with clang -fsanitize=fuzzer,address,undefined
+# and drop the CTFUZZER_STANDALONE define so LLVMFuzzerTestOneInput becomes the entrypoint.
+add_executable(CTFuzz fuzz_ct_serializer.cpp)
+target_compile_definitions(CTFuzz PRIVATE CTFUZZER_STANDALONE=1)
 
 target_link_libraries(CoreTests TestGenerator Wallet CryptoNoteCore Serialization System Logging Common Crypto BlockchainExplorer ${Boost_LIBRARIES})
 target_link_libraries(IntegrationTests IntegrationTestLibrary Wallet NodeRpcProxy InProcessNode P2P Rpc Http Transfers Serialization System CryptoNoteCore Logging Common Crypto BlockchainExplorer gtest Mnemonics upnpc-static ${Boost_LIBRARIES})
@@ -57,6 +63,13 @@ target_link_libraries(GKProofTests Crypto Common ${Boost_LIBRARIES})
 target_link_libraries(MLSAGTests Crypto Common ${Boost_LIBRARIES})
 target_link_libraries(TxBalanceTests Crypto Common ${Boost_LIBRARIES})
 target_link_libraries(CTIntegrationTests Crypto Common ${Boost_LIBRARIES})
+target_link_libraries(CTBench Crypto Common ${Boost_LIBRARIES})
+target_link_libraries(CTFuzz CryptoNoteCore Serialization Crypto Common Logging ${Boost_LIBRARIES})
+if(MSVC)
+  # CryptoNoteCore.lib pulls in StringTools which references the inline sscanf;
+  # link against the MSVC compatibility shim so it resolves under VS2022.
+  target_link_libraries(CTFuzz legacy_stdio_definitions.lib)
+endif()
 
 if(MSVC)
   target_link_libraries(SystemTests ws2_32)
