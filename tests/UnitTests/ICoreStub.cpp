@@ -593,6 +593,11 @@ size_t ICoreStub::getBlockchainTotalTransactions() {
 }
 
 uint32_t ICoreStub::getCurrentBlockchainHeight() {
+  // Tests can advance the height via set_blockchain_top() without populating
+  // the blocks vector (e.g. tx_pool tests that need to land past CT_FORK_HEIGHT
+  // to exercise CT-version gating). Honor an explicit topHeight whenever it
+  // has been set; fall back to the empty-blocks=>0 sentinel otherwise.
+  if (topHeight > 0) return topHeight + 1;
   return blocks.empty() ? 0 : topHeight + 1;
 }
 
