@@ -28,6 +28,7 @@
 #include "CryptoNoteCore/CryptoNoteBasicImpl.h"
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "CryptoNoteCore/TransactionApi.h"
+#include "crypto/ct_ecdh.h"
 
 #include "IWallet.h"
 #include "INode.h"
@@ -102,6 +103,37 @@ void findMyOutputs(
       checkOutputKey(derivation, out.key, keyIndex, idx, spendKeys, outputs);
       ++keyIndex;
 
+    } else if (outType == TransactionTypes::OutputType::Confidential) {
+      // CT output: try ECDH recovery to check if it belongs to us.
+      // Step 1: Verify commitment matches (proves output is for this view key).
+      // Step 2: Underive the stealth targetKey to find which spend key owns it.
+      ConfidentialOutput ctOut;
+      tx.getOutput(idx, ctOut);
+
+      Crypto::MaskedAmount masked;
+      static_assert(sizeof(masked.data) == sizeof(ctOut.maskedAmount), "MaskedAmount size mismatch");
+      memcpy(masked.data, ctOut.maskedAmount.data(), sizeof(masked.data));
+
+      // Reinterpret EllipticCurvePoint commitment as PublicKey for the crypto API
+      const Crypto::PublicKey& commitmentPK = reinterpret_cast<const Crypto::PublicKey&>(ctOut.commitment);
+
+      uint64_t recoveredAmount = 0;
+      Crypto::EllipticCurveScalar blindingFactor;
+
+      if (Crypto::decrypt_and_verify_output(viewSecretKey, txPublicKey, idx,
+                                             masked, commitmentPK,
+                                             recoveredAmount, blindingFactor)) {
+        // Commitment verified — output belongs to this view key.
+        // Now check targetKey to determine which spend key subscription owns it.
+        // P = Hs(derivation || idx)*G + B_spend  =>  B_spend = P - Hs(derivation || idx)*G
+        PublicKey recoveredSpendKey;
+        underive_public_key(derivation, idx, ctOut.targetKey, recoveredSpendKey);
+
+        if (spendKeys.find(recoveredSpendKey) != spendKeys.end()) {
+          outputs[recoveredSpendKey].push_back(static_cast<uint32_t>(idx));
+        }
+      }
+      // If verification fails, silently skip — output is not ours.
     }
   }
 }
@@ -353,6 +385,14 @@ uint32_t TransfersConsumer::onNewBlocks(const CompleteBlock* blocks, uint32_t st
         });
       }
     }
+
+    if (processedBlockCount < count) {
+      const uint32_t newHeight = startHeight + count - 1;
+      forEachSubscription([newHeight](TransfersSubscription& sub) {
+        sub.advanceHeight(newHeight);
+      });
+      processedBlockCount = count;
+    }
   } catch (const MarkTransactionConfirmedException& e) {
     m_logger(ERROR, BRIGHT_RED) << "Failed to process block transactions: failed to confirm transaction " << e.getTxHash() <<
     //  ", remove this transaction from all containers and transaction pool";
@@ -461,8 +501,8 @@ std::error_code createTransfers(
 
     auto outType = tx.getOutputType(size_t(idx));
 
-    if (
-      outType != TransactionTypes::OutputType::Key) {
+    if (outType != TransactionTypes::OutputType::Key &&
+        outType != TransactionTypes::OutputType::Confidential) {
       continue;
     }
 
@@ -505,6 +545,40 @@ std::error_code createTransfers(
       info.amount = amount;
       info.outputKey = out.key;
 
+    } else if (outType == TransactionTypes::OutputType::Confidential) {
+      // CT output: recover amount and blinding factor via ECDH
+      ConfidentialOutput ctOut;
+      tx.getOutput(idx, ctOut);
+
+      Crypto::MaskedAmount masked;
+      memcpy(masked.data, ctOut.maskedAmount.data(), sizeof(masked.data));
+
+      const Crypto::PublicKey& commitmentPK = reinterpret_cast<const Crypto::PublicKey&>(ctOut.commitment);
+
+      uint64_t recoveredAmount = 0;
+      Crypto::EllipticCurveScalar blindingFactor;
+
+      if (!Crypto::decrypt_and_verify_output(account.viewSecretKey, txPubKey, idx,
+                                              masked, commitmentPK,
+                                              recoveredAmount, blindingFactor)) {
+        // Should not happen — findMyOutputs already verified this output is ours
+        continue;
+      }
+
+      info.amount = recoveredAmount;
+      info.outputKey = ctOut.targetKey;
+      info.commitment = ctOut.commitment;
+      info.blindingFactor = blindingFactor;
+
+      // Generate key image for CT output using the same derivation scheme
+      // The one-time keypair is derived from targetKey: x = Hs(derivation||idx) + b
+      CryptoNote::KeyPair in_ephemeral;
+      CryptoNote::generate_key_image_helper(
+        account,
+        txPubKey,
+        idx,
+        in_ephemeral,
+        info.keyImage);
     }
     transfers.push_back(info);
   }

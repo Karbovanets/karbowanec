@@ -40,10 +40,10 @@ public:
   void stop();
 
   std::shared_ptr<WalletRequest> makeSendRequest(TransactionId& transactionId, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
-    const std::vector<WalletLegacyTransfer>& transfers, uint64_t fee, const std::string& extra = "", uint64_t mixIn = 0, uint64_t unlockTimestamp = 0);
+    const std::vector<WalletLegacyTransfer>& transfers, uint64_t fee, const std::string& extra = "", uint64_t mixIn = parameters::DEFAULT_TX_MIXIN, uint64_t unlockTimestamp = 0);
 
   std::shared_ptr<WalletRequest> makeSendRequest(TransactionId& transactionId, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
-    const std::vector<WalletLegacyTransfer>& transfers, const std::list<TransactionOutputInformation>& selectedOuts, uint64_t fee, const std::string& extra = "", uint64_t mixIn = 0, uint64_t unlockTimestamp = 0);
+    const std::vector<WalletLegacyTransfer>& transfers, const std::list<TransactionOutputInformation>& selectedOuts, uint64_t fee, const std::string& extra = "", uint64_t mixIn = parameters::DEFAULT_TX_MIXIN, uint64_t unlockTimestamp = 0);
 
   std::string makeRawTransaction(TransactionId& transactionId, std::deque<std::shared_ptr<WalletLegacyEvent>>& events, const std::vector<WalletLegacyTransfer>& transfers, const std::list<CryptoNote::TransactionOutputInformation>& _selectedOuts, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp);
 
@@ -51,7 +51,7 @@ private:
   std::shared_ptr<WalletRequest> makeGetRandomOutsRequest(std::shared_ptr<SendTransactionContext> context);
   std::shared_ptr<WalletRequest> doSendTransaction(std::shared_ptr<SendTransactionContext> context, std::deque<std::shared_ptr<WalletLegacyEvent>>& events);
   void prepareInputs(const std::list<TransactionOutputInformation>& selectedTransfers, std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& outs,
-      std::vector<TxBuildInput>& inputs, uint64_t mixIn);
+      std::vector<TxBuildInput>& inputs, const std::vector<uint64_t>& inputMixins);
   void splitDestinations(TransferId firstTransferId, size_t transfersCount, const TxBuildOutput& changeDts,
     const TxDustPolicy& dustPolicy, std::vector<TxBuildOutput>& splittedDests);
   void digitSplitStrategy(TransferId firstTransferId, size_t transfersCount, const TxBuildOutput& change_dst, uint64_t dust_threshold,
@@ -65,7 +65,18 @@ private:
   void validateTransfersAddresses(const std::vector<WalletLegacyTransfer>& transfers);
   bool validateDestinationAddress(const std::string& address);
 
-  uint64_t selectTransfersToSend(uint64_t neededMoney, bool addUnmixable, uint64_t dust, std::list<TransactionOutputInformation>& selectedTransfers);
+  uint64_t resolveSpendableAmount(const TransactionOutputInformation& output) const;
+
+  bool isCoinbaseOutput(const TransactionOutputInformation& output) const;
+  std::vector<uint64_t> chooseInputMixins(const std::list<TransactionOutputInformation>& selectedTransfers, uint64_t requestedMixin, bool useCT) const;
+  bool hasMixinInputs(const std::vector<uint64_t>& inputMixins) const;
+  uint64_t maxInputMixin(const std::vector<uint64_t>& inputMixins) const;
+  void checkIfEnoughMixins(const std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& outs,
+    const std::vector<uint64_t>& inputMixins) const;
+
+  uint64_t selectTransfersToSend(uint64_t neededMoney, bool addUnmixable, uint64_t dust,
+    std::list<TransactionOutputInformation>& selectedTransfers,
+    bool includeNonCanonical = false);
 
   const Currency& m_currency;
   AccountKeys m_keys;

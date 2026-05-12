@@ -39,12 +39,25 @@ namespace CryptoNote {
     }
   };
 
+  // Where a transaction is being validated from. Lets the validator skip
+  // expensive cryptographic checks (MLSAG, GK proofs, balance kernel, ring
+  // resolution) for transactions delivered inside an already-trusted
+  // checkpointed block, while still running cheap structural sanity checks.
+  enum class TxValidationContext {
+    Mempool,            // Untrusted broadcast tx; full validation.
+    Block,              // Tx is part of a block outside the checkpoint zone; full validation.
+    CheckpointedBlock,  // Tx is part of a block whose hash is covered by a confirmed checkpoint;
+                        // skip expensive crypto, keep structural + double-spend checks.
+  };
+
   class ITransactionValidator {
   public:
     virtual ~ITransactionValidator() {}
-    
-    virtual bool checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock) = 0;
-    virtual bool checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock, BlockInfo& lastFailed) = 0;
+
+    virtual bool checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock,
+                                        TxValidationContext context) = 0;
+    virtual bool checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock,
+                                        BlockInfo& lastFailed, TxValidationContext context) = 0;
     virtual bool haveSpentKeyImages(const CryptoNote::Transaction& tx) = 0;
     virtual bool checkTransactionSize(size_t blobSize) = 0;
   };

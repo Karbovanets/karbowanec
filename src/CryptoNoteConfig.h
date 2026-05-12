@@ -37,7 +37,7 @@ const uint64_t CRYPTONOTE_TX_PROOF_BASE58_PREFIX             = 3576968; // (0x36
 const uint64_t CRYPTONOTE_RESERVE_PROOF_BASE58_PREFIX        = 44907175188; // (0xa74ad1d14), starts with "RsrvPrf..."
 const uint64_t CRYPTONOTE_KEYS_SIGNATURE_BASE58_PREFIX       = 176103705; // (0xa7f2119), starts with "SigV1..."
 const size_t   CRYPTONOTE_MINED_MONEY_UNLOCK_WINDOW          = 10;
-const size_t   CRYPTONOTE_TX_SPENDABLE_AGE                   = 6;
+const size_t   CRYPTONOTE_TX_SPENDABLE_AGE                   = 2;
 const uint64_t CRYPTONOTE_BLOCK_FUTURE_TIME_LIMIT            = DIFFICULTY_TARGET * 7;
 const uint64_t CRYPTONOTE_BLOCK_FUTURE_TIME_LIMIT_V1         = DIFFICULTY_TARGET * 3;
 const size_t   BLOCKCHAIN_TIMESTAMP_CHECK_WINDOW             = 60;
@@ -50,6 +50,7 @@ const uint64_t TAIL_EMISSION_REWARD                          = UINT64_C(10000000
 const size_t CRYPTONOTE_COIN_VERSION                         = 1;
 const unsigned EMISSION_SPEED_FACTOR                         = 18;
 static_assert(EMISSION_SPEED_FACTOR <= 8 * sizeof(uint64_t), "Bad EMISSION_SPEED_FACTOR");
+
 
 const size_t   CRYPTONOTE_REWARD_BLOCKS_WINDOW               = 100;
 const size_t   CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE     = 1000000; //size of block (bytes) after which reward for block calculated using block size
@@ -65,10 +66,27 @@ const uint64_t MINIMUM_FEE_V3                                = UINT64_C(10000000
 const uint64_t MINIMUM_FEE                                   = MINIMUM_FEE_V3;
 const uint64_t MAXIMUM_FEE                                   = UINT64_C(100000000000);
 
-const uint64_t DEFAULT_DUST_THRESHOLD                        = UINT64_C(100000000);
+const uint64_t DEFAULT_DUST_THRESHOLD                        = UINT64_C(10000000000);
 const uint64_t MIN_TX_MIXIN_SIZE                             = 2;
-const uint64_t MAX_TX_MIXIN_SIZE                             = 20;
+const uint64_t MAX_TX_MIXIN_SIZE                             = 20; // legacy, actual max mixin is defined in CT_MAX_RING_SIZE
 const uint64_t MAX_EXTRA_SIZE                                = 1024;
+
+// Confidential transaction parameters
+const size_t   CT_MIN_RING_SIZE                              = 4;     // min ring members per CT input
+const size_t   CT_MAX_RING_SIZE                              = 16;    // max ring members per CT input
+const uint64_t DEFAULT_TX_MIXIN                              = CT_MAX_RING_SIZE - 1; // decoys, gives ring size 16
+const uint64_t CT_MINIMUM_FEE                                = UINT64_C(10000000000);    // 0.01 KRB (= MIN_CT_DENOMINATION)
+const uint64_t CT_MAXIMUM_FEE                                = UINT64_C(100000000000000); // 100 KRB
+const uint64_t CT_CONFIDENTIAL_OUTPUT_AMOUNT                 = UINT64_MAX;      // internal bucket for hidden-output rings
+// Per-tx structural caps. The binding consensus cap on tx blob size is
+// MAX_TRANSACTION_SIZE_LIMIT (~244 KB at current parameters). With CT-output
+// GK proofs at ~1.4 KB each and CT inputs at ~0.6 KB (ring 4) to ~2.2 KB
+// (ring 16), the size cap is reached well before these counts in practice.
+// They remain as defense in depth against pathological/buggy txs and to
+// bound per-tx CPU verification cost (GK verify ~3-5 ms/output, MLSAG +
+// per-ring-member subgroup checks and DB lookups per input).
+const size_t   CT_MAX_INPUTS                                 = 512;
+const size_t   CT_MAX_OUTPUTS                                = 256;
 
 const uint64_t MAX_TRANSACTION_SIZE_LIMIT                    = CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE_CURRENT / 4 - CRYPTONOTE_COINBASE_BLOB_RESERVED_SIZE;
 
@@ -109,6 +127,7 @@ const uint32_t UPGRADE_HEIGHT_V4_2                           = 500000; // Fee pe
 const uint32_t UPGRADE_HEIGHT_V4_3                           = 667000; // Fixed min fee + fee per-byte for extra
 const uint32_t UPGRADE_HEIGHT_V5                             = 700000; // Block v5, back to LWMA1+, Alt. Signed Proof-of-Work
 const uint32_t UPGRADE_HEIGHT_V6                             = 4294967294; // Block v6
+const uint32_t CT_FORK_HEIGHT                                = UPGRADE_HEIGHT_V6; // Confidential Transactions, Pubkey-referenced rings for CT transactions, enable mempool-based zero-conf transactions chaining
 
 const unsigned UPGRADE_VOTING_THRESHOLD                      = 90; // percent
 const uint32_t UPGRADE_VOTING_WINDOW                         = EXPECTED_NUMBER_OF_BLOCKS_PER_DAY;  // blocks
@@ -143,6 +162,7 @@ const char     GENESIS_COINBASE_TX_HEX[]                     =
 const char     DNS_CHECKPOINTS_HOST[]                        = "checkpoints.karbo.org";
 
 const uint8_t  CURRENT_TRANSACTION_VERSION                   =  1;
+const uint8_t  TRANSACTION_VERSION_CT                        =  2;
 const uint8_t  BLOCK_MAJOR_VERSION_1                         =  1;
 const uint8_t  BLOCK_MAJOR_VERSION_2                         =  2;
 const uint8_t  BLOCK_MAJOR_VERSION_3                         =  3;

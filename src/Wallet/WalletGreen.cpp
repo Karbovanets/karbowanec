@@ -57,6 +57,9 @@
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "crypto/crypto.h"
 #include "crypto/random.h"
+#include "crypto/transaction_balance.h"
+#include "Denominations.h"
+#include "CryptoNoteConfig.h"
 #include "Transfers/TransfersContainer.h"
 #include "WalletSerializationV1.h"
 #include "WalletSerializationV2.h"
@@ -141,6 +144,11 @@ uint64_t calculateDonationAmount(uint64_t freeAmount, uint64_t donationThreshold
 
   assert(donationAmount <= freeAmount);
   return donationAmount;
+}
+
+bool isTransparentNonCanonicalCtAmount(const TransactionOutputInformation& output) {
+  return output.type != TransactionTypes::OutputType::Confidential &&
+         output.amount % CryptoNote::MIN_CT_DENOMINATION != 0;
 }
 
 }
@@ -1593,8 +1601,18 @@ void WalletGreen::prepareTransaction(std::vector<WalletOuts>&& wallets,
   preparedTransaction.destinations = convertOrdersToTransfers(orders);
   preparedTransaction.neededMoney = countNeededMoney(preparedTransaction.destinations, fee);
 
+  // CT activation: at and above CT_FORK_HEIGHT, regular transactions must use the
+  // confidential path with canonical denomination decomposition.
+  const bool useCT = m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
+
   std::vector<OutputToTransfer> selectedTransfers;
-  uint64_t foundMoney = selectTransfers(preparedTransaction.neededMoney, mixIn == 0, 0, std::move(wallets), selectedTransfers);
+  uint64_t foundMoney = selectTransfers(
+    preparedTransaction.neededMoney,
+    mixIn == 0,
+    0,
+    std::move(wallets),
+    selectedTransfers,
+    useCT);
 
   if (foundMoney < preparedTransaction.neededMoney) {
     m_logger(ERROR, BRIGHT_RED) << "Failed to create transaction: not enough money. Needed " << m_currency.formatAmount(preparedTransaction.neededMoney) <<
@@ -1604,30 +1622,81 @@ void WalletGreen::prepareTransaction(std::vector<WalletOuts>&& wallets,
 
   typedef CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount outs_for_amount;
   std::vector<outs_for_amount> mixinResult;
+  std::vector<uint64_t> inputMixins = chooseInputMixins(selectedTransfers, mixIn, useCT);
 
-  if (mixIn != 0) {
-    requestMixinOuts(selectedTransfers, mixIn, mixinResult);
+  if (std::any_of(inputMixins.begin(), inputMixins.end(), [](uint64_t inputMixin) { return inputMixin != 0; })) {
+    requestMixinOuts(selectedTransfers, inputMixins, mixinResult);
   }
 
   std::vector<InputInfo> keysInfo;
-  prepareInputs(selectedTransfers, mixinResult, mixIn, keysInfo);
+  prepareInputs(selectedTransfers, mixinResult, inputMixins, keysInfo);
 
   uint64_t donationAmount = pushDonationTransferIfPossible(donation, foundMoney - preparedTransaction.neededMoney, m_currency.defaultDustThreshold(), preparedTransaction.destinations);
   preparedTransaction.changeAmount = foundMoney - preparedTransaction.neededMoney - donationAmount;
 
-  std::vector<ReceiverAmounts> decomposedOutputs = splitDestinations(preparedTransaction.destinations, 0, m_currency);
-  if (preparedTransaction.changeAmount != 0) {
-    WalletTransfer changeTransfer;
-    changeTransfer.type = WalletTransferType::CHANGE;
-    changeTransfer.address = m_currency.accountAddressAsString(changeDestination);
-    changeTransfer.amount = static_cast<int64_t>(preparedTransaction.changeAmount);
-    preparedTransaction.destinations.emplace_back(std::move(changeTransfer));
+  if (useCT) {
+    // Reject non-canonical destination amounts up-front. CT denominations start at
+    // MIN_CT_DENOMINATION (0.01 KRB); sub-floor pieces cannot become CT outputs.
+    for (const auto& destination : preparedTransaction.destinations) {
+      if (destination.type == WalletTransferType::CHANGE) continue;
+      const uint64_t amt = static_cast<uint64_t>(destination.amount);
+      if (amt == 0 || amt % CryptoNote::MIN_CT_DENOMINATION != 0) {
+        m_logger(ERROR, BRIGHT_RED) << "CT destination amount " << amt
+          << " is not a multiple of MIN_CT_DENOMINATION (" << CryptoNote::MIN_CT_DENOMINATION << ")";
+        throw std::system_error(make_error_code(error::WRONG_AMOUNT),
+          "Confidential transactions require amounts to be a multiple of 0.01 KRB");
+      }
+    }
 
-    auto splittedChange = splitAmount(preparedTransaction.changeAmount, changeDestination, 0);
-    decomposedOutputs.emplace_back(std::move(splittedChange));
+    // Split change into canonical + sub-floor residue; absorb residue into fee so no
+    // new CT dust output is ever produced. This may also recover sub-floor pieces from
+    // selected transparent inputs (e.g. legacy or coinbase outputs).
+    uint64_t changeCanonical = (preparedTransaction.changeAmount / CryptoNote::MIN_CT_DENOMINATION)
+                              * CryptoNote::MIN_CT_DENOMINATION;
+    uint64_t dustResidue = preparedTransaction.changeAmount - changeCanonical;
+    uint64_t actualFee = fee + dustResidue;
+    preparedTransaction.changeAmount = changeCanonical;
+
+    std::vector<ReceiverAmounts> decomposedOutputs;
+    for (const auto& destination : preparedTransaction.destinations) {
+      AccountPublicAddress address = parseAccountAddressString(destination.address);
+      ReceiverAmounts ra;
+      ra.receiver = address;
+      ra.amounts = decomposeAmount(static_cast<uint64_t>(destination.amount));
+      decomposedOutputs.push_back(std::move(ra));
+    }
+
+    if (changeCanonical != 0) {
+      WalletTransfer changeTransfer;
+      changeTransfer.type = WalletTransferType::CHANGE;
+      changeTransfer.address = m_currency.accountAddressAsString(changeDestination);
+      changeTransfer.amount = static_cast<int64_t>(changeCanonical);
+      preparedTransaction.destinations.emplace_back(std::move(changeTransfer));
+
+      ReceiverAmounts changeRA;
+      changeRA.receiver = changeDestination;
+      changeRA.amounts = decomposeAmount(changeCanonical);
+      decomposedOutputs.push_back(std::move(changeRA));
+    }
+
+    Transaction rawTx = makeConfidentialTransaction(decomposedOutputs, keysInfo, actualFee, extra, txSecretKey);
+    preparedTransaction.transaction = createTransaction(rawTx);
+  } else {
+    // Pre-fork: transparent transaction path (original)
+    std::vector<ReceiverAmounts> decomposedOutputs = splitDestinations(preparedTransaction.destinations, 0, m_currency);
+    if (preparedTransaction.changeAmount != 0) {
+      WalletTransfer changeTransfer;
+      changeTransfer.type = WalletTransferType::CHANGE;
+      changeTransfer.address = m_currency.accountAddressAsString(changeDestination);
+      changeTransfer.amount = static_cast<int64_t>(preparedTransaction.changeAmount);
+      preparedTransaction.destinations.emplace_back(std::move(changeTransfer));
+
+      auto splittedChange = splitAmount(preparedTransaction.changeAmount, changeDestination, 0);
+      decomposedOutputs.emplace_back(std::move(splittedChange));
+    }
+
+    preparedTransaction.transaction = makeTransaction(decomposedOutputs, keysInfo, extra, unlockTimestamp, txSecretKey);
   }
-
-  preparedTransaction.transaction = makeTransaction(decomposedOutputs, keysInfo, extra, unlockTimestamp, txSecretKey);
 }
 
 void WalletGreen::validateSourceAddresses(const std::vector<std::string>& sourceAddresses) const {
@@ -1643,16 +1712,65 @@ void WalletGreen::validateSourceAddresses(const std::vector<std::string>& source
   }
 }
 
-void WalletGreen::checkIfEnoughMixins(std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult, uint64_t mixIn) const {
-  assert(mixIn != 0);
+void WalletGreen::checkIfEnoughMixins(
+  std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult,
+  const std::vector<uint64_t>& inputMixins) const {
 
-  auto notEnoughIt = std::find_if(mixinResult.begin(), mixinResult.end(),
-    [mixIn](const CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount& ofa) { return ofa.outs.size() < mixIn; });
-
-  if (notEnoughIt != mixinResult.end()) {
-    m_logger(ERROR, BRIGHT_RED) << "Mixin is too big: " << mixIn;
-    throw std::system_error(make_error_code(CryptoNote::error::MIXIN_COUNT_TOO_BIG));
+  for (size_t i = 0; i < inputMixins.size(); ++i) {
+    if (i >= mixinResult.size()) {
+      m_logger(ERROR, BRIGHT_RED) << "Random outputs response count mismatch";
+      throw std::system_error(make_error_code(CryptoNote::error::MIXIN_COUNT_TOO_BIG));
+    }
+    if (inputMixins[i] == 0) {
+      continue;
+    }
+    const uint64_t requestedOuts = inputMixins[i] + 1;
+    if (mixinResult[i].outs.size() < requestedOuts) {
+      m_logger(ERROR, BRIGHT_RED) << "Mixin is too big: " << inputMixins[i];
+      throw std::system_error(make_error_code(CryptoNote::error::MIXIN_COUNT_TOO_BIG));
+    }
   }
+}
+
+bool WalletGreen::isCoinbaseOutput(const OutputToTransfer& output) const {
+  if (output.out.type == TransactionTypes::OutputType::Confidential ||
+      output.wallet == nullptr ||
+      output.wallet->container == nullptr) {
+    return false;
+  }
+
+  TransactionInformation txInfo;
+  return output.wallet->container->getTransactionInformation(output.out.transactionHash, txInfo) &&
+         txInfo.totalAmountIn == 0 &&
+         txInfo.blockHeight >= m_currency.upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5);
+}
+
+std::vector<uint64_t> WalletGreen::chooseInputMixins(
+  const std::vector<OutputToTransfer>& selectedTransfers,
+  uint64_t requestedMixin,
+  bool useCT) const {
+
+  std::vector<uint64_t> inputMixins(selectedTransfers.size(), requestedMixin);
+  if (!useCT) {
+    return inputMixins;
+  }
+
+  const uint64_t minCtMixin = CryptoNote::parameters::CT_MIN_RING_SIZE - 1;
+  const uint64_t maxCtMixin = CryptoNote::parameters::CT_MAX_RING_SIZE - 1;
+  const uint64_t normalMixin = std::max<uint64_t>(requestedMixin, minCtMixin);
+
+  for (size_t i = 0; i < selectedTransfers.size(); ++i) {
+    if (isCoinbaseOutput(selectedTransfers[i])) {
+      inputMixins[i] = 0;
+    } else {
+      if (normalMixin > maxCtMixin) {
+        throw std::system_error(make_error_code(CryptoNote::error::MIXIN_COUNT_TOO_BIG));
+      }
+      inputMixins[i] = normalMixin;
+    }
+  }
+
+  return inputMixins;
 }
 
 std::vector<WalletTransfer> WalletGreen::convertOrdersToTransfers(const std::vector<WalletOrder>& orders) const {
@@ -2338,6 +2456,90 @@ std::unique_ptr<CryptoNote::ITransaction> WalletGreen::makeTransaction(const std
   return tx;
 }
 
+CryptoNote::Transaction WalletGreen::makeConfidentialTransaction(
+    const std::vector<ReceiverAmounts>& decomposedOutputs,
+    std::vector<InputInfo>& keysInfo,
+    uint64_t fee,
+    const std::string& extra,
+    Crypto::SecretKey& txSecretKey) {
+
+  // Convert InputInfo → CTBuildInput
+  std::vector<CTBuildInput> ctInputs;
+  for (auto& input : keysInfo) {
+    CTBuildInput cti;
+    const auto& ki = input.keyInfo;
+    cti.ringAmount = ki.amount;
+
+    // Ring pubkeys from the mixin outputs
+    for (const auto& gout : ki.outputs) {
+      cti.ringPubkeys.push_back(gout.targetKey);
+      cti.ringOutputIndexes.push_back(gout.outputIndex);
+    }
+
+    // Ring commitments must be computed exactly as core validation does:
+    // transparent members are reconstructed from their public amount bucket;
+    // confidential members carry their public commitment.
+    TransactionOutput ringMemberOutput;
+    ringMemberOutput.amount = ki.amount;
+    ringMemberOutput.target = KeyOutput();
+    for (size_t k = 0; k < ki.outputs.size(); ++k) {
+      Crypto::EllipticCurvePoint ringCommit{};
+      if (ki.outputs[k].isConfidential) {
+        ringCommit = ki.outputs[k].commitment;
+      } else {
+        if (!Crypto::transparent_amount_to_commitment(ringMemberOutput.amount, ringCommit)) {
+          throw std::runtime_error("Failed to compute CT ring commitment for input " + std::to_string(ctInputs.size()));
+        }
+      }
+      cti.ringCommitments.push_back(ringCommit);
+    }
+
+    // Real index in the ring
+    cti.realIndex = ki.realOutput.transactionIndex;
+
+    // Ephemeral spend key: derive from wallet keys + tx pubkey + output index
+    AccountKeys accountKeys = makeAccountKeys(*input.walletRecord);
+    KeyPair ephKeys;
+    Crypto::KeyImage dummyKeyImage;
+    CryptoNote::generate_key_image_helper(accountKeys,
+        ki.realOutput.transactionPublicKey,
+        ki.realOutput.outputInTransaction,
+        ephKeys, dummyKeyImage);
+    cti.spendPrivkey = ephKeys.secretKey;
+
+    cti.realBlinding = ki.realOutputBlinding;
+
+    if (cti.realIndex >= ki.outputs.size()) {
+      throw std::runtime_error("Invalid real input index in CT input");
+    }
+
+    cti.amount = ki.realOutputAmount;
+
+    // Store ephKeys back for caller
+    input.ephKeys = ephKeys;
+
+    ctInputs.push_back(std::move(cti));
+  }
+
+  // Convert ReceiverAmounts → CTBuildOutput (already decomposed into canonical denominations)
+  std::vector<CTBuildOutput> ctOutputs;
+  for (const auto& receiver : decomposedOutputs) {
+    for (uint64_t amount : receiver.amounts) {
+      ctOutputs.push_back(CTBuildOutput{receiver.receiver, amount});
+    }
+  }
+
+  auto tx = buildConfidentialTransaction(ctInputs, ctOutputs, m_viewSecretKey, fee, extra, txSecretKey);
+
+  m_logger(DEBUGGING) << "CT transaction created, hash " << getObjectHash(tx)
+    << ", inputs " << ctInputs.size()
+    << ", outputs " << ctOutputs.size()
+    << ", fee " << m_currency.formatAmount(fee)
+    << ", key " << Common::podToHex(txSecretKey);
+
+  return tx;
+}
+
 void WalletGreen::sendTransaction(const CryptoNote::Transaction& cryptoNoteTransaction) {
   std::error_code ec;
 
@@ -2431,19 +2633,29 @@ AccountKeys WalletGreen::makeAccountKeys(const WalletRecord& wallet) const {
 
 void WalletGreen::requestMixinOuts(
   const std::vector<OutputToTransfer>& selectedTransfers,
-  uint64_t mixIn,
+  const std::vector<uint64_t>& inputMixins,
   std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult) {
+
+  assert(selectedTransfers.size() == inputMixins.size());
 
   std::vector<uint64_t> amounts;
   for (const auto& out: selectedTransfers) {
-    amounts.push_back(out.out.amount);
+    amounts.push_back(out.out.type == TransactionTypes::OutputType::Confidential
+      ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+      : out.out.amount);
+  }
+
+  const uint64_t maxMixin = inputMixins.empty() ? 0 : *std::max_element(inputMixins.begin(), inputMixins.end());
+  if (maxMixin == 0) {
+    mixinResult.clear();
+    return;
   }
 
   std::error_code mixinError;
 
   throwIfStopped();
 
-  auto requestMixinCount = mixIn + 1; //+1 to allow to skip real output
+  auto requestMixinCount = maxMixin + 1; //+1 to allow to skip real output
 
   m_logger(DEBUGGING) << "Requesting random outputs";
   try {
@@ -2461,7 +2673,7 @@ void WalletGreen::requestMixinOuts(
     m_logger(ERROR, BRIGHT_RED) << "Failed to request random outputs: " << e.what();
   }
 
-  checkIfEnoughMixins(mixinResult, requestMixinCount);
+  checkIfEnoughMixins(mixinResult, inputMixins);
 
   if (mixinError) {
     m_logger(ERROR, BRIGHT_RED) << "Failed to get random outputs: " << mixinError << ", " << mixinError.message();
@@ -2476,41 +2688,102 @@ uint64_t WalletGreen::selectTransfers(
   bool dust,
   uint64_t dustThreshold,
   std::vector<WalletOuts>&& wallets,
-  std::vector<OutputToTransfer>& selectedTransfers) {
+  std::vector<OutputToTransfer>& selectedTransfers,
+  bool includeNonCanonical) {
 
   uint64_t foundMoney = 0;
 
-  typedef std::pair<WalletRecord*, TransactionOutputInformation> OutputData;
-  std::vector<OutputData> dustOutputs;
-  std::vector<OutputData> walletOuts;
+  struct OutputData {
+    WalletRecord* wallet = nullptr;
+    TransactionOutputInformation output;
+    uint64_t spendAmount = 0;
+  };
+
+  std::vector<OutputData> outputs;
+  std::vector<size_t> dustOutputs;
+  std::vector<size_t> walletOuts;
+  std::vector<size_t> nonCanonicalOutputs;
   for (auto walletIt = wallets.begin(); walletIt != wallets.end(); ++walletIt) {
     for (auto outIt = walletIt->outs.begin(); outIt != walletIt->outs.end(); ++outIt) {
-      if (outIt->amount > dustThreshold) {
-        walletOuts.emplace_back(std::piecewise_construct, std::forward_as_tuple(walletIt->wallet), std::forward_as_tuple(*outIt));
+      uint64_t spendAmount = outIt->amount;
+
+      OutputData data;
+      data.wallet = walletIt->wallet;
+      data.output = *outIt;
+      data.spendAmount = spendAmount;
+
+      outputs.emplace_back(std::move(data));
+      const size_t outputIndex = outputs.size() - 1;
+
+      if (isTransparentNonCanonicalCtAmount(outputs[outputIndex].output)) {
+        nonCanonicalOutputs.push_back(outputIndex);
+        if (includeNonCanonical) {
+          continue;
+        }
+      }
+
+      if (spendAmount > dustThreshold) {
+        walletOuts.push_back(outputIndex);
       } else if (dust) {
-        dustOutputs.emplace_back(std::piecewise_construct, std::forward_as_tuple(walletIt->wallet), std::forward_as_tuple(*outIt));
+        dustOutputs.push_back(outputIndex);
       }
     }
   }
 
+  std::vector<uint8_t> used(outputs.size(), 0);
+  auto selectOutput = [&](size_t outputIndex) {
+    if (used[outputIndex]) {
+      return false;
+    }
+    auto& out = outputs[outputIndex];
+    used[outputIndex] = 1;
+    foundMoney += out.spendAmount;
+    selectedTransfers.emplace_back(OutputToTransfer{ std::move(out.output), out.wallet });
+    return true;
+  };
+
+  // Phase 1: prefer canonical / mixable inputs.
   ShuffleGenerator<size_t> indexGenerator(walletOuts.size());
-  while (foundMoney < neededMoney && !indexGenerator.empty()) {
-    auto& out = walletOuts[indexGenerator()];
-    foundMoney += out.second.amount;
-    selectedTransfers.emplace_back(OutputToTransfer{ std::move(out.second), std::move(out.first) });
+  while (foundMoney < neededMoney &&
+         selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS &&
+         !indexGenerator.empty()) {
+    selectOutput(walletOuts[indexGenerator()]);
   }
 
-  if (dust && !dustOutputs.empty()) {
+  if (dust && !dustOutputs.empty() &&
+      selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS) {
     ShuffleGenerator<size_t> dustIndexGenerator(dustOutputs.size());
     do {
-      auto& out = dustOutputs[dustIndexGenerator()];
-      foundMoney += out.second.amount;
-      selectedTransfers.emplace_back(OutputToTransfer{ std::move(out.second), std::move(out.first) });
-    } while (foundMoney < neededMoney && !dustIndexGenerator.empty());
+      selectOutput(dustOutputs[dustIndexGenerator()]);
+    } while (foundMoney < neededMoney &&
+             selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS &&
+             !dustIndexGenerator.empty());
+  }
+
+  // Phase 2: if a shortfall remains, fall back to non-canonical inputs (sub-floor
+  // residue, V5+ coinbase whose single output is not a multiple of MIN_CT_DENOMINATION,
+  // etc.). The CT path absorbs the residue into the fee. Bounded only by CT_MAX_INPUTS.
+  //
+  // Sort descending by spendable amount and pick largest-first instead of random:
+  // a wallet with a mix of large V5+ coinbase outputs (~tens of KRB each) and many
+  // tiny sub-floor pieces (sub-cent) would otherwise random-walk through the dust
+  // and exhaust CT_MAX_INPUTS long before covering the spend.
+  if (includeNonCanonical && foundMoney < neededMoney && !nonCanonicalOutputs.empty()) {
+    std::sort(nonCanonicalOutputs.begin(), nonCanonicalOutputs.end(),
+              [&outputs](size_t a, size_t b) {
+                return outputs[a].spendAmount > outputs[b].spendAmount;
+              });
+    for (size_t idx : nonCanonicalOutputs) {
+      if (foundMoney >= neededMoney ||
+          selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
+        break;
+      }
+      selectOutput(idx);
+    }
   }
 
   return foundMoney;
-};
+}
 
 std::vector<WalletGreen::WalletOuts> WalletGreen::pickWalletsWithMoney() const {
   auto& walletsIndex = m_walletsContainer.get<RandomAccessIndex>();
@@ -2524,7 +2797,7 @@ std::vector<WalletGreen::WalletOuts> WalletGreen::pickWalletsWithMoney() const {
     ITransfersContainer* container = wallet.container;
 
     WalletOuts outs;
-    container->getOutputs(outs.outs, ITransfersContainer::IncludeKeyUnlocked);
+    container->getOutputs(outs.outs, ITransfersContainer::IncludeDefault);
     outs.wallet = const_cast<WalletRecord *>(&wallet);
 
     walletOuts.push_back(std::move(outs));
@@ -2538,7 +2811,7 @@ WalletGreen::WalletOuts WalletGreen::pickWallet(const std::string& address) cons
 
   ITransfersContainer* container = wallet.container;
   WalletOuts outs;
-  container->getOutputs(outs.outs, ITransfersContainer::IncludeKeyUnlocked);
+  container->getOutputs(outs.outs, ITransfersContainer::IncludeDefault);
   outs.wallet = const_cast<WalletRecord *>(&wallet);
 
   return outs;
@@ -2586,17 +2859,30 @@ CryptoNote::WalletGreen::ReceiverAmounts WalletGreen::splitAmount(
 void WalletGreen::prepareInputs(
   const std::vector<OutputToTransfer>& selectedTransfers,
   std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult,
-  uint64_t mixIn,
+  const std::vector<uint64_t>& inputMixins,
   std::vector<InputInfo>& keysInfo) {
 
   typedef CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry out_entry;
 
+  assert(inputMixins.size() == selectedTransfers.size());
+
   size_t i = 0;
   for (const auto& input: selectedTransfers) {
     TransactionTypes::InputKeyInfo keyInfo;
-    keyInfo.amount = input.out.amount;
+    const uint64_t inputMixin = inputMixins[i];
+    const bool realIsConfidential = input.out.type == TransactionTypes::OutputType::Confidential;
+    keyInfo.amount = realIsConfidential
+      ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+      : input.out.amount;
 
-    if(mixinResult.size()) {
+    TransactionInformation txInfo;
+    bool haveTxInfo = input.wallet != nullptr &&
+      input.wallet->container != nullptr &&
+      input.wallet->container->getTransactionInformation(input.out.transactionHash, txInfo);
+    const bool realIsCoinbase = haveTxInfo && txInfo.totalAmountIn == 0;
+    const uint32_t realBlockHeight = haveTxInfo ? txInfo.blockHeight : 0;
+
+    if(inputMixin != 0 && mixinResult.size()) {
       std::sort(mixinResult[i].outs.begin(), mixinResult[i].outs.end(),
         [] (const out_entry& a, const out_entry& b) { return a.global_amount_index < b.global_amount_index; });
       for (auto& fakeOut: mixinResult[i].outs) {
@@ -2608,8 +2894,12 @@ void WalletGreen::prepareInputs(
         TransactionTypes::GlobalOutput globalOutput;
         globalOutput.outputIndex = static_cast<uint32_t>(fakeOut.global_amount_index);
         globalOutput.targetKey = reinterpret_cast<PublicKey&>(fakeOut.out_key);
+        globalOutput.commitment = fakeOut.commitment;
+        globalOutput.blockHeight = fakeOut.block_height;
+        globalOutput.isCoinbase = fakeOut.is_coinbase != 0;
+        globalOutput.isConfidential = fakeOut.output_type == static_cast<uint8_t>(TransactionTypes::OutputType::Confidential);
         keyInfo.outputs.push_back(std::move(globalOutput));
-        if(keyInfo.outputs.size() >= mixIn)
+        if(keyInfo.outputs.size() >= inputMixin)
           break;
       }
     }
@@ -2622,12 +2912,27 @@ void WalletGreen::prepareInputs(
     TransactionTypes::GlobalOutput realOutput;
     realOutput.outputIndex = input.out.globalOutputIndex;
     realOutput.targetKey = reinterpret_cast<const PublicKey&>(input.out.outputKey);
+    realOutput.commitment = input.out.commitment;
+    realOutput.blockHeight = realBlockHeight;
+    realOutput.isCoinbase = realIsCoinbase;
+    realOutput.isConfidential = realIsConfidential;
 
     auto insertedIn = keyInfo.outputs.insert(insertIn, realOutput);
 
     keyInfo.realOutput.transactionPublicKey = reinterpret_cast<const PublicKey&>(input.out.transactionPublicKey);
     keyInfo.realOutput.transactionIndex = static_cast<size_t>(insertedIn - keyInfo.outputs.begin());
     keyInfo.realOutput.outputInTransaction = input.out.outputInTransaction;
+    if (realIsConfidential) {
+      keyInfo.realOutputAmount = input.out.amount;
+      keyInfo.realOutputBlinding = input.out.blindingFactor;
+    } else {
+      TransactionOutput transparentOutput;
+      transparentOutput.amount = input.out.amount;
+      transparentOutput.target = KeyOutput();
+      keyInfo.realOutputAmount = transparentOutput.amount;
+      std::memset(&keyInfo.realOutputBlinding, 0, sizeof(keyInfo.realOutputBlinding));
+    }
+    keyInfo.realOutputIsConfidential = realIsConfidential;
 
     //Important! outputs in selectedTransfers and in keysInfo must have the same order!
     InputInfo inputInfo;

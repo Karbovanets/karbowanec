@@ -18,6 +18,7 @@
 // along with Karbo.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "Currency.h"
+#include "Denominations.h"
 #include <cctype>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/math/special_functions/round.hpp>
@@ -153,10 +154,16 @@ namespace CryptoNote {
     }
   }
 
-  uint64_t Currency::calculateReward(uint64_t alreadyGeneratedCoins) const {
+  uint64_t Currency::effectiveMoneySupply(uint32_t /*height*/) const {
+    return m_moneySupply;
+  }
+
+  uint64_t Currency::calculateReward(uint64_t alreadyGeneratedCoins, uint32_t height) const {
     assert(m_emissionSpeedFactor > 0 && m_emissionSpeedFactor <= 8 * sizeof(uint64_t));
+    uint64_t supply = effectiveMoneySupply(height);
+    uint64_t tailReward = CryptoNote::parameters::TAIL_EMISSION_REWARD;
     // Initial exponential emission curve with fallback to flat rate tail emission
-    uint64_t baseRewardInitial = alreadyGeneratedCoins < m_moneySupply ? (m_moneySupply - alreadyGeneratedCoins) >> m_emissionSpeedFactor : CryptoNote::parameters::TAIL_EMISSION_REWARD;
+    uint64_t baseRewardInitial = alreadyGeneratedCoins < supply ? (supply - alreadyGeneratedCoins) >> m_emissionSpeedFactor : tailReward;
     // Friedman's k-percent rule, inflation 2% of total coins in circulation p.a.
     const uint64_t blocksInOneYear = expectedNumberOfBlocksPerDay() * 365;
     assert(blocksInOneYear > 0);
@@ -167,9 +174,9 @@ namespace CryptoNote {
   }
 
   bool Currency::getBlockReward(uint8_t blockMajorVersion, size_t medianSize, size_t currentBlockSize, uint64_t alreadyGeneratedCoins,
-    uint64_t fee, uint64_t& reward, int64_t& emissionChange) const {
+    uint64_t fee, uint64_t& reward, int64_t& emissionChange, uint32_t height) const {
 
-    uint64_t baseReward = calculateReward(alreadyGeneratedCoins);
+    uint64_t baseReward = calculateReward(alreadyGeneratedCoins, height);
 
     size_t blockGrantedFullRewardZone = blockGrantedFullRewardZoneByBlockVersion(blockMajorVersion);
     medianSize = std::max(medianSize, blockGrantedFullRewardZone);
@@ -218,7 +225,7 @@ namespace CryptoNote {
 
     uint64_t blockReward;
     int64_t emissionChange;
-    if (!getBlockReward(blockMajorVersion, medianSize, currentBlockSize, alreadyGeneratedCoins, fee, blockReward, emissionChange)) {
+    if (!getBlockReward(blockMajorVersion, medianSize, currentBlockSize, alreadyGeneratedCoins, fee, blockReward, emissionChange, height)) {
       logger(INFO) << "Block is too big";
       return false;
     }
@@ -280,6 +287,10 @@ namespace CryptoNote {
   }
 
   bool Currency::isFusionTransaction(const std::vector<uint64_t>& inputsAmounts, const std::vector<uint64_t>& outputsAmounts, size_t size, uint32_t height) const {
+    if (isConfidentialTransactionsActivated(height)) {
+      return false;
+    }
+
     if (height <= CryptoNote::parameters::UPGRADE_HEIGHT_V3 ? size > CryptoNote::parameters::CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE_CURRENT * 30 / 100 : size > fusionTxMaxSize()) {
       logger(ERROR) << "Fusion transaction verification failed: size exceeded max allowed size.";
       return false;
@@ -320,6 +331,10 @@ namespace CryptoNote {
   }
 
   bool Currency::isFusionTransaction(const Transaction& transaction, size_t size, uint32_t height) const {
+    if (isConfidentialTransactionsActivated(height)) {
+      return false;
+    }
+
     assert(getObjectBinarySize(transaction) == size);
 
     std::vector<uint64_t> outputsAmounts;
@@ -388,11 +403,33 @@ namespace CryptoNote {
     return Common::Format::formatAmount(amount);
   }
 
+  std::string Currency::formatAmount(uint64_t amount, uint32_t /*height*/) const {
+    return Common::Format::formatAmount(amount);
+  }
+
+  std::string Currency::formatAmount(int64_t amount, uint32_t height) const {
+    if (amount < 0) {
+      return "-" + formatAmount(static_cast<uint64_t>(-amount), height);
+    }
+    return formatAmount(static_cast<uint64_t>(amount), height);
+  }
+
   bool Currency::parseAmount(const std::string& str, uint64_t& amount) const {
     return Common::Format::parseAmount(str, amount);
   }
 
+  bool Currency::parseAmount(const std::string& str, uint64_t& amount, uint32_t /*height*/) const {
+    return parseAmount(str, amount);
+  }
+
+  bool Currency::isDustOutput(uint64_t amount) {
+    return amount < CryptoNote::MIN_CT_DENOMINATION;
+  }
+
   uint64_t Currency::getMinimalFee(const uint32_t height) const {
+    if (isConfidentialTransactionsActivated(height))
+      return CryptoNote::parameters::CT_MINIMUM_FEE;
+
     if (height <= CryptoNote::parameters::UPGRADE_HEIGHT_V3_1)
       return CryptoNote::parameters::MINIMUM_FEE_V1;
     else if (height > CryptoNote::parameters::UPGRADE_HEIGHT_V3_1 && height <= CryptoNote::parameters::UPGRADE_HEIGHT_V4)

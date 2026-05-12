@@ -193,6 +193,10 @@ struct COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS_request {
 struct COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS_out_entry {
   uint64_t global_amount_index;
   Crypto::PublicKey out_key;
+  Crypto::EllipticCurvePoint commitment;
+  uint32_t block_height;
+  uint8_t is_coinbase;
+  uint8_t output_type;
 };
 #pragma pack(pop)
 
@@ -200,6 +204,10 @@ struct COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS_out_entry_json : public COMMAN
   void serialize(ISerializer & s) {
     s(global_amount_index, "global_index");
     s(out_key, "public_key");
+    s(commitment, "commitment");
+    s(block_height, "block_height");
+    s(is_coinbase, "is_coinbase");
+    s(output_type, "output_type");
   }
 };
 
@@ -658,12 +666,17 @@ struct transaction_short_response {
   uint64_t fee;
   uint64_t amount_out;
   uint64_t size;
+  // Transaction version - 1 (or 0 for genesis) is transparent, 2 is CT.
+  // Lets clients distinguish hidden-amount transactions in list views without
+  // a follow-up gettransaction call or a heuristic over fee/amount.
+  uint8_t version;
 
   void serialize(ISerializer &s) {
     KV_MEMBER(hash)
     KV_MEMBER(fee)
     KV_MEMBER(amount_out)
     KV_MEMBER(size)
+    KV_MEMBER(version)
   }
 };
 
@@ -673,6 +686,7 @@ struct transaction_pool_response {
   uint64_t amount_out;
   uint64_t size;
   uint64_t receive_time;
+  uint8_t version;
 
   void serialize(ISerializer &s) {
     KV_MEMBER(hash)
@@ -680,6 +694,7 @@ struct transaction_pool_response {
     KV_MEMBER(amount_out)
     KV_MEMBER(size)
     KV_MEMBER(receive_time)
+    KV_MEMBER(version)
   }
 };
 

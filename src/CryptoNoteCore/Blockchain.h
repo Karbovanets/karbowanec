@@ -68,8 +68,10 @@ namespace CryptoNote {
     bool flushBatch();
 
     // ITransactionValidator
-    virtual bool checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock) override;
-    virtual bool checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock, BlockInfo& lastFailed) override;
+    virtual bool checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock,
+                                        TxValidationContext context) override;
+    virtual bool checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock,
+                                        BlockInfo& lastFailed, TxValidationContext context) override;
     virtual bool haveSpentKeyImages(const CryptoNote::Transaction& tx) override;
     virtual bool checkTransactionSize(size_t blobSize) override;
 
@@ -122,7 +124,8 @@ namespace CryptoNote {
     bool getBackwardBlocksSize(size_t from_height, std::vector<size_t>& sz, size_t count);
     bool getTransactionOutputGlobalIndexes(const Crypto::Hash& tx_id, std::vector<uint32_t>& indexs);
     bool checkTransactionInputs(const Transaction& tx, uint32_t& pmax_used_block_height,
-                                 Crypto::Hash& max_used_block_id, BlockInfo* tail = 0);
+                                 Crypto::Hash& max_used_block_id, TxValidationContext context,
+                                 BlockInfo* tail = 0);
     uint64_t getCurrentCumulativeBlocksizeLimit();
     uint64_t blockDifficulty(size_t i);
     uint64_t blockCumulativeDifficulty(size_t i);
@@ -156,6 +159,11 @@ namespace CryptoNote {
     template<class visitor_t>
     bool scanOutputKeysForIndexes(const KeyInput& tx_in_to_key, visitor_t& vis,
                                    uint32_t* pmax_related_block_height = nullptr);
+
+    // Resolve a CT input ring to (txHash, outputIndex) pairs for explorer / detail rendering.
+    // Returns false if any ring offset can't be resolved.
+    bool scanCtInputRingForIndexes(const ConfidentialInput& cin,
+                                    std::list<std::pair<Crypto::Hash, size_t>>& outputReferences);
 
     bool addMessageQueue(MessageQueue<BlockchainMessage>& messageQueue);
     bool removeMessageQueue(MessageQueue<BlockchainMessage>& messageQueue);
@@ -382,7 +390,24 @@ namespace CryptoNote {
                          uint32_t* pmax_related_block_height = nullptr);
     bool checkTransactionInputs(const Transaction& tx, const Crypto::Hash& tx_prefix_hash,
                                  uint32_t* pmax_used_block_height = nullptr);
-    bool checkTransactionInputs(const Transaction& tx, uint32_t* pmax_used_block_height = nullptr);
+    bool checkTransactionInputs(const Transaction& tx,
+                                 TxValidationContext context,
+                                 uint32_t* pmax_used_block_height = nullptr);
+
+    // Confidential transaction validation pipeline (spec Section 15).
+    // Executes all 10 checks in order; returns false on first failure.
+    bool checkConfidentialTransaction(const Transaction& tx, const Crypto::Hash& txHash,
+                                      uint32_t* pmax_used_block_height);
+    // Cheap structural-only CT checks used for transactions arriving inside a
+    // confirmed checkpointed block. Validates sizes, point parseability /
+    // subgroup membership, key-image domain, and global double-spend; skips
+    // MLSAG, GK proofs, balance kernel and DB ring resolution.
+    bool checkConfidentialTransactionStructure(const Transaction& tx, const Crypto::Hash& txHash);
+
+    // Confidential transaction validation pipeline (spec Section 15).
+    // Executes all 10 checks in order; returns false on first failure.
+    bool checkConfidentialTransaction(const Transaction& tx, const Crypto::Hash& txHash,
+                                      uint32_t* pmax_used_block_height);
 
     // Returns by value (deserialized from tx_entries)
     TransactionEntry transactionByIndex(TransactionIndex index);

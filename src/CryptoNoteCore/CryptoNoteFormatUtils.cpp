@@ -89,6 +89,11 @@ uint64_t power_integral(uint64_t a, uint64_t b) {
 }
 
 bool get_tx_fee(const Transaction& tx, uint64_t & fee) {
+  if (tx.version == TRANSACTION_VERSION_CT) {
+    fee = tx.fee;
+    return true;
+  }
+
   uint64_t amount_in = 0;
   uint64_t amount_out = 0;
 
@@ -145,8 +150,14 @@ uint32_t get_block_height(const Block& b) {
 
 bool check_inputs_types_supported(const TransactionPrefix& tx) {
   for (const auto& in : tx.inputs) {
-    if (in.type() != typeid(KeyInput)) {
-      return false;
+    if (tx.version == TRANSACTION_VERSION_CT) {
+      if (in.type() != typeid(ConfidentialInput)) {
+        return false;
+      }
+    } else {
+      if (in.type() != typeid(KeyInput)) {
+        return false;
+      }
     }
   }
 
@@ -154,10 +165,31 @@ bool check_inputs_types_supported(const TransactionPrefix& tx) {
 }
 
 bool check_outs_valid(const TransactionPrefix& tx, std::string* error) {
+  if (tx.version == TRANSACTION_VERSION_CT) {
+    // CT transaction: outputs must be ConfidentialOutput
+    for (const TransactionOutput& out : tx.outputs) {
+      if (out.target.type() != typeid(ConfidentialOutput)) {
+        if (error) {
+          *error = "CT transaction output must be ConfidentialOutput";
+        }
+        return false;
+      }
+      // Amount field must be 0 for CT outputs (amounts are hidden in commitments)
+      if (out.amount != 0) {
+        if (error) {
+          *error = "CT output must have zero amount field";
+        }
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Transparent transaction: outputs must be KeyOutput
   std::unordered_set<PublicKey> keys_seen;
   for (const TransactionOutput& out : tx.outputs) {
     if (out.target.type() == typeid(KeyOutput)) {
- 
+
       if (out.amount == 0) {
         if (error) {
           *error = "Zero amount ouput";
@@ -191,10 +223,16 @@ bool check_outs_valid(const TransactionPrefix& tx, std::string* error) {
 }
 
 bool check_money_overflow(const TransactionPrefix &tx) {
+  // CT transactions don't use transparent amounts; balance is checked cryptographically
+  if (tx.version == TRANSACTION_VERSION_CT)
+    return true;
   return check_inputs_overflow(tx) && check_outs_overflow(tx);
 }
 
 bool check_inputs_overflow(const TransactionPrefix &tx) {
+  if (tx.version == TRANSACTION_VERSION_CT)
+    return true;
+
   uint64_t money = 0;
 
   for (const auto &in : tx.inputs) {
@@ -213,6 +251,9 @@ bool check_inputs_overflow(const TransactionPrefix &tx) {
 }
 
 bool check_outs_overflow(const TransactionPrefix& tx) {
+  if (tx.version == TRANSACTION_VERSION_CT)
+    return true;
+
   uint64_t money = 0;
   for (const auto& o : tx.outputs) {
     if (money > o.amount + money)
@@ -269,7 +310,11 @@ bool lookup_acc_outs(const AccountKeys& acc, const Transaction& tx, const Public
   generate_key_derivation(tx_pub_key, acc.viewSecretKey, derivation);
 
   for (const TransactionOutput& o : tx.outputs) {
-    assert(o.target.type() == typeid(KeyOutput));
+    if (o.target.type() != typeid(KeyOutput)) {
+      // Skip non-KeyOutput types (e.g. ConfidentialOutput in CT transactions)
+      ++outputIndex;
+      continue;
+    }
     if (o.target.type() == typeid(KeyOutput)) {
       if (is_out_to_acc(acc, boost::get<KeyOutput>(o.target), derivation, keyIndex)) {
         outs.push_back(outputIndex);

@@ -98,7 +98,18 @@ struct KeyInputDetails {
   std::vector<TransactionOutputReferenceDetails> outputs;
 };
 
-typedef boost::variant<BaseInputDetails, KeyInputDetails> transactionInputDetails2;
+// Confidential (CT) input detail: amount is hidden, but the ring layout,
+// pseudo-commitment and key image are public and useful for explorers.
+struct ConfidentialInputDetails {
+  uint64_t ringAmount;
+  Crypto::KeyImage keyImage;
+  Crypto::EllipticCurvePoint pseudoCommitment;
+  uint64_t mixin;
+  std::vector<uint32_t> ringOutputIndexes;
+  std::vector<TransactionOutputReferenceDetails> outputs;
+};
+
+typedef boost::variant<BaseInputDetails, KeyInputDetails, ConfidentialInputDetails> transactionInputDetails2;
 
 struct TransactionExtraDetails2 {
   std::vector<size_t> padding;
@@ -114,7 +125,8 @@ struct TransactionDetails {
   uint64_t fee = 0;
   uint64_t totalInputsAmount = 0;
   uint64_t totalOutputsAmount = 0;
-  uint64_t mixin = 0;
+  uint64_t mixin = 0;     // max ring size across inputs (legacy field)
+  uint64_t minMixin = 0;  // min ring size across inputs; differs from mixin when tx mixes ring-1 coinbase shielding inputs with normal CT inputs
   uint64_t unlockTime = 0;
   uint64_t timestamp = 0;
   uint8_t version = 0;
@@ -127,6 +139,11 @@ struct TransactionDetails {
   std::vector<std::vector<Crypto::Signature>> signatures;
   std::vector<transactionInputDetails2> inputs;
   std::vector<transactionOutputDetails2> outputs;
+
+  // CT (v4) proof body. Empty / value-initialized for non-CT transactions.
+  std::vector<CTInputSignature> ctSignatures; // per-input MLSAG
+  std::vector<CTOutputProof>    ctProofs;     // per-output GK denomination membership
+  TransactionKernel             kernel;       // balance-equation excess + Schnorr
 };
 
 struct BlockDetails {

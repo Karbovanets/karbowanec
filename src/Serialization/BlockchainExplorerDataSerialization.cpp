@@ -23,19 +23,21 @@
 #include <boost/variant/static_visitor.hpp>
 #include <boost/variant/apply_visitor.hpp>
 
+#include "CryptoNoteConfig.h"
 #include "CryptoNoteCore/CryptoNoteSerialization.h"
 
 #include "Serialization/SerializationOverloads.h"
 
 namespace CryptoNote {
 
-enum class SerializationTag : uint8_t { Base = 0xff, Key = 0x2, Transaction = 0xcc, Block = 0xbb };
+enum class SerializationTag : uint8_t { Base = 0xff, Key = 0x2, Confidential = 0x4, Transaction = 0xcc, Block = 0xbb };
 
 namespace {
 
 struct BinaryVariantTagGetter: boost::static_visitor<uint8_t> {
   uint8_t operator()(const CryptoNote::BaseInputDetails) { return static_cast<uint8_t>(SerializationTag::Base); }
   uint8_t operator()(const CryptoNote::KeyInputDetails) { return static_cast<uint8_t>(SerializationTag::Key); }
+  uint8_t operator()(const CryptoNote::ConfidentialInputDetails) { return static_cast<uint8_t>(SerializationTag::Confidential); }
 };
 
 struct VariantSerializer : boost::static_visitor<> {
@@ -48,8 +50,8 @@ struct VariantSerializer : boost::static_visitor<> {
   const std::string name;
 };
 
-void getVariantValue(CryptoNote::ISerializer& serializer, uint8_t tag, boost::variant<CryptoNote::BaseInputDetails,
-                                                                                      CryptoNote::KeyInputDetails> in) {
+void getVariantValue(CryptoNote::ISerializer& serializer, uint8_t tag,
+                     CryptoNote::transactionInputDetails2& in) {
   switch (static_cast<SerializationTag>(tag)) {
   case SerializationTag::Base: {
     CryptoNote::BaseInputDetails v;
@@ -59,6 +61,12 @@ void getVariantValue(CryptoNote::ISerializer& serializer, uint8_t tag, boost::va
   }
   case SerializationTag::Key: {
     CryptoNote::KeyInputDetails v;
+    serializer(v, "data");
+    in = v;
+    break;
+  }
+  case SerializationTag::Confidential: {
+    CryptoNote::ConfidentialInputDetails v;
     serializer(v, "data");
     in = v;
     break;
@@ -98,6 +106,15 @@ void serialize(KeyInputDetails& inputToKey, ISerializer& serializer) {
   serializer(inputToKey.outputs, "outputs");
 }
 
+void serialize(ConfidentialInputDetails& ctIn, ISerializer& serializer) {
+  serializer(ctIn.ringAmount, "ringAmount");
+  serializePod(ctIn.keyImage, "keyImage", serializer);
+  serializePod(ctIn.pseudoCommitment, "pseudoCommitment", serializer);
+  serializer(ctIn.mixin, "mixin");
+  serializer(ctIn.ringOutputIndexes, "ringOutputIndexes");
+  serializer(ctIn.outputs, "outputs");
+}
+
 void serialize(transactionInputDetails2& input, ISerializer& serializer) {
   if (serializer.type() == ISerializer::OUTPUT) {
     BinaryVariantTagGetter tagGetter;
@@ -134,6 +151,7 @@ void serialize(TransactionDetails& transaction, ISerializer& serializer) {
   serializer(transaction.totalInputsAmount, "totalInputsAmount");
   serializer(transaction.totalOutputsAmount, "totalOutputsAmount");
   serializer(transaction.mixin, "mixin");
+  serializer(transaction.minMixin, "minMixin");
   serializer(transaction.unlockTime, "unlockTime");
   serializer(transaction.timestamp, "timestamp");
   serializer(transaction.version, "version");
@@ -170,6 +188,15 @@ void serialize(TransactionDetails& transaction, ISerializer& serializer) {
     for (const auto& signatureWithIndex : signaturesForSerialization) {
       transaction.signatures[signatureWithIndex.first].push_back(signatureWithIndex.second);
     }
+  }
+
+  // CT (v4) proof body. Serialized only when transaction is CT — the vectors and
+  // kernel are value-initialized to empty/zero for non-CT, but emitting them
+  // unconditionally would clutter every transparent-tx response and waste bytes.
+  if (transaction.version == TRANSACTION_VERSION_CT) {
+    serializer(transaction.ctSignatures, "ctSignatures");
+    serializer(transaction.ctProofs, "ctProofs");
+    serializer(transaction.kernel, "kernel");
   }
 }
 

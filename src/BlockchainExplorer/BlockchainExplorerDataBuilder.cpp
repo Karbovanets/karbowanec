@@ -36,14 +36,31 @@ protocol(protocol) {
 }
 
 bool BlockchainExplorerDataBuilder::getMixin(const Transaction& transaction, uint64_t& mixin) {
-  mixin = 0;
+  uint64_t minMixin = 0;
+  return getMixinRange(transaction, minMixin, mixin);
+}
+
+bool BlockchainExplorerDataBuilder::getMixinRange(const Transaction& transaction,
+                                                   uint64_t& minMixin,
+                                                   uint64_t& maxMixin) {
+  minMixin = 0;
+  maxMixin = 0;
+  bool first = true;
   for (const TransactionInput& txin : transaction.inputs) {
-    if (txin.type() != typeid(KeyInput)) {
+    uint64_t currentMixin = 0;
+    if (txin.type() == typeid(KeyInput)) {
+      currentMixin = boost::get<KeyInput>(txin).outputIndexes.size();
+    } else if (txin.type() == typeid(ConfidentialInput)) {
+      currentMixin = boost::get<ConfidentialInput>(txin).ringPubkeys.size();
+    } else {
       continue;
     }
-    uint64_t currentMixin = boost::get<KeyInput>(txin).outputIndexes.size();
-    if (currentMixin > mixin) {
-      mixin = currentMixin;
+    if (first) {
+      minMixin = maxMixin = currentMixin;
+      first = false;
+    } else {
+      if (currentMixin > maxMixin) maxMixin = currentMixin;
+      if (currentMixin < minMixin) minMixin = currentMixin;
     }
   }
   return true;
@@ -168,11 +185,11 @@ bool BlockchainExplorerDataBuilder::fillBlockDetails(const Block &block, BlockDe
   uint64_t maxReward = 0;
   uint64_t currentReward = 0;
   int64_t emissionChange = 0;
-  if (!m_core.getBlockReward(block.majorVersion, blockDetails.sizeMedian, 0, prevBlockGeneratedCoins, 0, maxReward, emissionChange)) {
+  if (!m_core.getBlockReward(block.majorVersion, blockDetails.sizeMedian, 0, prevBlockGeneratedCoins, 0, maxReward, emissionChange, blockDetails.height)) {
     return false;
   }
 
-  if (!m_core.getBlockReward(block.majorVersion, blockDetails.sizeMedian, blockDetails.transactionsCumulativeSize, prevBlockGeneratedCoins, 0, currentReward, emissionChange)) {
+  if (!m_core.getBlockReward(block.majorVersion, blockDetails.sizeMedian, blockDetails.transactionsCumulativeSize, prevBlockGeneratedCoins, 0, currentReward, emissionChange, blockDetails.height)) {
     return false;
   }
 
@@ -244,6 +261,10 @@ bool BlockchainExplorerDataBuilder::fillTransactionDetails(const Transaction& tr
   }
   transactionDetails.size = getObjectBinarySize(transaction);
   transactionDetails.unlockTime = transaction.unlockTime;
+
+  // For CT transactions amounts are hidden; these helpers correctly return 0 for CT
+  // (CT inputs/outputs aren't typed as KeyInput / transparent KeyOutput here), which is
+  // the right "public total" to expose.
   transactionDetails.totalOutputsAmount = get_outs_money_amount(transaction);
 
   uint64_t inputsAmount;
@@ -256,17 +277,23 @@ bool BlockchainExplorerDataBuilder::fillTransactionDetails(const Transaction& tr
     //It's gen transaction
     transactionDetails.fee = 0;
     transactionDetails.mixin = 0;
+    transactionDetails.minMixin = 0;
   } else {
     uint64_t fee;
     if (!get_tx_fee(transaction, fee)) {
       return false;
     }
     transactionDetails.fee = fee;
-    uint64_t mixin;
-    if (!m_core.getMixin(transaction, mixin)) {
+    // Per-input mixin: a tx may mix ring sizes (e.g. CT shielding ring-1 coinbase
+    // inputs alongside ring-4+ normal CT inputs). Report both bounds so consumers
+    // can detect heterogeneity rather than seeing the legacy max-only field.
+    uint64_t minMixin = 0;
+    uint64_t maxMixin = 0;
+    if (!getMixinRange(transaction, minMixin, maxMixin)) {
       return false;
     }
-    transactionDetails.mixin = mixin;
+    transactionDetails.mixin = maxMixin;
+    transactionDetails.minMixin = minMixin;
   }
   Crypto::Hash paymentId;
   if (getPaymentId(transaction, paymentId)) {
@@ -293,6 +320,8 @@ bool BlockchainExplorerDataBuilder::fillTransactionDetails(const Transaction& tr
     if (txIn.type() == typeid(BaseInput)) {
       BaseInputDetails txInGenDetails;
       txInGenDetails.input.blockIndex = boost::get<BaseInput>(txIn).blockIndex;
+      // For CT-era coinbase, output amounts are still public (coinbase stays transparent),
+      // so summing output.amount is correct here.
       txInGenDetails.amount = 0;
       for (const TransactionOutput& out : transaction.outputs) {
         txInGenDetails.amount += out.amount;
@@ -301,7 +330,7 @@ bool BlockchainExplorerDataBuilder::fillTransactionDetails(const Transaction& tr
     } else if (txIn.type() == typeid(KeyInput)) {
       CryptoNote::KeyInputDetails txInToKeyDetails;
       const KeyInput& txInToKey = boost::get<KeyInput>(txIn);
-      txInToKeyDetails.input = txInToKey; 
+      txInToKeyDetails.input = txInToKey;
       std::list<std::pair<Crypto::Hash, size_t>> outputReferences;
       if (!m_core.scanOutputkeysForIndices(txInToKey, outputReferences)) {
         return false;
@@ -314,6 +343,27 @@ bool BlockchainExplorerDataBuilder::fillTransactionDetails(const Transaction& tr
         txInToKeyDetails.outputs.push_back(d);
       }
       txInDetails = txInToKeyDetails;
+    } else if (txIn.type() == typeid(ConfidentialInput)) {
+      const ConfidentialInput& cin = boost::get<ConfidentialInput>(txIn);
+      CryptoNote::ConfidentialInputDetails ctInDetails;
+      ctInDetails.ringAmount = cin.ringAmount;
+      ctInDetails.keyImage = cin.keyImage;
+      ctInDetails.pseudoCommitment = cin.pseudoCommitment;
+      ctInDetails.mixin = cin.ringPubkeys.size();
+      ctInDetails.ringOutputIndexes = cin.ringOutputIndexes;
+      std::list<std::pair<Crypto::Hash, size_t>> outputReferences;
+      if (m_core.scanCtInputRingForIndices(cin, outputReferences)) {
+        for (const auto& r : outputReferences) {
+          TransactionOutputReferenceDetails d;
+          d.number = r.second;
+          d.transactionHash = r.first;
+          ctInDetails.outputs.push_back(d);
+        }
+      }
+      // If ring resolution fails (e.g. mempool tx referencing something the explorer
+      // can't introspect right now), keep the basic CT details rather than dropping
+      // the whole transaction from explorer view.
+      txInDetails = ctInDetails;
     } else {
       return false;
     }
@@ -337,6 +387,14 @@ bool BlockchainExplorerDataBuilder::fillTransactionDetails(const Transaction& tr
     txOutDetails.output.amount = txOutput.get<0>().amount;
     txOutDetails.output.target = txOutput.get<0>().target;
     transactionDetails.outputs.push_back(std::move(txOutDetails));
+  }
+
+  // CT v4 proof body — copy through for full inspection (web wallets use raw-tx
+  // RPC, so this is for explorers / debugging / human inspection).
+  if (transaction.version == TRANSACTION_VERSION_CT) {
+    transactionDetails.ctSignatures = transaction.ctSignatures;
+    transactionDetails.ctProofs     = transaction.ctProofs;
+    transactionDetails.kernel       = transaction.kernel;
   }
 
   return true;

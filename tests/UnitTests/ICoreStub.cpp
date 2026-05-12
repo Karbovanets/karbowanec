@@ -313,13 +313,17 @@ bool ICoreStub::getAlreadyGeneratedCoins(const Crypto::Hash& hash, uint64_t& gen
 }
 
 bool ICoreStub::getBlockReward(uint8_t blockMajorVersion, size_t medianSize, size_t currentBlockSize, uint64_t alreadyGeneratedCoins, uint64_t fee,
-    uint64_t& reward, int64_t& emissionChange) {
+    uint64_t& reward, int64_t& emissionChange, uint32_t height) {
   reward = 0;
   emissionChange = 0;
   return true;
 }
 
 bool ICoreStub::scanOutputkeysForIndices(const CryptoNote::KeyInput& txInToKey, std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) {
+  return true;
+}
+
+bool ICoreStub::scanCtInputRingForIndices(const CryptoNote::ConfidentialInput& cin, std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) {
   return true;
 }
 

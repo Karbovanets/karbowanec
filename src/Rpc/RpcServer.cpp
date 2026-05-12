@@ -22,6 +22,9 @@
 #include "RpcServer.h"
 #include "version.h"
 
+#include <algorithm>
+#include <array>
+#include <cstring>
 #include <future>
 #include <limits>
 #include <unordered_map>
@@ -31,6 +34,7 @@
 
 // CryptoNote
 #include <crypto/crypto.h>
+#include "crypto/ct_ecdh.h"
 #include <crypto/random.h>
 #include "BlockchainExplorerData.h"
 #include "Common/Base58.h"
@@ -47,6 +51,7 @@
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "CryptoNoteCore/AccountNumber.h"
 #include "CryptoNoteCore/CryptoNoteBasicImpl.h"
+#include "CryptoNoteConfig.h"
 #include "CryptoNoteProtocol/ICryptoNoteProtocolQuery.h"
 #include "P2p/ConnectionContext.h"
 #include "P2p/NetNode.h"
@@ -74,6 +79,88 @@ template <typename T>
 static bool print_as_json(const T& obj) {
   std::cout << CryptoNote::storeToJson(obj) << ENDL;
   return true;
+}
+
+uint64_t getRpcTransactionFee(const Transaction& tx) {
+  uint64_t fee = 0;
+  return get_tx_fee(tx, fee) ? fee : 0;
+}
+
+uint64_t getRpcPublicOutputAmount(const Transaction& tx) {
+  return tx.version == TRANSACTION_VERSION_CT ? 0 : getOutputAmount(tx);
+}
+
+std::string formatExplorerAmount(const Currency& currency, uint64_t amount) {
+  return amount == parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT ? "hidden" : currency.formatAmount(amount);
+}
+
+bool hasConfidentialOutput(const TransactionDetails& tx) {
+  return std::any_of(tx.outputs.begin(), tx.outputs.end(), [](const transactionOutputDetails2& out) {
+    return out.output.target.type() == typeid(ConfidentialOutput);
+  });
+}
+
+std::string maskedAmountToHex(const std::array<uint8_t, 8>& amount) {
+  return Common::toHex(amount.data(), amount.size());
+}
+
+bool getOutputAmountForAddress(const TransactionOutput& output, const AccountPublicAddress& address,
+                               const Crypto::KeyDerivation& derivation, size_t outputIndex,
+                               uint64_t& amount) {
+  Crypto::PublicKey outputKey;
+  bool isConfidential = false;
+
+  if (output.target.type() == typeid(KeyOutput)) {
+    const KeyOutput& outKey = boost::get<KeyOutput>(output.target);
+    outputKey = outKey.key;
+    amount = output.amount;
+  } else if (output.target.type() == typeid(ConfidentialOutput)) {
+    const ConfidentialOutput& confidentialOutput = boost::get<ConfidentialOutput>(output.target);
+    outputKey = confidentialOutput.targetKey;
+    isConfidential = true;
+  } else {
+    return false;
+  }
+
+  Crypto::PublicKey derivedKey;
+  if (!Crypto::derive_public_key(derivation, outputIndex, address.spendPublicKey, derivedKey) || derivedKey != outputKey) {
+    return false;
+  }
+
+  if (!isConfidential) {
+    return true;
+  }
+
+  const ConfidentialOutput& confidentialOutput = boost::get<ConfidentialOutput>(output.target);
+  Crypto::MaskedAmount maskedAmount;
+  static_assert(sizeof(maskedAmount.data) == sizeof(confidentialOutput.maskedAmount), "Masked amount size mismatch");
+  std::memcpy(maskedAmount.data, confidentialOutput.maskedAmount.data(), sizeof(maskedAmount.data));
+
+  amount = Crypto::unmask_amount(derivation, outputIndex, maskedAmount);
+
+  Crypto::EllipticCurveScalar blindingFactor;
+  Crypto::derive_blinding_factor(derivation, outputIndex, blindingFactor);
+
+  Crypto::PublicKey expectedCommitment;
+  if (!Crypto::pedersen_commit(amount, blindingFactor, expectedCommitment)) {
+    return false;
+  }
+
+  Crypto::PublicKey commitment;
+  static_assert(sizeof(commitment) == sizeof(confidentialOutput.commitment), "Commitment size mismatch");
+  std::memcpy(&commitment, &confidentialOutput.commitment, sizeof(commitment));
+  return expectedCommitment == commitment;
+}
+
+template <typename T, size_t N>
+void appendPodArray(std::string& body, const std::string& label, const T (&values)[N]) {
+  body += "  <li>" + label + "\n";
+  body += "    <ol>\n";
+  for (size_t i = 0; i < N; ++i) {
+    body += "      <li class=\"wrap\">" + Common::podToHex(values[i]) + "</li>\n";
+  }
+  body += "    </ol>\n";
+  body += "  </li>\n";
 }
 
 template <typename Command>
@@ -754,13 +841,10 @@ bool RpcServer::checkIncomingTransactionForFee(const BinaryArray& tx_blob) {
     return false;
   }
 
-  // always relay fusion transactions
-  uint64_t inputs_amount = 0;
-  get_inputs_money_amount(tx, inputs_amount);
-  uint64_t outputs_amount = get_outs_money_amount(tx);
-
-  const uint64_t fee = inputs_amount - outputs_amount;
-  if (fee == 0 && m_core.currency().isFusionTransaction(tx, tx_blob.size(), m_core.getCurrentBlockchainHeight() - 1)) {
+  // always relay pre-CT-fork fusion transactions
+  const uint64_t fee = getRpcTransactionFee(tx);
+  const uint32_t height = m_core.getCurrentBlockchainHeight() == 0 ? 0 : m_core.getCurrentBlockchainHeight() - 1;
+  if (fee == 0 && m_core.currency().isFusionTransaction(tx, tx_blob.size(), height)) {
     logger(Logging::DEBUGGING) << "Masternode received fusion transaction, relaying with no fee check";
     return true;
   }
@@ -1333,7 +1417,7 @@ bool RpcServer::on_get_transactions_with_output_global_indexes_by_heights(const 
           e.timestamp = blk.timestamp;
           e.transaction = *static_cast<const TransactionPrefix*>(&txi.first);
           e.output_indexes = txi.second;
-          e.fee = is_coinbase(txi.first) ? 0 : getInputAmount(txi.first) - getOutputAmount(txi.first);
+          e.fee = is_coinbase(txi.first) ? 0 : getRpcTransactionFee(txi.first);
         }
       }
 
@@ -1444,26 +1528,22 @@ bool RpcServer::on_check_payment(const COMMAND_RPC_CHECK_PAYMENT_BY_PAYMENT_ID::
     std::vector<TransactionOutput> outputs;
     try {
       for (const TransactionOutput& o : tx.outputs) {
-        if (o.target.type() == typeid(KeyOutput)) {
-          const KeyOutput out_key = boost::get<KeyOutput>(o.target);
-          Crypto::PublicKey pubkey;
-          derive_public_key(derivation, keyIndex, address.spendPublicKey, pubkey);
-          if (pubkey == out_key.key) {
-            received += o.amount;
+        uint64_t outputAmount = 0;
+        if (getOutputAmountForAddress(o, address, derivation, keyIndex, outputAmount)) {
+          received += outputAmount;
 
-            // count confirmations only for actually paying tx
-            // and include only their hashes in responce
-            Crypto::Hash blockHash;
-            uint32_t blockHeight;
-            Crypto::Hash txHash = getObjectHash(tx);
-            if (std::find(rsp.transaction_hashes.begin(), rsp.transaction_hashes.end(), txHash) == rsp.transaction_hashes.end()) {
-              rsp.transaction_hashes.push_back(txHash);
-            }
-            if (m_core.getBlockContainingTx(txHash, blockHash, blockHeight)) {
-              uint32_t confirmations = m_protocolQuery.getObservedHeight() - blockHeight;
-              if  (rsp.confirmations < confirmations) {
-                   rsp.confirmations = confirmations;
-              }
+          // count confirmations only for actually paying tx
+          // and include only their hashes in responce
+          Crypto::Hash blockHash;
+          uint32_t blockHeight;
+          Crypto::Hash txHash = getObjectHash(tx);
+          if (std::find(rsp.transaction_hashes.begin(), rsp.transaction_hashes.end(), txHash) == rsp.transaction_hashes.end()) {
+            rsp.transaction_hashes.push_back(txHash);
+          }
+          if (m_core.getBlockContainingTx(txHash, blockHash, blockHeight)) {
+            uint32_t confirmations = m_protocolQuery.getObservedHeight() - blockHeight;
+            if  (rsp.confirmations < confirmations) {
+                 rsp.confirmations = confirmations;
             }
           }
         }
@@ -1565,7 +1645,7 @@ bool RpcServer::on_get_explorer(const COMMAND_EXPLORER::request& req, COMMAND_EX
     " &bull; " + "Alt. blocks: <b>" + std::to_string(m_core.getAlternativeBlocksCount()) + "</b>" +
     " &bull; " + "Transactions: <b>" + std::to_string(m_core.getBlockchainTotalTransactions() - top_block_index + 1) + "</b>" +
     " &bull; " + "Emission: <b>" + m_core.currency().formatAmount(m_core.getTotalGeneratedAmount()) + "</b>" +
-    " &bull; " + "Next reward: <b>" + m_core.currency().formatAmount(m_core.currency().calculateReward(m_core.getTotalGeneratedAmount())) + "</b>" +
+    " &bull; " + "Next reward: <b>" + m_core.currency().formatAmount(m_core.currency().calculateReward(m_core.getTotalGeneratedAmount(), m_core.getCurrentBlockchainHeight())) + "</b>" +
     "</p>\n";
 
   const uint32_t print_blocks_count = 10;
@@ -1630,7 +1710,7 @@ bool RpcServer::on_get_explorer(const COMMAND_EXPLORER::request& req, COMMAND_EX
         body += txHashStr;
         body += "</a>";
         body += "</td>\n    <td>";
-        body += m_core.currency().formatAmount(getOutputAmount(txd.tx));
+        body += txd.tx.version == TRANSACTION_VERSION_CT ? "hidden" : m_core.currency().formatAmount(getOutputAmount(txd.tx));
         body += "</td>\n    <td>";
         body += m_core.currency().formatAmount(txd.fee);
         body += "</td>\n    <td>";
@@ -1963,7 +2043,18 @@ bool RpcServer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRANSACTIO
       body += "  </li>\n";
     }
     body += "  <li>\n";
-    body += "    Sum of outputs: " + m_core.currency().formatAmount(transactionsDetails.totalOutputsAmount) + "\n";
+    const bool txHasConfidentialOutput = hasConfidentialOutput(transactionsDetails);
+    if (txHasConfidentialOutput && transactionsDetails.totalOutputsAmount == 0) {
+      body += "    Sum of outputs: hidden (confidential)\n";
+    } else if (txHasConfidentialOutput) {
+      body += "    Public output amount: " + m_core.currency().formatAmount(transactionsDetails.totalOutputsAmount)
+        + " (confidential outputs hidden)\n";
+    } else {
+      body += "    Sum of outputs: " + m_core.currency().formatAmount(transactionsDetails.totalOutputsAmount) + "\n";
+    }
+    body += "  </li>\n";
+    body += "  <li>\n";
+    body += "    Fee: " + m_core.currency().formatAmount(transactionsDetails.fee) + "\n";
     body += "  </li>\n";
     body += "  <li>\n";
     body += "    Size: " + std::to_string(transactionsDetails.size) + "\n";
@@ -1975,7 +2066,15 @@ bool RpcServer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRANSACTIO
     body += "    Version: " + std::to_string(transactionsDetails.version) + "\n";
     body += "  </li>\n";
     body += "  <li>\n";
-    body += "    Mixin count: " + std::to_string(transactionsDetails.mixin) + "\n";
+    if (transactionsDetails.minMixin == transactionsDetails.mixin) {
+      body += "    Mixin count: " + std::to_string(transactionsDetails.mixin) + "\n";
+    } else {
+      // Mixed ring sizes (e.g. ring-1 coinbase shielding + ring-N normal CT)
+      body += "    Mixin count: "
+           + std::to_string(transactionsDetails.minMixin) + ".."
+           + std::to_string(transactionsDetails.mixin)
+           + " (varies per input - see Inputs table)\n";
+    }
     body += "  </li>\n";
     body += "  <li>\n";
     body += "    Public key: <span class=\"wrap\">" + Common::podToHex(transactionsDetails.extra.publicKey) + "</span>\n";
@@ -1983,6 +2082,14 @@ bool RpcServer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRANSACTIO
     if (transactionsDetails.hasPaymentId) {
       body += "  <li>\n";
       body += "    Payment ID: <span class=\"wrap\">" + Common::podToHex(transactionsDetails.paymentId) + "</span>\n";
+      body += "  </li>\n";
+    }
+    body += "  <li>\n";
+    body += "    Extra size: " + std::to_string(transactionsDetails.extra.size) + "\n";
+    body += "  </li>\n";
+    if (!transactionsDetails.extra.raw.empty()) {
+      body += "  <li>\n";
+      body += "    Extra raw: <span class=\"wrap\">" + Common::toHex(transactionsDetails.extra.raw) + "</span>\n";
       body += "  </li>\n";
     }
     // Check for account registration in tx extra
@@ -2036,7 +2143,7 @@ bool RpcServer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRANSACTIO
     body += "<table class=\"counter\" cellpadding=\"10px\">\n";
     body += "  <thead>\n";
     body += "  <tr>\n";
-    body += "    <th>No</th><th>Amount</th><th>Key image</th><th>Output indexes (references)</th>\n";
+    body += "    <th>No</th><th>Amount</th><th>Key image</th><th>Pseudo commitment</th><th>Output indexes (references)<br />Key Offset - Output No</th>\n";
     body += "  </tr>\n";
     body += "</thead>\n";
     body += "<tbody>\n";
@@ -2048,22 +2155,47 @@ bool RpcServer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRANSACTIO
       if (in.type() == typeid(BaseInputDetails)) {
         BaseInputDetails c = boost::get<BaseInputDetails>(in);
         body += m_core.currency().formatAmount(c.amount);
-        body += "</td>\n    <td colspan=\"2\">coinbase</td>\n";
+        body += "</td>\n    <td colspan=\"3\">coinbase</td>\n";
       }
       else if (in.type() == typeid(KeyInputDetails)) {
         KeyInputDetails k = boost::get<KeyInputDetails>(in);
         body += m_core.currency().formatAmount(k.input.amount);
         body += "</td>\n    <td class=\"wrap\">";
         body += Common::podToHex(k.input.keyImage);
+        body += "</td>\n    <td>-";
         body += "</td>\n    <td>";
-        for (size_t i = 0; i < k.input.outputIndexes.size(); ++i) {
-          body += "    <a href=\"/explorer/tx/" + Common::podToHex(k.outputs[i].transactionHash) + "\">";
-          body += std::to_string(k.input.outputIndexes[i]); // key_offset
-          body += " (output No " + std::to_string(k.outputs[i].number) +")</a>"; // tx output reference
-          body += ", ";
+        if (k.outputs.empty()) {
+          body += "references unavailable";
+        } else {
+          for (size_t n = 0; n < k.outputs.size(); ++n) {
+            body += "    <a href=\"/explorer/tx/" + Common::podToHex(k.outputs[n].transactionHash) + "\">";
+            body += (n < k.input.outputIndexes.size() ? std::to_string(k.input.outputIndexes[n]) : "?"); // key_offset
+            body += " - " + std::to_string(k.outputs[n].number) +"</a>"; // tx output reference
+            if (n + 1 < k.outputs.size()) body += ", ";
+          }
         }
-        body.pop_back();
-        body.pop_back();
+        body += "    </td>\n";
+      }
+      else if (in.type() == typeid(ConfidentialInputDetails)) {
+        ConfidentialInputDetails c = boost::get<ConfidentialInputDetails>(in);
+        body += formatExplorerAmount(m_core.currency(), c.ringAmount);
+        body += "</td>\n    <td class=\"wrap\">";
+        body += Common::podToHex(c.keyImage);
+        body += "</td>\n    <td class=\"wrap\">";
+        body += Common::podToHex(c.pseudoCommitment);
+        body += "</td>\n    <td>";
+        if (c.outputs.empty()) {
+          body += "ring of " + std::to_string(c.mixin) + " (references unavailable)";
+        } else {
+          for (size_t k = 0; k < c.outputs.size(); ++k) {
+            body += "    <a href=\"/explorer/tx/" + Common::podToHex(c.outputs[k].transactionHash) + "\">";
+            if (k < c.ringOutputIndexes.size()) {
+              body += std::to_string(c.ringOutputIndexes[k]) + " ";
+            }
+            body += " - " + std::to_string(c.outputs[k].number) + "</a>";
+            if (k + 1 < c.outputs.size()) body += ", ";
+          }
+        }
         body += "    </td>\n";
       }
       body += "  </tr>\n";
@@ -2076,7 +2208,7 @@ bool RpcServer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRANSACTIO
     body += "<table class=\"counter\" cellpadding=\"10px\">\n";
     body += "  <thead>\n";
     body += "  <tr>\n";
-    body += "    <th>No</th><th>Amount</th><th>Public key (stealth address)</th><th>Global index</th>\n";
+    body += "    <th>No</th><th>Type</th><th>Amount</th><th>Public key (stealth address)</th><th>Commitment</th><th>Masked amount</th><th>Global index</th>\n";
     body += "  </tr>\n";
     body += "</thead>\n";
     body += "<tbody>\n";
@@ -2085,11 +2217,30 @@ bool RpcServer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRANSACTIO
       body += "  <tr>\n";
       body += "    <td>" + std::to_string(i) + ")</td>";
       body += "    <td>";
-      body += m_core.currency().formatAmount(o.output.amount);
+      if (o.output.target.type() == typeid(ConfidentialOutput)) {
+        body += "Confidential";
+      } else {
+        body += "Key";
+      }
+      body += "</td>\n    <td>";
+      if (o.output.target.type() == typeid(ConfidentialOutput)) {
+        body += "hidden";
+      } else {
+        body += m_core.currency().formatAmount(o.output.amount);
+      }
       body += "</td>\n    <td class=\"wrap\">";
       if (o.output.target.type() == typeid(KeyOutput)) {
         KeyOutput ko = boost::get<KeyOutput>(o.output.target);
-        body += Common::podToHex(ko);
+        body += Common::podToHex(ko.key);
+        body += "</td>\n    <td>-";
+        body += "</td>\n    <td>-";
+      } else if (o.output.target.type() == typeid(ConfidentialOutput)) {
+        ConfidentialOutput co = boost::get<ConfidentialOutput>(o.output.target);
+        body += Common::podToHex(co.targetKey);
+        body += "</td>\n    <td class=\"wrap\">";
+        body += Common::podToHex(co.commitment);
+        body += "</td>\n    <td class=\"wrap\">";
+        body += maskedAmountToHex(co.maskedAmount);
       }
       body += "</td>\n    <td>";
       body += std::to_string(o.globalIndex);
@@ -2116,6 +2267,64 @@ bool RpcServer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRANSACTIO
         body += "  </li>\n";
       }
       body += "</ol>\n";
+    }
+
+    if (transactionsDetails.version == TRANSACTION_VERSION_CT) {
+      body += "<h3>CT kernel</h3>\n";
+      body += "<ul>\n";
+      body += "  <li>Excess commitment: <span class=\"wrap\">" + Common::podToHex(transactionsDetails.kernel.excessCommitment) + "</span></li>\n";
+      body += "  <li>Signature e: <span class=\"wrap\">" + Common::podToHex(transactionsDetails.kernel.sigE) + "</span></li>\n";
+      body += "  <li>Signature s: <span class=\"wrap\">" + Common::podToHex(transactionsDetails.kernel.sigS) + "</span></li>\n";
+      body += "</ul>\n";
+
+      if (!transactionsDetails.ctSignatures.empty()) {
+        body += "<h3>CT input signatures</h3>\n";
+        body += "<ol>\n";
+        for (size_t i = 0; i < transactionsDetails.ctSignatures.size(); ++i) {
+          const auto& signature = transactionsDetails.ctSignatures[i];
+          body += "  <li>\n";
+          body += "    <details open>\n";
+          body += "      <summary>Input " + std::to_string(i) + " MLSAG signature (" + std::to_string(signature.ss.size()) + " ring members)</summary>\n";
+          body += "      <ul>\n";
+          body += "        <li>c0: <span class=\"wrap\">" + Common::podToHex(signature.c0) + "</span></li>\n";
+          body += "        <li>ss\n";
+          body += "          <ol>\n";
+          for (const auto& row : signature.ss) {
+            body += "            <li>spend: <span class=\"wrap\">" + Common::podToHex(row[0]) + "</span><br/>"
+              "commitment: <span class=\"wrap\">" + Common::podToHex(row[1]) + "</span></li>\n";
+          }
+          body += "          </ol>\n";
+          body += "        </li>\n";
+          body += "      </ul>\n";
+          body += "    </details>\n";
+          body += "  </li>\n";
+        }
+        body += "</ol>\n";
+      }
+
+      if (!transactionsDetails.ctProofs.empty()) {
+        body += "<h3>CT output proofs</h3>\n";
+        body += "<ol>\n";
+        for (size_t i = 0; i < transactionsDetails.ctProofs.size(); ++i) {
+          const auto& proof = transactionsDetails.ctProofs[i];
+          body += "  <li>\n";
+          body += "    <details>\n";
+          body += "      <summary>Output " + std::to_string(i) + " GK denomination proof</summary>\n";
+          body += "      <ul>\n";
+          appendPodArray(body, "I", proof.I);
+          appendPodArray(body, "A", proof.A);
+          appendPodArray(body, "B", proof.B);
+          appendPodArray(body, "Q", proof.Q);
+          appendPodArray(body, "z", proof.z);
+          appendPodArray(body, "za", proof.za);
+          appendPodArray(body, "zb", proof.zb);
+          body += "        <li>f: <span class=\"wrap\">" + Common::podToHex(proof.f) + "</span></li>\n";
+          body += "      </ul>\n";
+          body += "    </details>\n";
+          body += "  </li>\n";
+        }
+        body += "</ol>\n";
+      }
     }
     
     body += index_finish;
@@ -2295,7 +2504,7 @@ bool RpcServer::on_get_info(const COMMAND_RPC_GET_INFO::request& req, COMMAND_RP
   // that large uint64_t number is unsafe in JavaScript environment and therefore as a JSON value so we display it as a formatted string
   res.already_generated_coins = m_core.currency().formatAmount(alreadyGeneratedCoins);
   res.block_major_version = m_core.getCurrentBlockMajorVersion();
-  uint64_t nextReward = m_core.currency().calculateReward(alreadyGeneratedCoins);
+  uint64_t nextReward = m_core.currency().calculateReward(alreadyGeneratedCoins, m_core.getCurrentBlockchainHeight());
   res.next_reward = nextReward;
   if (!m_core.getBlockCumulativeDifficulty(res.height - 1, res.cumulative_difficulty)) {
     throw JsonRpc::JsonRpcError{
@@ -2694,9 +2903,10 @@ bool RpcServer::on_get_transactions_pool_short(const COMMAND_RPC_GET_TRANSACTION
     transaction_pool_response mempool_transaction;
     mempool_transaction.hash = Common::podToHex(txd.id);
     mempool_transaction.fee = txd.fee;
-    mempool_transaction.amount_out = getOutputAmount(txd.tx);
+    mempool_transaction.amount_out = getRpcPublicOutputAmount(txd.tx);
     mempool_transaction.size = txd.blobSize;
     mempool_transaction.receive_time = txd.receiveTime;
+    mempool_transaction.version = txd.tx.version;
     res.transactions.push_back(mempool_transaction);
   }
   res.status = CORE_RPC_STATUS_OK;
@@ -2757,14 +2967,13 @@ bool RpcServer::on_get_transactions_by_payment_id(const COMMAND_RPC_GET_TRANSACT
 
   for (const Transaction& tx : transactions) {
     transaction_short_response transaction_short;
-    uint64_t amount_in = 0;
-    get_inputs_money_amount(tx, amount_in);
-    uint64_t amount_out = get_outs_money_amount(tx);
+    uint64_t amount_out = getRpcPublicOutputAmount(tx);
 
     transaction_short.hash = Common::podToHex(getObjectHash(tx));
-    transaction_short.fee = amount_in - amount_out;
+    transaction_short.fee = getRpcTransactionFee(tx);
     transaction_short.amount_out = amount_out;
     transaction_short.size = getObjectBinarySize(tx);
+    transaction_short.version = tx.version;
     res.transactions.push_back(transaction_short);
   }
 
@@ -3059,14 +3268,10 @@ bool RpcServer::on_check_transaction_key(const COMMAND_RPC_CHECK_TRANSACTION_KEY
   std::vector<TransactionOutput> outputs;
   try {
     for (const TransactionOutput& o : transaction.outputs) {
-      if (o.target.type() == typeid(KeyOutput)) {
-        const KeyOutput out_key = boost::get<KeyOutput>(o.target);
-        Crypto::PublicKey pubkey;
-        derive_public_key(derivation, keyIndex, address.spendPublicKey, pubkey);
-        if (pubkey == out_key.key) {
-          received += o.amount;
-          outputs.push_back(o);
-        }
+      uint64_t outputAmount = 0;
+      if (getOutputAmountForAddress(o, address, derivation, keyIndex, outputAmount)) {
+        received += outputAmount;
+        outputs.push_back(o);
       }
       ++keyIndex;
     }
@@ -3132,14 +3337,10 @@ bool RpcServer::on_check_transaction_with_view_key(const COMMAND_RPC_CHECK_TRANS
   std::vector<TransactionOutput> outputs;
   try {
     for (const TransactionOutput& o : transaction.outputs) {
-      if (o.target.type() == typeid(KeyOutput)) {
-        const KeyOutput out_key = boost::get<KeyOutput>(o.target);
-        Crypto::PublicKey pubkey;
-        derive_public_key(derivation, keyIndex, address.spendPublicKey, pubkey);
-        if (pubkey == out_key.key) {
-          received += o.amount;
-          outputs.push_back(o);
-        }
+      uint64_t outputAmount = 0;
+      if (getOutputAmountForAddress(o, address, derivation, keyIndex, outputAmount)) {
+        received += outputAmount;
+        outputs.push_back(o);
       }
       ++keyIndex;
     }
@@ -3227,14 +3428,10 @@ bool RpcServer::on_check_transaction_proof(const COMMAND_RPC_CHECK_TRANSACTION_P
     std::vector<TransactionOutput> outputs;
     try {
       for (const TransactionOutput& o : transaction.outputs) {
-        if (o.target.type() == typeid(KeyOutput)) {
-          const KeyOutput out_key = boost::get<KeyOutput>(o.target);
-          Crypto::PublicKey pubkey;
-          derive_public_key(derivation, keyIndex, address.spendPublicKey, pubkey);
-          if (pubkey == out_key.key) {
-            received += o.amount;
-            outputs.push_back(o);
-          }
+        uint64_t outputAmount = 0;
+        if (getOutputAmountForAddress(o, address, derivation, keyIndex, outputAmount)) {
+          received += outputAmount;
+          outputs.push_back(o);
         }
         ++keyIndex;
       }

@@ -45,6 +45,16 @@ using namespace Logging;
 
 namespace CryptoNote {
 
+  namespace {
+    bool isTxVersionAllowedForHeight(const Currency& currency, const Transaction& tx, uint32_t height) {
+      if (tx.version != CURRENT_TRANSACTION_VERSION && tx.version != TRANSACTION_VERSION_CT) {
+        return false;
+      }
+
+      return tx.version == currency.currentTransactionVersion(height);
+    }
+  } // namespace
+
   //---------------------------------------------------------------------------------
   // BlockTemplate
   //---------------------------------------------------------------------------------
@@ -59,6 +69,10 @@ namespace CryptoNote {
         if (in.type() == typeid(KeyInput)) {
           auto r = m_keyImages.insert(boost::get<KeyInput>(in).keyImage);
           (void)r; //just to make compiler to shut up
+          assert(r.second);
+        } else if (in.type() == typeid(ConfidentialInput)) {
+          auto r = m_keyImages.insert(boost::get<ConfidentialInput>(in).keyImage);
+          (void)r;
           assert(r.second);
         }
       }
@@ -77,6 +91,10 @@ namespace CryptoNote {
       for (const auto& in : tx.inputs) {
         if (in.type() == typeid(KeyInput)) {
           if (m_keyImages.count(boost::get<KeyInput>(in).keyImage)) {
+            return false;
+          }
+        } else if (in.type() == typeid(ConfidentialInput)) {
+          if (m_keyImages.count(boost::get<ConfidentialInput>(in).keyImage)) {
             return false;
           }
         }
@@ -111,29 +129,38 @@ namespace CryptoNote {
     m_timestampIndex(true) {
   }
   //---------------------------------------------------------------------------------
-  bool tx_memory_pool::add_tx(const Transaction &tx, /*const Crypto::Hash& tx_prefix_hash,*/ const Crypto::Hash &id, size_t blobSize, tx_verification_context& tvc, bool keptByBlock) {
+  bool tx_memory_pool::add_tx(const Transaction &tx, /*const Crypto::Hash& tx_prefix_hash,*/ const Crypto::Hash &id, size_t blobSize, tx_verification_context& tvc, bool keptByBlock, TxValidationContext validationContext) {
     if (!check_inputs_types_supported(tx)) {
       tvc.m_verification_failed = true;
       return false;
     }
 
-    uint64_t inputs_amount = 0;
-    if (!get_inputs_money_amount(tx, inputs_amount)) {
-      tvc.m_verification_failed = true;
-      return false;
+    const bool isCT = tx.version == TRANSACTION_VERSION_CT;
+    uint64_t fee = 0;
+    bool isFusionTransaction = false;
+
+    if (isCT) {
+      // CT transactions carry explicit plaintext fee.
+      fee = tx.fee;
+    } else {
+      uint64_t inputs_amount = 0;
+      if (!get_inputs_money_amount(tx, inputs_amount)) {
+        tvc.m_verification_failed = true;
+        return false;
+      }
+
+      uint64_t outputs_amount = get_outs_money_amount(tx);
+
+      if (outputs_amount > inputs_amount) {
+        logger(INFO) << "transaction use more money then it has: use " << m_currency.formatAmount(outputs_amount) <<
+          ", have " << m_currency.formatAmount(inputs_amount);
+        tvc.m_verification_failed = true;
+        return false;
+      }
+
+      fee = inputs_amount - outputs_amount;
+      isFusionTransaction = fee == 0 && m_currency.isFusionTransaction(tx, blobSize, m_core.getCurrentBlockchainHeight());
     }
-
-    uint64_t outputs_amount = get_outs_money_amount(tx);
-
-    if (outputs_amount > inputs_amount) {
-      logger(INFO) << "transaction use more money then it has: use " << m_currency.formatAmount(outputs_amount) <<
-        ", have " << m_currency.formatAmount(inputs_amount);
-      tvc.m_verification_failed = true;
-      return false;
-    }
-
-    const uint64_t fee = inputs_amount - outputs_amount;
-    bool isFusionTransaction = fee == 0 && m_currency.isFusionTransaction(tx, blobSize, m_core.getCurrentBlockchainHeight());
 
     //check key images for transaction if it is not kept by block
     if (!keptByBlock) {
@@ -148,7 +175,7 @@ namespace CryptoNote {
     BlockInfo maxUsedBlock;
 
     // check inputs
-    bool inputsValid = m_validator.checkTransactionInputs(tx, maxUsedBlock);
+    bool inputsValid = m_validator.checkTransactionInputs(tx, maxUsedBlock, validationContext);
 
     if (!inputsValid) {
       if (!keptByBlock) {
@@ -204,7 +231,7 @@ namespace CryptoNote {
     }
 
     tvc.m_added_to_pool = true;
-    tvc.m_should_be_relayed = inputsValid && (fee > 0 || isFusionTransaction);
+    tvc.m_should_be_relayed = inputsValid && (isCT || fee > 0 || isFusionTransaction);
     tvc.m_verification_failed = true;
 
     if (!addTransactionInputs(id, tx, keptByBlock))
@@ -216,11 +243,12 @@ namespace CryptoNote {
   }
 
   //---------------------------------------------------------------------------------
-  bool tx_memory_pool::add_tx(const Transaction &tx, tx_verification_context& tvc, bool keeped_by_block) {
+  bool tx_memory_pool::add_tx(const Transaction &tx, tx_verification_context& tvc, bool keeped_by_block,
+                              TxValidationContext validationContext) {
     Crypto::Hash h = NULL_HASH;
     size_t blobSize = 0;
     getObjectHash(tx, h, blobSize);
-    return add_tx(tx, h, blobSize, tvc, keeped_by_block);
+    return add_tx(tx, h, blobSize, tvc, keeped_by_block, validationContext);
   }
   //---------------------------------------------------------------------------------
   bool tx_memory_pool::take_tx(const Crypto::Hash &id, Transaction &tx, size_t& blobSize, uint64_t& fee) {
@@ -323,6 +351,23 @@ namespace CryptoNote {
       logger(DEBUGGING) << "MemPool - Block height incremented, cleared " << m_validated_transactions.size() << " cached transaction hashes. New height: " << new_block_height << " Top block: " << top_block_id;
       m_validated_transactions.clear();
     }
+
+    const uint32_t validationHeight = static_cast<uint32_t>(new_block_height);
+    const uint8_t blockMajorVersion = m_core.getBlockMajorVersionForHeight(validationHeight);
+    size_t removedByVersion = 0;
+    for (auto it = m_transactions.begin(); it != m_transactions.end();) {
+      if (!isTxVersionAllowedForHeight(m_currency, it->tx, validationHeight)) {
+        it = removeTransaction(it);
+        ++removedByVersion;
+      } else {
+        ++it;
+      }
+    }
+    if (removedByVersion != 0) {
+      logger(DEBUGGING) << "MemPool - Pruned " << removedByVersion
+                        << " tx(s) incompatible with height " << validationHeight
+                        << " (block major version " << static_cast<unsigned>(blockMajorVersion) << ")";
+    }
     return true;
   }
   //---------------------------------------------------------------------------------
@@ -332,6 +377,7 @@ namespace CryptoNote {
       logger(DEBUGGING, YELLOW) << "MemPool - Block height decremented " << m_validated_transactions.size() << " cached transaction hashes. New height: " << new_block_height << " Top block: " << top_block_id;
       m_validated_transactions.clear();
     }
+
     return true;
   }
   //---------------------------------------------------------------------------------
@@ -358,7 +404,10 @@ namespace CryptoNote {
   //---------------------------------------------------------------------------------
   bool tx_memory_pool::is_transaction_ready_to_go(const Transaction& tx, TransactionCheckInfo& txd) const {
 
-    if (!m_validator.checkTransactionInputs(tx, txd.maxUsedBlock, txd.lastFailedBlock))
+    // Pool re-check before block inclusion: the tx is now being treated as a
+    // live mempool candidate, so always run the full validation pipeline.
+    if (!m_validator.checkTransactionInputs(tx, txd.maxUsedBlock, txd.lastFailedBlock,
+                                            TxValidationContext::Mempool))
       return false;
 
     //if we here, transaction seems valid, but, anyway, check for key_images collisions with blockchain, just to be sure
@@ -386,7 +435,9 @@ namespace CryptoNote {
         << "max_used_block_id: " << txd.maxUsedBlock.id << std::endl
         << "last_failed_height: " << txd.lastFailedBlock.height << std::endl
         << "last_failed_id: " << txd.lastFailedBlock.id << std::endl
-        << "amount_out: " << get_outs_money_amount(txd.tx) << std::endl
+        << "amount_out: " << (txd.tx.version == TRANSACTION_VERSION_CT
+                              ? std::string("hidden")
+                              : m_currency.formatAmount(get_outs_money_amount(txd.tx))) << std::endl
         << "fee_atomic_units: " << txd.fee << std::endl
         << "received_timestamp: " << txd.receiveTime << std::endl
         << "received: " << std::ctime(&txd.receiveTime) << std::endl;
@@ -401,6 +452,7 @@ namespace CryptoNote {
 
     total_size = 0;
     fee = 0;
+    const uint32_t blockHeight = m_core.getCurrentBlockchainHeight();
 
     size_t max_total_size = (125 * median_size) / 100;
     max_total_size = std::min(max_total_size, maxCumulativeSize) - m_currency.minerTxBlobReservedSize();
@@ -409,6 +461,12 @@ namespace CryptoNote {
 
     for (auto i = m_fee_index.begin(); i != m_fee_index.end(); ++i) {
       const auto& txd = *i;
+
+      if (!isTxVersionAllowedForHeight(m_currency, txd.tx, blockHeight)) {
+        logger(DEBUGGING) << "Transaction " << txd.id
+                          << " not included to block template due to tx version/fork gating mismatch";
+        continue;
+      }
 
       size_t blockSizeLimit = (txd.fee == 0) ? median_size : max_total_size;
       if (blockSizeLimit < total_size + txd.blobSize) {
@@ -592,23 +650,29 @@ namespace CryptoNote {
 
   bool tx_memory_pool::removeTransactionInputs(const Crypto::Hash& tx_id, const Transaction& tx, bool keptByBlock) {
     for (const auto& in : tx.inputs) {
+      Crypto::KeyImage ki;
       if (in.type() == typeid(KeyInput)) {
-        const auto& txin = boost::get<KeyInput>(in);
-        auto it = m_spent_key_images.find(txin.keyImage);
-        if (!(it != m_spent_key_images.end())) { logger(ERROR, BRIGHT_RED) << "failed to find transaction input in key images. img=" << txin.keyImage << std::endl
-          << "transaction id = " << tx_id; return false; }
-        std::unordered_set<Crypto::Hash>& key_image_set = it->second;
-        if (!(!key_image_set.empty())) { logger(ERROR, BRIGHT_RED) << "empty key_image set, img=" << txin.keyImage << std::endl
-          << "transaction id = " << tx_id; return false; }
+        ki = boost::get<KeyInput>(in).keyImage;
+      } else if (in.type() == typeid(ConfidentialInput)) {
+        ki = boost::get<ConfidentialInput>(in).keyImage;
+      } else {
+        continue;
+      }
 
-        auto it_in_set = key_image_set.find(tx_id);
-        if (!(it_in_set != key_image_set.end())) { logger(ERROR, BRIGHT_RED) << "transaction id not found in key_image set, img=" << txin.keyImage << std::endl
-          << "transaction id = " << tx_id; return false; }
-        key_image_set.erase(it_in_set);
-        if (key_image_set.empty()) {
-          //it is now empty hash container for this key_image
-          m_spent_key_images.erase(it);
-        }
+      auto it = m_spent_key_images.find(ki);
+      if (!(it != m_spent_key_images.end())) { logger(ERROR, BRIGHT_RED) << "failed to find transaction input in key images. img=" << ki << std::endl
+        << "transaction id = " << tx_id; return false; }
+      std::unordered_set<Crypto::Hash>& key_image_set = it->second;
+      if (!(!key_image_set.empty())) { logger(ERROR, BRIGHT_RED) << "empty key_image set, img=" << ki << std::endl
+        << "transaction id = " << tx_id; return false; }
+
+      auto it_in_set = key_image_set.find(tx_id);
+      if (!(it_in_set != key_image_set.end())) { logger(ERROR, BRIGHT_RED) << "transaction id not found in key_image set, img=" << ki << std::endl
+        << "transaction id = " << tx_id; return false; }
+      key_image_set.erase(it_in_set);
+      if (key_image_set.empty()) {
+        //it is now empty hash container for this key_image
+        m_spent_key_images.erase(it);
       }
     }
 
@@ -619,21 +683,27 @@ namespace CryptoNote {
   bool tx_memory_pool::addTransactionInputs(const Crypto::Hash& id, const Transaction& tx, bool keptByBlock) {
     // should not fail
     for (const auto& in : tx.inputs) {
+      Crypto::KeyImage ki;
       if (in.type() == typeid(KeyInput)) {
-        const auto& txin = boost::get<KeyInput>(in);
-        std::unordered_set<Crypto::Hash>& kei_image_set = m_spent_key_images[txin.keyImage];
-        if (!(keptByBlock || kei_image_set.size() == 0)) {
-          logger(ERROR, BRIGHT_RED)
-              << "internal error: keptByBlock=" << keptByBlock
-              << ",  kei_image_set.size()=" << kei_image_set.size() << ENDL
-              << "txin.keyImage=" << txin.keyImage << ENDL << "tx_id=" << id;
-          return false;
-        }
-        auto ins_res = kei_image_set.insert(id);
-        if (!(ins_res.second)) {
-          logger(ERROR, BRIGHT_RED) << "internal error: try to insert duplicate iterator in key_image set";
-          return false;
-        }
+        ki = boost::get<KeyInput>(in).keyImage;
+      } else if (in.type() == typeid(ConfidentialInput)) {
+        ki = boost::get<ConfidentialInput>(in).keyImage;
+      } else {
+        continue;
+      }
+
+      std::unordered_set<Crypto::Hash>& kei_image_set = m_spent_key_images[ki];
+      if (!(keptByBlock || kei_image_set.size() == 0)) {
+        logger(ERROR, BRIGHT_RED)
+            << "internal error: keptByBlock=" << keptByBlock
+            << ",  kei_image_set.size()=" << kei_image_set.size() << ENDL
+            << "keyImage=" << ki << ENDL << "tx_id=" << id;
+        return false;
+      }
+      auto ins_res = kei_image_set.insert(id);
+      if (!(ins_res.second)) {
+        logger(ERROR, BRIGHT_RED) << "internal error: try to insert duplicate iterator in key_image set";
+        return false;
       }
     }
 
@@ -644,8 +714,11 @@ namespace CryptoNote {
   bool tx_memory_pool::haveSpentInputs(const Transaction& tx) const {
     for (const auto& in : tx.inputs) {
       if (in.type() == typeid(KeyInput)) {
-        const auto& tokey_in = boost::get<KeyInput>(in);
-        if (m_spent_key_images.count(tokey_in.keyImage)) {
+        if (m_spent_key_images.count(boost::get<KeyInput>(in).keyImage)) {
+          return true;
+        }
+      } else if (in.type() == typeid(ConfidentialInput)) {
+        if (m_spent_key_images.count(boost::get<ConfidentialInput>(in).keyImage)) {
           return true;
         }
       }

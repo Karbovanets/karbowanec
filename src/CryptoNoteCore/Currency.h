@@ -130,6 +130,10 @@ public:
   uint32_t minNumberVotingBlocks() const { return (m_upgradeVotingWindow * m_upgradeVotingThreshold + 99) / 100; }
   uint32_t maxUpgradeDistance() const { return 7 * m_upgradeWindow; }
   uint32_t calculateUpgradeHeight(uint32_t voteCompleteHeight) const { return voteCompleteHeight + m_upgradeWindow; }
+  bool isConfidentialTransactionsActivated(uint32_t height) const { return height >= CryptoNote::parameters::CT_FORK_HEIGHT; }
+  uint8_t currentTransactionVersion(uint32_t height) const {
+    return isConfidentialTransactionsActivated(height) ? TRANSACTION_VERSION_CT : CURRENT_TRANSACTION_VERSION;
+  }
 
   const std::string& blocksFileName() const { return m_blocksFileName; }
   const std::string& blocksCacheFileName() const { return m_blocksCacheFileName; }
@@ -142,9 +146,15 @@ public:
   const Block& genesisBlock() const { return m_genesisBlock; }
   const Crypto::Hash& genesisBlockHash() const { return m_genesisBlockHash; }
 
-  uint64_t calculateReward(uint64_t alreadyGeneratedCoins) const;
+  uint64_t effectiveMoneySupply(uint32_t height) const;
+  uint64_t calculateReward(uint64_t alreadyGeneratedCoins, uint32_t height) const;
+  uint64_t calculateReward(uint64_t alreadyGeneratedCoins) const { return calculateReward(alreadyGeneratedCoins, 0); }
   bool getBlockReward(uint8_t blockMajorVersion, size_t medianSize, size_t currentBlockSize, uint64_t alreadyGeneratedCoins, uint64_t fee,
-    uint64_t& reward, int64_t& emissionChange) const;
+    uint64_t& reward, int64_t& emissionChange, uint32_t height) const;
+  bool getBlockReward(uint8_t blockMajorVersion, size_t medianSize, size_t currentBlockSize, uint64_t alreadyGeneratedCoins, uint64_t fee,
+    uint64_t& reward, int64_t& emissionChange) const {
+    return getBlockReward(blockMajorVersion, medianSize, currentBlockSize, alreadyGeneratedCoins, fee, reward, emissionChange, 0);
+  }
   size_t maxBlockCumulativeSize(uint64_t height) const;
 
   bool constructMinerTx(uint8_t blockMajorVersion, uint32_t height, size_t medianSize, uint64_t alreadyGeneratedCoins, size_t currentBlockSize,
@@ -170,7 +180,14 @@ public:
 
   std::string formatAmount(uint64_t amount) const;
   std::string formatAmount(int64_t amount) const;
+  // Height-aware overloads kept for call-site compatibility; height is currently ignored.
+  std::string formatAmount(uint64_t amount, uint32_t height) const;
+  std::string formatAmount(int64_t amount, uint32_t height) const;
   bool parseAmount(const std::string& str, uint64_t& amount) const;
+  bool parseAmount(const std::string& str, uint64_t& amount, uint32_t height) const;
+
+  // True if amount cannot become a CT output (i.e. < MIN_CT_DENOMINATION).
+  static bool isDustOutput(uint64_t amount);
 
   difficulty_type nextDifficulty(uint32_t height, uint8_t blockMajorVersion, std::vector<uint64_t> timestamps, std::vector<difficulty_type> Difficulties) const;
   difficulty_type nextDifficultyV1(std::vector<uint64_t> timestamps, std::vector<difficulty_type> Difficulties) const;

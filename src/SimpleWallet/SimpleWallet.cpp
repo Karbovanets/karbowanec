@@ -34,6 +34,7 @@
 //#include "vld.h"
 
 #include <ctime>
+#include <algorithm>
 #include <fstream>
 #include <future>
 #include <iomanip>
@@ -85,6 +86,7 @@
 #include "Wallet/LegacyKeysImporter.h"
 #include "WalletLegacy/WalletHelper.h"
 #include "ITransfersContainer.h"
+#include "Denominations.h"
 
 #include "version.h"
 
@@ -235,8 +237,22 @@ struct TransferCommand {
 #endif
 
   TransferCommand(const CryptoNote::Currency& currency, const CryptoNote::NodeRpcProxy& node) :
-    m_currency(currency), m_node(node), fake_outs_count(0),
+    m_currency(currency), m_node(node), fake_outs_count(CryptoNote::parameters::DEFAULT_TX_MIXIN),
     fee(m_node.getMinimalFee()) {
+  }
+
+  bool validateMixin(LoggerRef& logger) const {
+    if (fake_outs_count < m_currency.minMixin() && fake_outs_count != 0) {
+      logger(ERROR, BRIGHT_RED) << "mixIn should be equal to or bigger than " << m_currency.minMixin();
+      return false;
+    }
+
+    if (fake_outs_count > m_currency.maxMixin()) {
+      logger(ERROR, BRIGHT_RED) << "mixIn should be equal to or less than " << m_currency.maxMixin();
+      return false;
+    }
+
+    return true;
   }
 
   bool parseArguments(LoggerRef& logger, const std::vector<std::string> &args) {
@@ -244,23 +260,6 @@ struct TransferCommand {
     ArgumentReader<std::vector<std::string>::const_iterator> ar(args.begin(), args.end());
 
     try {
-
-      auto mixin_str = ar.next();
-
-      if (!Common::fromString(mixin_str, fake_outs_count)) {
-        logger(ERROR, BRIGHT_RED) << "mixin_count should be non-negative integer, got " << mixin_str;
-        return false;
-      }
-
-      if (fake_outs_count < m_currency.minMixin() && fake_outs_count != 0) {
-        logger(ERROR, BRIGHT_RED) << "mixIn should be equal to or bigger than " << m_currency.minMixin();
-        return false;
-      }
-
-      if (fake_outs_count > m_currency.maxMixin()) {
-        logger(ERROR, BRIGHT_RED) << "mixIn should be equal to or less than " << m_currency.maxMixin();
-        return false;
-      }
 
       while (!ar.eof()) {
 
@@ -276,7 +275,7 @@ struct TransferCommand {
               return false;
             }
           } else if (arg == "-f") {
-            bool ok = m_currency.parseAmount(value, fee);
+            bool ok = m_currency.parseAmount(value, fee, m_node.getLastLocalBlockHeight());
             if (!ok) {
               logger(ERROR, BRIGHT_RED) << "Fee value is invalid: " << value;
               return false;
@@ -287,6 +286,17 @@ struct TransferCommand {
                 << (m_node.getLastLocalBlockHeaderInfo().majorVersion < CryptoNote::BLOCK_MAJOR_VERSION_4 ? m_currency.minimumFee() : m_node.getMinimalFee());
               return false;
             }
+          } else if (arg == "-m") {
+            if (!Common::fromString(value, fake_outs_count)) {
+              logger(ERROR, BRIGHT_RED) << "mixin_count should be non-negative integer, got " << value;
+              return false;
+            }
+            if (!validateMixin(logger)) {
+              return false;
+            }
+          } else {
+            logger(ERROR, BRIGHT_RED) << "Unknown transfer option: " << arg;
+            return false;
           }
         } else {
           WalletLegacyTransfer destination;
@@ -335,7 +345,7 @@ struct TransferCommand {
           }
 
           auto value = ar.next();
-          bool ok = m_currency.parseAmount(value, deAmount);
+          bool ok = m_currency.parseAmount(value, deAmount, m_node.getLastLocalBlockHeight());
           if (!ok || 0 == deAmount) {
 #if defined(WIN32)
 #undef max
@@ -374,6 +384,10 @@ struct TransferCommand {
 #endif
         ) {
         logger(ERROR, BRIGHT_RED) << "At least one destination address is required";
+        return false;
+      }
+
+      if (!validateMixin(logger)) {
         return false;
       }
     }
@@ -550,8 +564,8 @@ void printListTransfersItem(LoggerRef& logger, const WalletLegacyTransaction& tx
   logger(INFO, rowColor)
     << std::setw(TIMESTAMP_MAX_WIDTH) << timeString
     << "  " << std::setw(HASH_MAX_WIDTH) << Common::podToHex(txInfo.hash)
-    << "  " << std::setw(TOTAL_AMOUNT_MAX_WIDTH) << currency.formatAmount(txInfo.totalAmount)
-    << "  " << std::setw(FEE_MAX_WIDTH) << currency.formatAmount(txInfo.fee)
+    << "  " << std::setw(TOTAL_AMOUNT_MAX_WIDTH) << currency.formatAmount(txInfo.totalAmount, txInfo.blockHeight)
+    << "  " << std::setw(FEE_MAX_WIDTH) << currency.formatAmount(txInfo.fee, txInfo.blockHeight)
     << "  " << std::setw(BLOCK_MAX_WIDTH) << txInfo.blockHeight
     << "  " << std::setw(UNLOCK_TIME_MAX_WIDTH) << txInfo.unlockTime;
 
@@ -565,7 +579,7 @@ void printListTransfersItem(LoggerRef& logger, const WalletLegacyTransaction& tx
       for (TransferId id = txInfo.firstTransferId; id < txInfo.firstTransferId + txInfo.transferCount; ++id) {
         WalletLegacyTransfer tr;
         wallet.getTransfer(id, tr);
-        logger(INFO, rowColor) << tr.address << "  " << std::setw(TOTAL_AMOUNT_MAX_WIDTH) << currency.formatAmount(tr.amount);
+        logger(INFO, rowColor) << tr.address << "  " << std::setw(TOTAL_AMOUNT_MAX_WIDTH) << currency.formatAmount(tr.amount, txInfo.blockHeight);
       }
     }
   }
@@ -675,11 +689,13 @@ simple_wallet::simple_wallet(System::Dispatcher& dispatcher, const CryptoNote::C
   m_consoleHandler.setHandler("outputs", std::bind(&simple_wallet::show_unlocked_outputs_count, this, std::placeholders::_1), "Show the number of unlocked outputs available for a transaction");
   m_consoleHandler.setHandler("bc_height", std::bind(&simple_wallet::show_blockchain_height, this, std::placeholders::_1), "Show blockchain height");
   m_consoleHandler.setHandler("transfer", std::bind(&simple_wallet::transfer, this, std::placeholders::_1),
-    "transfer <mixin_count> <addr_1> <amount_1> [<addr_2> <amount_2> ... <addr_N> <amount_N>] [-p payment_id] [-f fee]"
+    "transfer <addr_1> <amount_1> [<addr_2> <amount_2> ... <addr_N> <amount_N>] [-p payment_id] [-f fee] [-m mixin_count]"
     " - Transfer <amount_1>,... <amount_N> to <address_1>,... <address_N>, respectively. "
-    "<mixin_count> is the number of transactions yours is indistinguishable from (from 0 to maximum available)");
+    "<mixin_count> defaults to ring size 16 and can be overridden with -m.");
+  m_consoleHandler.setHandler("dust_sweep", std::bind(&simple_wallet::dust_sweep, this, std::placeholders::_1),
+    "dust_sweep [max_inputs] - Consolidate non-aligned transparent outputs to your wallet address");
   m_consoleHandler.setHandler("prepare", std::bind(&simple_wallet::prepare_tx, this, std::placeholders::_1),
-    "Prepare raw transaction in hex format but do not relay, e.g. for manual relay <addr_1> <amount_1> ... <addr_N> <amount_N> [-p payment_id] [-f fee]"
+    "Prepare raw transaction in hex format but do not relay, e.g. for manual relay <addr_1> <amount_1> ... <addr_N> <amount_N> [-p payment_id] [-f fee] [-m mixin_count]"
     " - Transfer <amount_1>,... <amount_N> to <address_1>,... <address_N>, respectively. ");
   m_consoleHandler.setHandler("set_log", std::bind(&simple_wallet::set_log, this, std::placeholders::_1), "set_log <level> - Change current log level, <level> is a number 0-4");
   m_consoleHandler.setHandler("address", std::bind(&simple_wallet::print_address, this, std::placeholders::_1), "Show current wallet public address");
@@ -834,7 +850,7 @@ bool simple_wallet::get_reserve_proof(const std::vector<std::string> &args)
 
   uint64_t reserve = 0;
   if (args[0] != "all") {
-    if (!m_currency.parseAmount(args[0], reserve)) {
+    if (!m_currency.parseAmount(args[0], reserve, m_node->getLastLocalBlockHeight())) {
       fail_msg_writer() << "amount is wrong: " << args[0];
       return true;
     }
@@ -1990,6 +2006,31 @@ void simple_wallet::synchronizationCompleted(std::error_code result) {
   std::unique_lock<std::mutex> lock(m_walletSynchronizedMutex);
   m_walletSynchronized = true;
   m_walletSynchronizedCV.notify_one();
+
+  // One-time dust notice after initial sync. With CT activated, sub-floor outputs
+  // remain spendable as transparent inputs but cannot become CT outputs; the wallet
+  // will absorb them into fees when sending.
+  if (!result) {
+    try {
+      auto outputs = m_wallet->getOutputs();
+      size_t dustCount = 0;
+      uint64_t dustTotal = 0;
+      for (const auto& out : outputs) {
+        if (out.type == TransactionTypes::OutputType::Key && CryptoNote::Currency::isDustOutput(out.amount)) {
+          dustTotal += out.amount;
+          ++dustCount;
+        }
+      }
+      if (dustCount > 0) {
+        logger(INFO, BRIGHT_YELLOW)
+          << "\nNote: " << dustCount << " sub-MIN_CT output(s) totaling "
+          << m_currency.formatAmount(dustTotal) << " KRB.\n"
+          << "These are spendable but will be absorbed into transaction fees rather than"
+          << " becoming confidential outputs.";
+      }
+    } catch (...) {
+    }
+  }
 }
 
 void simple_wallet::synchronizationProgressUpdated(uint32_t current, uint32_t total) {
@@ -2070,10 +2111,29 @@ bool simple_wallet::restore_seed(const std::vector<std::string>& args/* = std::v
 }
 //----------------------------------------------------------------------------------------------------
 bool simple_wallet::show_balance(const std::vector<std::string>& args/* = std::vector<std::string>()*/) {
-  success_msg_writer() << "available: " << m_currency.formatAmount(m_wallet->actualBalance());
-  success_msg_writer() << "pending: " << m_currency.formatAmount(m_wallet->pendingBalance());
-  success_msg_writer() << "unmixable: " << m_currency.formatAmount(m_wallet->unmixableBalance());
-  success_msg_writer() << "total balance: " << m_currency.formatAmount(m_wallet->actualBalance() + m_wallet->pendingBalance());
+  const uint32_t walletHeight = m_node->getLastLocalBlockHeight();
+  success_msg_writer() << "available: " << m_currency.formatAmount(m_wallet->actualBalance(), walletHeight);
+  success_msg_writer() << "pending: " << m_currency.formatAmount(m_wallet->pendingBalance(), walletHeight);
+  success_msg_writer() << "unmixable: " << m_currency.formatAmount(m_wallet->unmixableBalance(), walletHeight);
+  success_msg_writer() << "total balance: " << m_currency.formatAmount(m_wallet->actualBalance() + m_wallet->pendingBalance(), walletHeight);
+
+  // Sub-MIN_CT outputs are spendable as transparent inputs but cannot become CT outputs;
+  // when sending CT they will be absorbed into transaction fees.
+  auto outputs = m_wallet->getOutputs();
+  uint64_t dustTotal = 0;
+  size_t dustCount = 0;
+  for (const auto& out : outputs) {
+    if (out.type == TransactionTypes::OutputType::Key && CryptoNote::Currency::isDustOutput(out.amount)) {
+      dustTotal += out.amount;
+      ++dustCount;
+    }
+  }
+  if (dustCount > 0) {
+    logger(INFO, BRIGHT_YELLOW)
+      << "Note: " << dustCount << " sub-MIN_CT output(s) totaling "
+      << m_currency.formatAmount(dustTotal) << " KRB.\n"
+      << "Spendable, but will be absorbed into fees rather than becoming confidential outputs.";
+  }
 
   return true;
 }
@@ -2220,23 +2280,17 @@ bool simple_wallet::transfer(const std::vector<std::string> &args) {
   }
 
   uint64_t unmixable_balance = m_wallet->unmixableBalance();
-  uint64_t mixIn = 0;
-  std::string mixin_str = args[0];
-  if (!Common::fromString(args[0], mixIn)) {
-    logger(ERROR, BRIGHT_RED) << "mixin_count should be non-negative integer, got " << mixin_str;
-    return false;
-  }
-
-  if (mixIn != 0 && unmixable_balance != 0) {
-    logger(WARNING, BRIGHT_YELLOW) << "You have unmixable coins " << m_currency.formatAmount(unmixable_balance) << " in your wallet. "
-                                   << "If you encounter problems with sending, sweep them by making transaction with zero <mixin_count>.";
-  }
 
   try {
     TransferCommand cmd(m_currency, *m_node);
 
     if (!cmd.parseArguments(logger, args))
       return true;
+
+    if (cmd.fake_outs_count != 0 && unmixable_balance != 0) {
+      logger(WARNING, BRIGHT_YELLOW) << "You have unmixable coins " << m_currency.formatAmount(unmixable_balance) << " in your wallet. "
+                                     << "If you encounter problems with sending, sweep them by making transaction with zero <mixin_count>.";
+    }
 
 #ifndef __ANDROID__
     for (auto& kv : cmd.aliases) {
@@ -2338,6 +2392,107 @@ bool simple_wallet::transfer(const std::vector<std::string> &args) {
     fail_msg_writer() << e.what();
   } catch (...) {
     fail_msg_writer() << "unknown error";
+  }
+
+  return true;
+}
+//----------------------------------------------------------------------------------------------------
+bool simple_wallet::dust_sweep(const std::vector<std::string>& args) {
+  if (m_trackingWallet) {
+    fail_msg_writer() << "This is tracking wallet. Spending is impossible.";
+    return true;
+  }
+
+  size_t maxInputs = CryptoNote::parameters::CT_MAX_INPUTS;
+  if (!args.empty() && !Common::fromString(args[0], maxInputs)) {
+    fail_msg_writer() << "max_inputs should be a non-negative integer";
+    return true;
+  }
+  maxInputs = std::min<size_t>(maxInputs, CryptoNote::parameters::CT_MAX_INPUTS);
+
+  const uint64_t fee = m_node->getMinimalFee();
+  std::vector<TransactionOutputInformation> unlockedOutputs = m_wallet->getUnlockedOutputs();
+  std::list<TransactionOutputInformation> selectedOutputs;
+  uint64_t selectedAmount = 0;
+
+  for (const auto& out : unlockedOutputs) {
+    if (selectedOutputs.size() >= maxInputs) {
+      break;
+    }
+    if (out.type == TransactionTypes::OutputType::Confidential ||
+        out.amount % CryptoNote::MIN_CT_DENOMINATION == 0) {
+      continue;
+    }
+    selectedOutputs.push_back(out);
+    selectedAmount += out.amount;
+  }
+
+  if (selectedOutputs.empty()) {
+    success_msg_writer() << "No non-aligned transparent outputs to sweep.";
+    return true;
+  }
+
+  if (selectedAmount <= fee) {
+    fail_msg_writer() << "Selected dust does not cover the fee.";
+    return true;
+  }
+
+  const uint64_t sweepAmount = ((selectedAmount - fee) / CryptoNote::MIN_CT_DENOMINATION) *
+                               CryptoNote::MIN_CT_DENOMINATION;
+  if (sweepAmount == 0) {
+    fail_msg_writer() << "Selected dust is below one CT denomination after fee.";
+    return true;
+  }
+
+  try {
+    WalletLegacyTransfer transfer;
+    transfer.address = m_wallet->getAddress();
+    transfer.amount = static_cast<int64_t>(sweepAmount);
+
+    CryptoNote::WalletHelper::SendCompleteResultObserver sent;
+    WalletHelper::IWalletRemoveObserverGuard removeGuard(*m_wallet, sent);
+
+    CryptoNote::TransactionId tx = WALLET_LEGACY_INVALID_TRANSACTION_ID;
+    std::string raw_tx;
+    if (!m_do_not_relay_tx) {
+      tx = m_wallet->sendTransaction(std::vector<WalletLegacyTransfer>{transfer}, selectedOutputs, fee, "", 0, 0);
+    } else {
+      raw_tx = m_wallet->prepareRawTransaction(tx, std::vector<WalletLegacyTransfer>{transfer}, selectedOutputs, fee, "", 0, 0);
+    }
+
+    if (tx == WALLET_LEGACY_INVALID_TRANSACTION_ID) {
+      fail_msg_writer() << "Can't sweep dust";
+      return true;
+    }
+
+    if (!m_do_not_relay_tx) {
+      std::error_code sendError = sent.wait(tx);
+      removeGuard.removeObserver();
+      if (sendError) {
+        fail_msg_writer() << sendError.message();
+        return true;
+      }
+    }
+
+    CryptoNote::WalletLegacyTransaction txInfo;
+    m_wallet->getTransaction(tx, txInfo);
+    Crypto::SecretKey tx_key = reinterpret_cast<const Crypto::SecretKey&>(txInfo.secretKey.get());
+    success_msg_writer(true) << "Dust sweep created from " << selectedOutputs.size()
+      << " input(s), transaction id: " << Common::podToHex(txInfo.hash)
+      << ", key: " << Common::podToHex(tx_key);
+
+    if (m_do_not_relay_tx) {
+      const std::string filename = "raw_tx.txt";
+      std::ofstream txFile(filename, std::ios::out | std::ios::trunc | std::ios::binary);
+      if (txFile.good()) {
+        txFile << raw_tx;
+      }
+      m_do_not_relay_tx = false;
+    }
+
+    CryptoNote::WalletHelper::storeWallet(*m_wallet, m_wallet_file);
+  } catch (const std::exception& e) {
+    fail_msg_writer() << e.what();
   }
 
   return true;
@@ -2709,9 +2864,10 @@ int main(int argc, char* argv[]) {
     try  {
       walletFileName = ::tryToOpenWalletOrLoadKeysOrThrow(logger, wallet, wallet_file, wallet_password);
 
-      logger(INFO) << "available balance: " << currency.formatAmount(wallet->actualBalance())
-                   << ", locked amount: " << currency.formatAmount(wallet->pendingBalance())
-                   << ", unmixable: " << currency.formatAmount(wallet->unmixableBalance());
+      const uint32_t walletHeight = node->getLastLocalBlockHeight();
+      logger(INFO) << "available balance: " << currency.formatAmount(wallet->actualBalance(), walletHeight)
+                   << ", locked amount: " << currency.formatAmount(wallet->pendingBalance(), walletHeight)
+                   << ", unmixable: " << currency.formatAmount(wallet->unmixableBalance(), walletHeight);
 
       logger(INFO, BRIGHT_GREEN) << "Loaded ok";
     } catch (const std::exception& e)  {

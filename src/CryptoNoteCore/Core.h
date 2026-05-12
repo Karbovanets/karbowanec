@@ -77,8 +77,9 @@ namespace CryptoNote {
      virtual bool getBlockSize(const Crypto::Hash& hash, size_t& size) override;
      virtual bool getAlreadyGeneratedCoins(const Crypto::Hash& hash, uint64_t& generatedCoins) override;
      virtual bool getBlockReward(uint8_t blockMajorVersion, size_t medianSize, size_t currentBlockSize, uint64_t alreadyGeneratedCoins, uint64_t fee,
-                                 uint64_t& reward, int64_t& emissionChange) override;
+                                 uint64_t& reward, int64_t& emissionChange, uint32_t height = 0) override;
      virtual bool scanOutputkeysForIndices(const KeyInput& txInToKey, std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) override;
+     virtual bool scanCtInputRingForIndices(const ConfidentialInput& cin, std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) override;
      virtual bool getBlockDifficulty(uint32_t height, difficulty_type& difficulty) override;
      virtual bool getBlockCumulativeDifficulty(uint32_t height, difficulty_type& difficulty) override;
      virtual bool getBlockTimestamp(uint32_t height, uint64_t& timestamp) override;
@@ -191,11 +192,13 @@ namespace CryptoNote {
      bool is_tx_spendtime_unlocked(uint64_t unlock_time, uint32_t height);
 
    private:
-     bool add_new_tx(const Transaction& tx, const Crypto::Hash& tx_hash, size_t blob_size, tx_verification_context& tvc, bool keeped_by_block);
+     bool add_new_tx(const Transaction& tx, const Crypto::Hash& tx_hash, size_t blob_size,
+                     tx_verification_context& tvc, bool keeped_by_block,
+                     TxValidationContext validationContext);
      bool load_state_data();
      bool parse_tx_from_blob(Transaction& tx, Crypto::Hash& tx_hash, Crypto::Hash& tx_prefix_hash, const BinaryArray& blob);
 
-     bool check_tx_syntax(const Transaction& txc, const Crypto::Hash& txHash);
+     bool check_tx_syntax(const Transaction& txc, const Crypto::Hash& txHash, uint32_t height);
      //check correct values, amounts and all lightweight checks not related with database
      bool check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, bool keeped_by_block);
      //check if tx already in memory pool or in main blockchain
