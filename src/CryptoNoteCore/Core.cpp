@@ -505,23 +505,26 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
         return false;
       }
       const auto& ci = boost::get<ConfidentialInput>(tx.inputs[i]);
-      if (ci.ringPubkeys.size() != ci.ringCommitments.size()) {
-        logger(ERROR) << "CT tx input " << i << " ring pubkeys/commitments size mismatch, rejected for tx id= " << Common::podToHex(txHash);
-        return false;
-      }
-      if (ci.ringPubkeys.size() != ci.ringOutputIndexes.size()) {
-        logger(ERROR) << "CT tx input " << i << " ring pubkeys/indexes size mismatch, rejected for tx id= " << Common::podToHex(txHash);
-        return false;
-      }
-      if (ci.ringPubkeys.empty()) {
+      if (ci.ringMembers.empty()) {
         logger(ERROR) << "CT tx input " << i << " has empty ring, rejected for tx id= " << Common::podToHex(txHash);
         return false;
       }
-      if (ci.ringAmount == 0) {
-        logger(ERROR) << "CT tx input " << i << " has zero ring amount bucket, rejected for tx id= " << Common::podToHex(txHash);
+      if (ci.ringPubkeys.size() != ci.ringMembers.size()) {
+        logger(ERROR) << "CT tx input " << i << " ring pubkeys/members size mismatch, rejected for tx id= " << Common::podToHex(txHash);
         return false;
       }
-      if (tx.ctSignatures[i].ss.size() != ci.ringPubkeys.size()) {
+      if (ci.ringCommitments.size() != ci.ringMembers.size()) {
+        logger(ERROR) << "CT tx input " << i << " ring commitments/members size mismatch, rejected for tx id= " << Common::podToHex(txHash);
+        return false;
+      }
+      for (size_t k = 0; k < ci.ringMembers.size(); ++k) {
+        if (ci.ringMembers[k].amount == 0) {
+          logger(ERROR) << "CT tx input " << i << " ring member " << k
+                        << " has zero amount bucket, rejected for tx id= " << Common::podToHex(txHash);
+          return false;
+        }
+      }
+      if (tx.ctSignatures[i].ss.size() != ci.ringMembers.size()) {
         logger(ERROR) << "CT tx input " << i << " MLSAG ss size mismatch with ring size, rejected for tx id= " << Common::podToHex(txHash);
         return false;
       }

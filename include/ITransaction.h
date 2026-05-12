@@ -44,6 +44,13 @@ namespace TransactionTypes {
     uint32_t blockHeight = 0;
     bool isCoinbase = false;
     bool isConfidential = false;
+    // Bucket amount this ring member lives in: for transparent outputs, the
+    // on-chain amount; for confidential outputs, CT_CONFIDENTIAL_OUTPUT_AMOUNT.
+    // Lets CT inputs assemble mixed rings (transparent + confidential decoys)
+    // where each member names its own bucket. Defaults to 0 so legacy callers
+    // that ignore this field don't accidentally end up with non-zero garbage;
+    // the CT wallet path populates it explicitly.
+    uint64_t amount = 0;
   };
 
   typedef std::vector<GlobalOutput> GlobalOutputsContainer;
@@ -55,6 +62,9 @@ namespace TransactionTypes {
   };
 
   struct InputKeyInfo {
+    // Legacy single-bucket field: still used by transparent KeyInput rings.
+    // For CT inputs with mixed-bucket rings, the per-member amount on each
+    // GlobalOutput in `outputs` is authoritative and this field is ignored.
     uint64_t amount;
     GlobalOutputsContainer outputs;
     OutputKeyInfo realOutput;

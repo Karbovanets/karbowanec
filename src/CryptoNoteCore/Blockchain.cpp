@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <unordered_map>
 #include <boost/foreach.hpp>
 #include "Common/Math.h"
 #include "Common/int-util.h"
@@ -2340,12 +2341,8 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
       return false;
     }
     const auto& cin = boost::get<ConfidentialInput>(tx.inputs[i]);
-    const size_t ringSize = cin.ringPubkeys.size();
+    const size_t ringSize = cin.ringMembers.size();
 
-    if (cin.ringAmount == 0) {
-      logger(ERROR) << "CT validation: input " << i << " has zero ring amount bucket in tx " << txHash;
-      return false;
-    }
     if (ringSize == 0) {
       logger(ERROR) << "CT validation: input " << i << " has empty ring in tx " << txHash;
       return false;
@@ -2362,7 +2359,7 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
                     << " above maximum " << CT_MAX_RING_SIZE << " in tx " << txHash;
       return false;
     }
-    if (ringSize != cin.ringCommitments.size() || ringSize != cin.ringOutputIndexes.size()) {
+    if (ringSize != cin.ringPubkeys.size() || ringSize != cin.ringCommitments.size()) {
       logger(ERROR) << "CT validation: input " << i << " ring field size mismatch in tx " << txHash;
       return false;
     }
@@ -2380,28 +2377,22 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
       return false;
     }
 
-    // Convert ring offsets to absolute indexes and ensure canonical strictly increasing order.
-    const std::vector<uint32_t> absoluteOffsets = relative_output_offsets_to_absolute(cin.ringOutputIndexes);
-    if (absoluteOffsets.empty()) {
-      logger(ERROR) << "CT validation: input " << i << " has empty absolute ring offsets in tx " << txHash;
-      return false;
-    }
-    for (size_t k = 1; k < absoluteOffsets.size(); ++k) {
-      if (absoluteOffsets[k] <= absoluteOffsets[k - 1]) {
-        logger(ERROR) << "CT validation: input " << i << " has non-canonical ring offsets at member " << k
-                      << " in tx " << txHash;
+    // Canonical ordering: members must be sorted by (amount, outputIndex)
+    // strictly ascending. Same amount → strictly-ascending outputIndex
+    // (no duplicates within a bucket); different amounts → amount non-
+    // decreasing, with the cross-bucket break sorting any outputIndex pair.
+    // This pins ring metadata against malleability across the mixed-bucket
+    // ring format.
+    for (size_t k = 1; k < ringSize; ++k) {
+      const auto& prev = cin.ringMembers[k - 1];
+      const auto& cur = cin.ringMembers[k];
+      const bool ascending = (cur.amount > prev.amount) ||
+                             (cur.amount == prev.amount && cur.outputIndex > prev.outputIndex);
+      if (!ascending) {
+        logger(ERROR) << "CT validation: input " << i << " ring members not in canonical (amount, outputIndex)"
+                      << " strictly-ascending order at slot " << k << " in tx " << txHash;
         return false;
       }
-    }
-
-    const uint32_t outputCount = m_db.getKeyOutputCount(cin.ringAmount);
-    if (outputCount == 0) {
-      logger(ERROR) << "CT validation: input " << i << " ring amount bucket has no outputs in tx " << txHash;
-      return false;
-    }
-    if (absoluteOffsets.back() >= outputCount) {
-      logger(ERROR) << "CT validation: input " << i << " ring offset out of range in tx " << txHash;
-      return false;
     }
 
     auto& boundPubkeys = verifiedRingPubkeys[i];
@@ -2409,13 +2400,43 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
     boundPubkeys.reserve(ringSize);
     boundCommitments.reserve(ringSize);
 
+    // Cache per-bucket output counts so we don't hit LMDB once per ring
+    // member of the same amount.
+    std::unordered_map<uint64_t, uint32_t> bucketOutputCount;
+
     for (size_t k = 0; k < ringSize; ++k) {
+      const uint64_t memberAmount = cin.ringMembers[k].amount;
+      const uint32_t memberOffset = cin.ringMembers[k].outputIndex;
+
+      if (memberAmount == 0) {
+        logger(ERROR) << "CT validation: input " << i << " ring member " << k
+                      << " has zero amount bucket in tx " << txHash;
+        return false;
+      }
+
+      auto cacheIt = bucketOutputCount.find(memberAmount);
+      if (cacheIt == bucketOutputCount.end()) {
+        const uint32_t outputCount = m_db.getKeyOutputCount(memberAmount);
+        if (outputCount == 0) {
+          logger(ERROR) << "CT validation: input " << i << " ring member " << k
+                        << " references empty bucket (amount=" << memberAmount << ") in tx " << txHash;
+          return false;
+        }
+        cacheIt = bucketOutputCount.emplace(memberAmount, outputCount).first;
+      }
+      if (memberOffset >= cacheIt->second) {
+        logger(ERROR) << "CT validation: input " << i << " ring member " << k
+                      << " offset " << memberOffset << " out of range (amount=" << memberAmount
+                      << ", bucket size=" << cacheIt->second << ") in tx " << txHash;
+        return false;
+      }
+
       uint32_t block = 0;
       uint16_t txSlot = 0;
       uint16_t outIdx = 0;
-      if (!m_db.getKeyOutput(cin.ringAmount, absoluteOffsets[k], block, txSlot, outIdx)) {
+      if (!m_db.getKeyOutput(memberAmount, memberOffset, block, txSlot, outIdx)) {
         logger(ERROR) << "CT validation: input " << i << " failed to resolve ring member " << k
-                      << " (amount=" << cin.ringAmount << ", index=" << absoluteOffsets[k] << ") in tx " << txHash;
+                      << " (amount=" << memberAmount << ", index=" << memberOffset << ") in tx " << txHash;
         return false;
       }
 
@@ -2441,19 +2462,21 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
         return false;
       }
 
-      // Verify the ring member belongs to the bucket claimed by cin.ringAmount.
-      // For ConfidentialOutput, the bucket is always CT_CONFIDENTIAL_OUTPUT_AMOUNT.
-      // For transparent KeyOutput, it must equal the resolved on-chain amount.
+      // Verify the ring member's claimed bucket matches the type and amount of
+      // the resolved on-chain output. CT outputs live in the sentinel bucket;
+      // transparent KeyOutputs live in their own amount bucket.
       if (ringMemberIsConfidential) {
-        if (cin.ringAmount != CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT) {
+        if (memberAmount != CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT) {
           logger(ERROR) << "CT validation: input " << i << " ring member " << k
-                        << " is confidential but ringAmount != CT_CONFIDENTIAL_OUTPUT_AMOUNT in tx " << txHash;
+                        << " is confidential but member amount " << memberAmount
+                        << " != CT_CONFIDENTIAL_OUTPUT_AMOUNT in tx " << txHash;
           return false;
         }
       } else {
-        if (cin.ringAmount != referencedOutput.amount) {
+        if (memberAmount != referencedOutput.amount) {
           logger(ERROR) << "CT validation: input " << i << " ring member " << k
-                        << " amount " << referencedOutput.amount << " does not match ringAmount " << cin.ringAmount
+                        << " bucket amount " << memberAmount
+                        << " does not match referenced output amount " << referencedOutput.amount
                         << " in tx " << txHash;
           return false;
         }
@@ -2661,13 +2684,8 @@ bool Blockchain::checkConfidentialTransactionStructure(const Transaction& tx,
       return false;
     }
     const auto& cin = boost::get<ConfidentialInput>(tx.inputs[i]);
-    const size_t ringSize = cin.ringPubkeys.size();
+    const size_t ringSize = cin.ringMembers.size();
 
-    if (cin.ringAmount == 0) {
-      logger(ERROR) << "CT structural validation: input " << i
-                    << " has zero ring amount bucket in tx " << txHash;
-      return false;
-    }
     if (ringSize == 0) {
       logger(ERROR) << "CT structural validation: input " << i << " has empty ring in tx " << txHash;
       return false;
@@ -2682,7 +2700,7 @@ bool Blockchain::checkConfidentialTransactionStructure(const Transaction& tx,
                     << " above maximum " << CT_MAX_RING_SIZE << " in tx " << txHash;
       return false;
     }
-    if (ringSize != cin.ringCommitments.size() || ringSize != cin.ringOutputIndexes.size()) {
+    if (ringSize != cin.ringPubkeys.size() || ringSize != cin.ringCommitments.size()) {
       logger(ERROR) << "CT structural validation: input " << i
                     << " ring field size mismatch in tx " << txHash;
       return false;
@@ -2702,6 +2720,11 @@ bool Blockchain::checkConfidentialTransactionStructure(const Transaction& tx,
     }
 
     for (size_t k = 0; k < ringSize; ++k) {
+      if (cin.ringMembers[k].amount == 0) {
+        logger(ERROR) << "CT structural validation: input " << i << " ring member " << k
+                      << " has zero amount bucket in tx " << txHash;
+        return false;
+      }
       if (!Crypto::ct_public_key_valid(cin.ringPubkeys[k])) {
         logger(ERROR) << "CT structural validation: input " << i << " ring pubkey " << k
                       << " is not a valid CT public key in tx " << txHash;
@@ -2714,16 +2737,16 @@ bool Blockchain::checkConfidentialTransactionStructure(const Transaction& tx,
       }
     }
 
-    const std::vector<uint32_t> absoluteOffsets = relative_output_offsets_to_absolute(cin.ringOutputIndexes);
-    if (absoluteOffsets.empty()) {
-      logger(ERROR) << "CT structural validation: input " << i
-                    << " has empty absolute ring offsets in tx " << txHash;
-      return false;
-    }
-    for (size_t k = 1; k < absoluteOffsets.size(); ++k) {
-      if (absoluteOffsets[k] <= absoluteOffsets[k - 1]) {
-        logger(ERROR) << "CT structural validation: input " << i
-                      << " has non-canonical ring offsets at member " << k << " in tx " << txHash;
+    // Canonical ordering: (amount, outputIndex) strictly ascending.
+    for (size_t k = 1; k < ringSize; ++k) {
+      const auto& prev = cin.ringMembers[k - 1];
+      const auto& cur = cin.ringMembers[k];
+      const bool ascending = (cur.amount > prev.amount) ||
+                             (cur.amount == prev.amount && cur.outputIndex > prev.outputIndex);
+      if (!ascending) {
+        logger(ERROR) << "CT structural validation: input " << i << " ring members not in canonical"
+                      << " (amount, outputIndex) strictly-ascending order at slot " << k
+                      << " in tx " << txHash;
         return false;
       }
     }
@@ -2784,21 +2807,32 @@ bool Blockchain::scanCtInputRingForIndexes(const ConfidentialInput& cin,
                                             std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) {
   std::lock_guard<decltype(m_blockchain_lock)> bcLock(m_blockchain_lock);
 
-  const std::vector<uint32_t> absoluteOffsets = relative_output_offsets_to_absolute(cin.ringOutputIndexes);
-  if (absoluteOffsets.empty()) {
+  if (cin.ringMembers.empty()) {
     return false;
   }
 
-  const uint32_t outputCount = m_db.getKeyOutputCount(cin.ringAmount);
-  if (outputCount == 0 || absoluteOffsets.back() >= outputCount) {
-    return false;
-  }
+  std::unordered_map<uint64_t, uint32_t> bucketOutputCount;
 
-  for (uint32_t absIdx : absoluteOffsets) {
+  for (const auto& member : cin.ringMembers) {
+    if (member.amount == 0) {
+      return false;
+    }
+    auto cacheIt = bucketOutputCount.find(member.amount);
+    if (cacheIt == bucketOutputCount.end()) {
+      const uint32_t count = m_db.getKeyOutputCount(member.amount);
+      if (count == 0) {
+        return false;
+      }
+      cacheIt = bucketOutputCount.emplace(member.amount, count).first;
+    }
+    if (member.outputIndex >= cacheIt->second) {
+      return false;
+    }
+
     uint32_t block = 0;
     uint16_t txSlot = 0;
     uint16_t outIdx = 0;
-    if (!m_db.getKeyOutput(cin.ringAmount, absIdx, block, txSlot, outIdx)) {
+    if (!m_db.getKeyOutput(member.amount, member.outputIndex, block, txSlot, outIdx)) {
       return false;
     }
     TransactionEntry te = transactionByIndex({block, txSlot});

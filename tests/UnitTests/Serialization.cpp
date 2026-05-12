@@ -94,9 +94,9 @@ TEST(BinarySerializer, rejectsCtOutputCountAboveProtocolCap) {
   ASSERT_TRUE(tx.outputs.empty());
 }
 
-TEST(BinarySerializer, rejectsCtRingOffsetsAboveProtocolCapBeforeResize) {
+TEST(BinarySerializer, rejectsCtRingMembersAboveProtocolCapBeforeResize) {
+  // First field of ConfidentialInput is the ring_members vector size.
   BinaryArray blob;
-  appendVarint(blob, 0); // ring_amount
   appendVarint(blob, static_cast<uint64_t>(parameters::CT_MAX_RING_SIZE) + 1);
 
   Common::MemoryInputStream stream(blob.data(), blob.size());
@@ -104,22 +104,25 @@ TEST(BinarySerializer, rejectsCtRingOffsetsAboveProtocolCapBeforeResize) {
   ConfidentialInput input;
 
   ASSERT_THROW(serialize(input, serializer), std::runtime_error);
-  ASSERT_TRUE(input.ringOutputIndexes.empty());
+  ASSERT_TRUE(input.ringMembers.empty());
 }
 
 TEST(BinarySerializer, rejectsCtRingCommitmentCountMismatchBeforeResize) {
+  // Build a blob with 1 ring_member but 2 ring_commits.
   BinaryArray blob;
-  appendVarint(blob, 0); // ring_amount
-  appendVarint(blob, 0); // ring_offsets
+  appendVarint(blob, 1); // ring_members
+  appendVarint(blob, 1); // member[0].amount
+  appendVarint(blob, 0); // member[0].outputIndex
   appendVarint(blob, 1); // ring_pubkeys
   appendZeros(blob, sizeof(Crypto::PublicKey));
-  appendVarint(blob, 2); // ring_commits
+  appendVarint(blob, 2); // ring_commits — mismatch
 
   Common::MemoryInputStream stream(blob.data(), blob.size());
   BinaryInputStreamSerializer serializer(stream);
   ConfidentialInput input;
 
   ASSERT_THROW(serialize(input, serializer), std::runtime_error);
+  ASSERT_EQ(1, input.ringMembers.size());
   ASSERT_EQ(1, input.ringPubkeys.size());
   ASSERT_TRUE(input.ringCommitments.empty());
 }

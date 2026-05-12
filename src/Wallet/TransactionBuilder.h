@@ -57,18 +57,31 @@ std::unique_ptr<ITransaction> buildTransaction(
 
 // ── Confidential (v2 CT) transaction builder types ──────────────────────────
 
+// One ring member descriptor used during transaction construction.
+// Each member is self-describing: its amount bucket and absolute offset are
+// independent of other members, allowing mixed transparent/confidential rings.
+// For a transparent KeyOutput member, amount is the real on-chain amount; for
+// a ConfidentialOutput member, amount is CT_CONFIDENTIAL_OUTPUT_AMOUNT.
+struct CTBuildRingMember {
+  uint64_t                       amount;       // bucket: real amount or CT sentinel
+  uint32_t                       outputIndex;  // absolute index in that bucket
+  Crypto::PublicKey              pubkey;       // one-time public key
+  Crypto::EllipticCurvePoint     commitment;   // Pedersen commitment (or amount*H for transparent)
+};
+
 // CT input: a spent output with its ring members and the sender's secret keys.
 // For pre-fork transparent inputs spent into CT, realBlinding is zero scalar
-// and realAmount is the scaled (redenominated) amount.
+// and amount is the scaled (redenominated) amount.
+//
+// Ring members are NOT required to be sorted on entry — buildConfidentialTransaction
+// canonicalises them by (amount, outputIndex) before signing and updates
+// realIndex to the corresponding post-sort slot.
 struct CTBuildInput {
-  uint64_t                                  ringAmount;       // transparent amount bucket of ring members
-  std::vector<uint32_t>                     ringOutputIndexes; // absolute indexes in ringAmount bucket
-  std::vector<Crypto::PublicKey>          ringPubkeys;      // one-time keys of ring members
-  std::vector<Crypto::EllipticCurvePoint> ringCommitments;  // Pedersen commitments of ring members
-  size_t  realIndex;          // index of the real input in the ring
-  Crypto::SecretKey spendPrivkey;  // ephemeral spend key for real input: P_real = x*G
-  Crypto::EllipticCurveScalar realBlinding; // blinding factor of real input's commitment (0 for transparent)
-  uint64_t amount;            // plaintext amount in new atomic units
+  std::vector<CTBuildRingMember> ringMembers;  // all members of the ring (one is real)
+  size_t                         realIndex;    // index of the real spend in ringMembers (pre-sort)
+  Crypto::SecretKey              spendPrivkey; // ephemeral spend key for real input: P_real = x*G
+  Crypto::EllipticCurveScalar    realBlinding; // blinding of the real input's commitment (0 for transparent)
+  uint64_t                       amount;       // plaintext amount of the real input in atomic units
 };
 
 // CT output: a single canonical denomination going to a destination address.

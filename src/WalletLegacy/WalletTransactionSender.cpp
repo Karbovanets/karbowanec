@@ -423,33 +423,42 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::doSendTransaction(std::s
         }
       }
 
-      // Convert TxBuildInput → CTBuildInput
+      // Convert TxBuildInput → CTBuildInput. Each ring member is self-describing
+      // via its own (amount, outputIndex), so the same code path handles mixed
+      // transparent/confidential rings — relies on prepareInputs() populating
+      // GlobalOutput.amount per member.
       std::vector<CTBuildInput> ctInputs;
       for (auto& inp : inputs) {
         CTBuildInput cti;
         const auto& ki = inp.keyInfo;
-        cti.ringAmount = ki.amount;
-        for (const auto& gout : ki.outputs) {
-          cti.ringPubkeys.push_back(gout.targetKey);
-          cti.ringOutputIndexes.push_back(gout.outputIndex);
-        }
-        // Ring commitments must be computed exactly as core validation does.
-        TransactionOutput ringMemberOutput;
-        ringMemberOutput.amount = ki.amount;
-        ringMemberOutput.target = KeyOutput();
-        for (size_t k = 0; k < ki.outputs.size(); ++k) {
+        const size_t ringSize = ki.outputs.size();
+        cti.ringMembers.reserve(ringSize);
+
+        for (size_t k = 0; k < ringSize; ++k) {
+          const auto& gout = ki.outputs[k];
+          const uint64_t memberAmount = gout.isConfidential
+            ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+            : gout.amount;
+          if (memberAmount == 0) {
+            throw std::runtime_error("CT ring member " + std::to_string(k)
+              + " has zero amount bucket in input " + std::to_string(ctInputs.size()));
+          }
           Crypto::EllipticCurvePoint ringCommit{};
-          if (ki.outputs[k].isConfidential) {
-            ringCommit = ki.outputs[k].commitment;
+          if (gout.isConfidential) {
+            ringCommit = gout.commitment;
           } else {
-            if (!Crypto::transparent_amount_to_commitment(ringMemberOutput.amount, ringCommit)) {
-              throw std::runtime_error("Failed to compute CT ring commitment for input " + std::to_string(ctInputs.size()));
+            if (!Crypto::transparent_amount_to_commitment(memberAmount, ringCommit)) {
+              throw std::runtime_error("Failed to compute CT ring commitment for input "
+                + std::to_string(ctInputs.size()));
             }
           }
-          cti.ringCommitments.push_back(ringCommit);
+          cti.ringMembers.push_back(CTBuildRingMember{
+            memberAmount, gout.outputIndex, gout.targetKey, ringCommit
+          });
         }
+
         cti.realIndex = ki.realOutput.transactionIndex;
-        if (cti.realIndex >= ki.outputs.size()) {
+        if (cti.realIndex >= ringSize) {
           throw std::system_error(make_error_code(error::INTERNAL_WALLET_ERROR));
         }
         // Derive ephemeral spend key
@@ -578,6 +587,12 @@ void WalletTransactionSender::prepareInputs(
     if (inputMixin != 0 && outs.size()) {
       std::sort(outs[i].outs.begin(), outs[i].outs.end(),
         [](const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& a, const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& b){ return a.global_amount_index < b.global_amount_index; });
+
+      // Per-decoy bucket amount. Single-bucket sampling for now (one bucket
+      // per input); mixed-bucket sampling would call the daemon multiple
+      // times per input and merge, populating GlobalOutput.amount per
+      // member from its source bucket.
+      const uint64_t decoyBucket = outs[i].amount;
       for (auto& daemon_oe: outs[i].outs) {
         if (td.globalOutputIndex == daemon_oe.global_amount_index)
           continue;
@@ -588,6 +603,7 @@ void WalletTransactionSender::prepareInputs(
         go.blockHeight = daemon_oe.block_height;
         go.isCoinbase = daemon_oe.is_coinbase != 0;
         go.isConfidential = daemon_oe.output_type == static_cast<uint8_t>(TransactionTypes::OutputType::Confidential);
+        go.amount = decoyBucket;
         inp.keyInfo.outputs.push_back(go);
         if (inp.keyInfo.outputs.size() >= inputMixin)
           break;
@@ -605,6 +621,9 @@ void WalletTransactionSender::prepareInputs(
     real_go.blockHeight = realBlockHeight;
     real_go.isCoinbase = realIsCoinbase;
     real_go.isConfidential = realIsConfidential;
+    real_go.amount = realIsConfidential
+      ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+      : td.amount;
 
     auto inserted_it = inp.keyInfo.outputs.insert(it_to_insert, real_go);
 

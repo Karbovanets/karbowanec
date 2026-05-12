@@ -185,8 +185,7 @@ namespace
     tx.fee = fee;
 
     ConfidentialInput in;
-    in.ringAmount = 1;
-    in.ringOutputIndexes.push_back(0);
+    in.ringMembers.push_back(RingMemberRef{1, 0});
     in.ringPubkeys.emplace_back();
     in.ringCommitments.emplace_back();
     std::memset(in.pseudoCommitment.data, 0, sizeof(in.pseudoCommitment.data));

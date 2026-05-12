@@ -100,12 +100,14 @@ struct KeyInputDetails {
 
 // Confidential (CT) input detail: amount is hidden, but the ring layout,
 // pseudo-commitment and key image are public and useful for explorers.
+// ringMembers carries the per-member (amount, outputIndex) tuples needed
+// to render mixed transparent/confidential rings; outputs[] holds the
+// matching resolved (txHash, outputIndex) pairs in the same order.
 struct ConfidentialInputDetails {
-  uint64_t ringAmount;
   Crypto::KeyImage keyImage;
   Crypto::EllipticCurvePoint pseudoCommitment;
   uint64_t mixin;
-  std::vector<uint32_t> ringOutputIndexes;
+  std::vector<RingMemberRef> ringMembers;
   std::vector<TransactionOutputReferenceDetails> outputs;
 };
 

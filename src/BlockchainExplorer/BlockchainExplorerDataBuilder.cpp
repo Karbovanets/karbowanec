@@ -346,11 +346,10 @@ bool BlockchainExplorerDataBuilder::fillTransactionDetails(const Transaction& tr
     } else if (txIn.type() == typeid(ConfidentialInput)) {
       const ConfidentialInput& cin = boost::get<ConfidentialInput>(txIn);
       CryptoNote::ConfidentialInputDetails ctInDetails;
-      ctInDetails.ringAmount = cin.ringAmount;
       ctInDetails.keyImage = cin.keyImage;
       ctInDetails.pseudoCommitment = cin.pseudoCommitment;
-      ctInDetails.mixin = cin.ringPubkeys.size();
-      ctInDetails.ringOutputIndexes = cin.ringOutputIndexes;
+      ctInDetails.mixin = cin.ringMembers.size();
+      ctInDetails.ringMembers = cin.ringMembers;
       std::list<std::pair<Crypto::Hash, size_t>> outputReferences;
       if (m_core.scanCtInputRingForIndices(cin, outputReferences)) {
         for (const auto& r : outputReferences) {

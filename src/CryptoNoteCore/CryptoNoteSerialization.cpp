@@ -417,38 +417,58 @@ void serialize(KeyOutput& key, ISerializer& serializer) {
 }
 
 void serialize(ConfidentialInput& input, ISerializer& serializer) {
-  serializer(input.ringAmount, "ring_amount");
-  serializeBoundedVarintVector(input.ringOutputIndexes, serializer, "ring_offsets",
-    CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_offsets");
-
-  // Ring public keys (variable length)
-  size_t ringSize = input.ringPubkeys.size();
+  // Per-member ring references: amount + absolute outputIndex per ring slot.
+  // The single ringAmount/ringOutputIndexes from the previous schema is gone
+  // so CT inputs can mix transparent and confidential ring members.
+  size_t ringSize = input.ringMembers.size();
   if (serializer.type() == ISerializer::OUTPUT) {
-    throwIfArrayTooLarge(ringSize, CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_pubkeys");
+    throwIfArrayTooLarge(ringSize, CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_members");
   }
-  serializer.beginArray(ringSize, "ring_pubkeys");
+  serializer.beginArray(ringSize, "ring_members");
   if (serializer.type() == ISerializer::INPUT) {
-    throwIfArrayTooLarge(ringSize, CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_pubkeys");
-    input.ringPubkeys.resize(ringSize);
+    throwIfArrayTooLarge(ringSize, CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_members");
+    input.ringMembers.resize(ringSize);
   }
   for (size_t i = 0; i < ringSize; ++i) {
+    serializer(input.ringMembers[i].amount, "amount");
+    serializer(input.ringMembers[i].outputIndex, "offset");
+  }
+  serializer.endArray();
+
+  // Ring public keys (variable length, must match ringMembers count)
+  size_t ringPubkeySize = input.ringPubkeys.size();
+  if (serializer.type() == ISerializer::OUTPUT) {
+    throwIfArrayTooLarge(ringPubkeySize, CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_pubkeys");
+    if (ringPubkeySize != ringSize) {
+      throw std::runtime_error("Serialization error: ring_pubkeys size does not match ring_members size");
+    }
+  }
+  serializer.beginArray(ringPubkeySize, "ring_pubkeys");
+  if (serializer.type() == ISerializer::INPUT) {
+    throwIfArrayTooLarge(ringPubkeySize, CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_pubkeys");
+    if (ringPubkeySize != ringSize) {
+      throw std::runtime_error("Serialization error: ring_pubkeys size does not match ring_members size");
+    }
+    input.ringPubkeys.resize(ringPubkeySize);
+  }
+  for (size_t i = 0; i < ringPubkeySize; ++i) {
     serializer(input.ringPubkeys[i], "");
   }
   serializer.endArray();
 
-  // Ring commitments
+  // Ring commitments (must match ringMembers count)
   size_t ringCommitmentSize = input.ringCommitments.size();
   if (serializer.type() == ISerializer::OUTPUT) {
     throwIfArrayTooLarge(ringCommitmentSize, CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_commits");
     if (ringCommitmentSize != ringSize) {
-      throw std::runtime_error("Serialization error: ring_commits size does not match ring_pubkeys size");
+      throw std::runtime_error("Serialization error: ring_commits size does not match ring_members size");
     }
   }
   serializer.beginArray(ringCommitmentSize, "ring_commits");
   if (serializer.type() == ISerializer::INPUT) {
     throwIfArrayTooLarge(ringCommitmentSize, CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_commits");
     if (ringCommitmentSize != ringSize) {
-      throw std::runtime_error("Serialization error: ring_commits size does not match ring_pubkeys size");
+      throw std::runtime_error("Serialization error: ring_commits size does not match ring_members size");
     }
     input.ringCommitments.resize(ringCommitmentSize);
   }

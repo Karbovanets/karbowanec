@@ -106,12 +106,24 @@ void serialize(KeyInputDetails& inputToKey, ISerializer& serializer) {
   serializer(inputToKey.outputs, "outputs");
 }
 
+void serialize(RingMemberRef& member, ISerializer& serializer) {
+  serializer(member.amount, "amount");
+  serializer(member.outputIndex, "outputIndex");
+}
+
 void serialize(ConfidentialInputDetails& ctIn, ISerializer& serializer) {
-  serializer(ctIn.ringAmount, "ringAmount");
   serializePod(ctIn.keyImage, "keyImage", serializer);
   serializePod(ctIn.pseudoCommitment, "pseudoCommitment", serializer);
   serializer(ctIn.mixin, "mixin");
-  serializer(ctIn.ringOutputIndexes, "ringOutputIndexes");
+  size_t ringSize = ctIn.ringMembers.size();
+  serializer.beginArray(ringSize, "ringMembers");
+  if (serializer.type() == ISerializer::INPUT) {
+    ctIn.ringMembers.resize(ringSize);
+  }
+  for (size_t i = 0; i < ringSize; ++i) {
+    serialize(ctIn.ringMembers[i], serializer);
+  }
+  serializer.endArray();
   serializer(ctIn.outputs, "outputs");
 }
 

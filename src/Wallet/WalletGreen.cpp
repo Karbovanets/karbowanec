@@ -2463,39 +2463,55 @@ CryptoNote::Transaction WalletGreen::makeConfidentialTransaction(
     const std::string& extra,
     Crypto::SecretKey& txSecretKey) {
 
-  // Convert InputInfo → CTBuildInput
+  // Convert InputInfo → CTBuildInput. Each ring member is self-describing,
+  // so mixed transparent/confidential rings work transparently here — the
+  // caller (prepareInputs) is responsible for populating GlobalOutput.amount
+  // correctly for every member.
   std::vector<CTBuildInput> ctInputs;
   for (auto& input : keysInfo) {
     CTBuildInput cti;
     const auto& ki = input.keyInfo;
-    cti.ringAmount = ki.amount;
+    const size_t ringSize = ki.outputs.size();
+    cti.ringMembers.reserve(ringSize);
 
-    // Ring pubkeys from the mixin outputs
-    for (const auto& gout : ki.outputs) {
-      cti.ringPubkeys.push_back(gout.targetKey);
-      cti.ringOutputIndexes.push_back(gout.outputIndex);
-    }
+    for (size_t k = 0; k < ringSize; ++k) {
+      const auto& gout = ki.outputs[k];
 
-    // Ring commitments must be computed exactly as core validation does:
-    // transparent members are reconstructed from their public amount bucket;
-    // confidential members carry their public commitment.
-    TransactionOutput ringMemberOutput;
-    ringMemberOutput.amount = ki.amount;
-    ringMemberOutput.target = KeyOutput();
-    for (size_t k = 0; k < ki.outputs.size(); ++k) {
+      // Each member declares its own bucket. CT outputs use the sentinel;
+      // transparent outputs use their on-chain amount.
+      const uint64_t memberAmount = gout.isConfidential
+        ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+        : gout.amount;
+      if (memberAmount == 0) {
+        throw std::runtime_error("CT ring member " + std::to_string(k)
+          + " has zero amount bucket in input " + std::to_string(ctInputs.size())
+          + " (wallet must populate GlobalOutput.amount for every ring member)");
+      }
+
+      // Recompute the on-chain commitment exactly as core validation does:
+      // confidential members carry their commitment; transparent members
+      // are reconstructed via amount * H (zero blinding).
       Crypto::EllipticCurvePoint ringCommit{};
-      if (ki.outputs[k].isConfidential) {
-        ringCommit = ki.outputs[k].commitment;
+      if (gout.isConfidential) {
+        ringCommit = gout.commitment;
       } else {
-        if (!Crypto::transparent_amount_to_commitment(ringMemberOutput.amount, ringCommit)) {
-          throw std::runtime_error("Failed to compute CT ring commitment for input " + std::to_string(ctInputs.size()));
+        if (!Crypto::transparent_amount_to_commitment(memberAmount, ringCommit)) {
+          throw std::runtime_error("Failed to compute CT ring commitment for input "
+            + std::to_string(ctInputs.size()));
         }
       }
-      cti.ringCommitments.push_back(ringCommit);
+
+      cti.ringMembers.push_back(CTBuildRingMember{
+        memberAmount, gout.outputIndex, gout.targetKey, ringCommit
+      });
     }
 
-    // Real index in the ring
+    // realIndex was the position in ki.outputs that the wallet picked.
+    // buildConfidentialTransaction will canonicalise the ring and remap it.
     cti.realIndex = ki.realOutput.transactionIndex;
+    if (cti.realIndex >= ringSize) {
+      throw std::runtime_error("Invalid real input index in CT input");
+    }
 
     // Ephemeral spend key: derive from wallet keys + tx pubkey + output index
     AccountKeys accountKeys = makeAccountKeys(*input.walletRecord);
@@ -2508,11 +2524,6 @@ CryptoNote::Transaction WalletGreen::makeConfidentialTransaction(
     cti.spendPrivkey = ephKeys.secretKey;
 
     cti.realBlinding = ki.realOutputBlinding;
-
-    if (cti.realIndex >= ki.outputs.size()) {
-      throw std::runtime_error("Invalid real input index in CT input");
-    }
-
     cti.amount = ki.realOutputAmount;
 
     // Store ephKeys back for caller
@@ -2885,6 +2896,12 @@ void WalletGreen::prepareInputs(
     if(inputMixin != 0 && mixinResult.size()) {
       std::sort(mixinResult[i].outs.begin(), mixinResult[i].outs.end(),
         [] (const out_entry& a, const out_entry& b) { return a.global_amount_index < b.global_amount_index; });
+
+      // Bucket amount for all decoys in this response. Single-bucket sampling
+      // for now; CT mixed-ring sampling can query additional buckets per
+      // input and merge the result lists, populating GlobalOutput.amount
+      // per member from its source bucket.
+      const uint64_t decoyBucket = mixinResult[i].amount;
       for (auto& fakeOut: mixinResult[i].outs) {
 
         if (input.out.globalOutputIndex == fakeOut.global_amount_index) {
@@ -2898,6 +2915,7 @@ void WalletGreen::prepareInputs(
         globalOutput.blockHeight = fakeOut.block_height;
         globalOutput.isCoinbase = fakeOut.is_coinbase != 0;
         globalOutput.isConfidential = fakeOut.output_type == static_cast<uint8_t>(TransactionTypes::OutputType::Confidential);
+        globalOutput.amount = decoyBucket;
         keyInfo.outputs.push_back(std::move(globalOutput));
         if(keyInfo.outputs.size() >= inputMixin)
           break;
@@ -2916,6 +2934,9 @@ void WalletGreen::prepareInputs(
     realOutput.blockHeight = realBlockHeight;
     realOutput.isCoinbase = realIsCoinbase;
     realOutput.isConfidential = realIsConfidential;
+    realOutput.amount = realIsConfidential
+      ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+      : input.out.amount;
 
     auto insertedIn = keyInfo.outputs.insert(insertIn, realOutput);
 

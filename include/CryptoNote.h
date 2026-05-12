@@ -40,12 +40,35 @@ struct KeyInput {
   Crypto::KeyImage keyImage;
 };
 
+// Per-ring-member output reference for CT inputs.
+//
+// Each ring member is self-describing: it names its own amount bucket so a
+// single CT input can mix transparent ring members (any KeyOutput amount
+// bucket) and confidential ring members (CT_CONFIDENTIAL_OUTPUT_AMOUNT
+// sentinel bucket). The outputIndex is the *absolute* global index in that
+// amount's LMDB bucket — no delta encoding, since the bucket varies per
+// member and delta encoding across buckets is meaningless.
+//
+// Members within a ConfidentialInput must be sorted by (amount, outputIndex)
+// strictly ascending. Same-bucket members must have strictly-ascending
+// outputIndex (no duplicates); the cross-bucket ordering provides a canonical
+// form that pins ring metadata against malleability and makes the validator
+// loop deterministic.
+struct RingMemberRef {
+  uint64_t amount;       // CT_CONFIDENTIAL_OUTPUT_AMOUNT for CT members; real amount for transparent
+  uint32_t outputIndex;  // absolute index in that amount's bucket
+};
+
 // Confidential transaction input (version 2) — prefix portion only.
 // Contains the ring of public keys and commitments, a pseudo-output commitment,
 // and key image. MLSAG signatures are stored separately in Transaction body.
+//
+// Ring members may be of mixed type (transparent + confidential) and mixed
+// amount: see RingMemberRef. ringMembers[i] corresponds to ringPubkeys[i]
+// and ringCommitments[i]; the three vectors are parallel and must have
+// equal length.
 struct ConfidentialInput {
-  uint64_t                                 ringAmount;        // transparent amount bucket of referenced ring members
-  std::vector<uint32_t>                    ringOutputIndexes; // relative offsets in the ringAmount bucket
+  std::vector<RingMemberRef>               ringMembers;       // per-member (amount, outputIndex)
   std::vector<Crypto::PublicKey>           ringPubkeys;       // one-time public keys of ring members
   std::vector<Crypto::EllipticCurvePoint>  ringCommitments;   // Pedersen commitments of ring members
   Crypto::EllipticCurvePoint               pseudoCommitment;  // C' = v*H + r'*G

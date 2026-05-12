@@ -179,20 +179,61 @@ Transaction buildConfidentialTransaction(
     }
   }
 
-  // Validate CT ring metadata consistency.
+  // Validate CT ring metadata consistency and canonicalise the ring order.
+  //
+  // Consensus requires ring members to be sorted by (amount, outputIndex)
+  // strictly ascending (see Blockchain::checkConfidentialTransaction Step 4).
+  // We sort here, on the caller's mutable inputs[], and re-map realIndex to
+  // the post-sort slot for each input. This frees the wallet from having to
+  // pre-canonicalise its rings — it just hands us whatever picks it made and
+  // tells us which slot is real.
   for (size_t i = 0; i < inputs.size(); ++i) {
-    if (inputs[i].ringPubkeys.empty()) {
+    auto& members = inputs[i].ringMembers;
+    if (members.empty()) {
       throw std::invalid_argument("CT input has empty ring at index " + std::to_string(i));
     }
-    if (inputs[i].ringPubkeys.size() != inputs[i].ringCommitments.size()) {
-      throw std::invalid_argument("CT input ring pubkeys/commitments size mismatch at index " + std::to_string(i));
-    }
-    if (inputs[i].ringPubkeys.size() != inputs[i].ringOutputIndexes.size()) {
-      throw std::invalid_argument("CT input ring pubkeys/indexes size mismatch at index " + std::to_string(i));
-    }
-    if (inputs[i].realIndex >= inputs[i].ringPubkeys.size()) {
+    if (inputs[i].realIndex >= members.size()) {
       throw std::invalid_argument("CT input real index out of range at index " + std::to_string(i));
     }
+
+    // Remember which member is the real spend so we can find it after sorting.
+    // Identifying by (amount, outputIndex) is safe because rings must not have
+    // duplicate (amount, outputIndex) pairs (the canonical-order check rejects
+    // duplicates), which we verify below.
+    const CTBuildRingMember realRef = members[inputs[i].realIndex];
+
+    std::sort(members.begin(), members.end(),
+              [](const CTBuildRingMember& a, const CTBuildRingMember& b) {
+                if (a.amount != b.amount) return a.amount < b.amount;
+                return a.outputIndex < b.outputIndex;
+              });
+
+    // Reject duplicate (amount, outputIndex) pairs — they would defeat the
+    // strict-ascending consensus check and indicate a wallet bug.
+    for (size_t k = 1; k < members.size(); ++k) {
+      if (members[k].amount == members[k - 1].amount &&
+          members[k].outputIndex == members[k - 1].outputIndex) {
+        throw std::invalid_argument("CT input has duplicate ring member (amount,outputIndex) at index "
+                                    + std::to_string(i));
+      }
+    }
+
+    // Relocate the real index.
+    size_t newRealIndex = members.size();
+    for (size_t k = 0; k < members.size(); ++k) {
+      if (members[k].amount == realRef.amount &&
+          members[k].outputIndex == realRef.outputIndex) {
+        newRealIndex = k;
+        break;
+      }
+    }
+    if (newRealIndex == members.size()) {
+      // Real member disappeared during sort — impossible unless caller mutated
+      // members between sort and lookup. Treat as wallet bug.
+      throw std::runtime_error("CT input lost real ring member during canonicalisation at index "
+                               + std::to_string(i));
+    }
+    inputs[i].realIndex = newRealIndex;
   }
 
   // ── Step 1: Prepare inputs — key images, pseudo-commitments ─────────────────
@@ -226,7 +267,7 @@ Transaction buildConfidentialTransaction(
     std::memcpy(&pseudoCommitments[i], &pseudo_pk, 32);
 
     // Compute key image: I = x * Hp(P_real)
-    Crypto::PublicKey realPubkey = inputs[i].ringPubkeys[inputs[i].realIndex];
+    Crypto::PublicKey realPubkey = inputs[i].ringMembers[inputs[i].realIndex].pubkey;
     Crypto::generate_key_image(realPubkey, inputs[i].spendPrivkey, keyImages[i]);
   }
 
@@ -242,10 +283,15 @@ Transaction buildConfidentialTransaction(
   tx.inputs.resize(inputs.size());
   for (size_t i = 0; i < inputs.size(); ++i) {
     ConfidentialInput cin;
-    cin.ringAmount = inputs[i].ringAmount;
-    cin.ringOutputIndexes = absolute_output_offsets_to_relative(inputs[i].ringOutputIndexes);
-    cin.ringPubkeys = inputs[i].ringPubkeys;
-    cin.ringCommitments = inputs[i].ringCommitments;
+    const size_t ringSize = inputs[i].ringMembers.size();
+    cin.ringMembers.reserve(ringSize);
+    cin.ringPubkeys.reserve(ringSize);
+    cin.ringCommitments.reserve(ringSize);
+    for (const auto& m : inputs[i].ringMembers) {
+      cin.ringMembers.push_back(RingMemberRef{m.amount, m.outputIndex});
+      cin.ringPubkeys.push_back(m.pubkey);
+      cin.ringCommitments.push_back(m.commitment);
+    }
     cin.pseudoCommitment = pseudoCommitments[i];
     cin.keyImage = keyImages[i];
     tx.inputs[i] = std::move(cin);
@@ -380,12 +426,25 @@ Transaction buildConfidentialTransaction(
     Crypto::MLSAGSignature mlsag;
     Crypto::KeyImage ki;
 
+    // mlsag_sign wants flat pubkey / commitment arrays. Extract them from the
+    // canonicalised ringMembers in the same order as the consensus verifier
+    // will see them on chain.
+    const size_t ringSize = inputs[i].ringMembers.size();
+    std::vector<Crypto::PublicKey> ringPubkeys;
+    std::vector<Crypto::EllipticCurvePoint> ringCommitments;
+    ringPubkeys.reserve(ringSize);
+    ringCommitments.reserve(ringSize);
+    for (const auto& m : inputs[i].ringMembers) {
+      ringPubkeys.push_back(m.pubkey);
+      ringCommitments.push_back(m.commitment);
+    }
+
     if (!Crypto::mlsag_sign(
         signingHash,
-        inputs[i].ringPubkeys.data(),
-        inputs[i].ringCommitments.data(),
+        ringPubkeys.data(),
+        ringCommitments.data(),
         pseudoCommitments[i],
-        inputs[i].ringPubkeys.size(),
+        ringSize,
         inputs[i].realIndex,
         inputs[i].spendPrivkey,
         inputs[i].realBlinding,

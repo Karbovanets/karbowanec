@@ -27,6 +27,7 @@
 #include <cstring>
 #include <future>
 #include <limits>
+#include <set>
 #include <unordered_map>
 #include <time.h>
 #include <boost/lexical_cast.hpp>
@@ -2178,7 +2179,14 @@ bool RpcServer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRANSACTIO
       }
       else if (in.type() == typeid(ConfidentialInputDetails)) {
         ConfidentialInputDetails c = boost::get<ConfidentialInputDetails>(in);
-        body += formatExplorerAmount(m_core.currency(), c.ringAmount);
+        // Mixed-bucket rings: report unique buckets used by ring members.
+        std::set<uint64_t> bucketSet;
+        for (const auto& m : c.ringMembers) bucketSet.insert(m.amount);
+        if (bucketSet.size() == 1) {
+          body += formatExplorerAmount(m_core.currency(), *bucketSet.begin());
+        } else {
+          body += "mixed (" + std::to_string(bucketSet.size()) + " buckets)";
+        }
         body += "</td>\n    <td class=\"wrap\">";
         body += Common::podToHex(c.keyImage);
         body += "</td>\n    <td class=\"wrap\">";
@@ -2189,8 +2197,8 @@ bool RpcServer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRANSACTIO
         } else {
           for (size_t k = 0; k < c.outputs.size(); ++k) {
             body += "    <a href=\"/explorer/tx/" + Common::podToHex(c.outputs[k].transactionHash) + "\">";
-            if (k < c.ringOutputIndexes.size()) {
-              body += std::to_string(c.ringOutputIndexes[k]) + " ";
+            if (k < c.ringMembers.size()) {
+              body += std::to_string(c.ringMembers[k].outputIndex) + " ";
             }
             body += " - " + std::to_string(c.outputs[k].number) + "</a>";
             if (k + 1 < c.outputs.size()) body += ", ";

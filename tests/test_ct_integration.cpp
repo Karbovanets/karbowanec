@@ -1201,6 +1201,89 @@ static void test_mlsag_ring_size_4() {
   PASS();
 }
 
+// Demonstrates that the MLSAG layer accepts a ring whose members come from
+// different "buckets" — i.e. the new per-member ring schema. Half the
+// decoys are transparent (commitment = amount*H, zero blinding), half are
+// confidential (commitment = v*H + r*G with random r). The real spend is
+// transparent at amount V; the pseudo-commitment also commits to V so the
+// commitment difference at the real index is a pure G multiple. Other
+// members' commitments need not match V — MLSAG simulates decoy responses
+// regardless of bucket.
+static void test_mlsag_mixed_transparent_and_ct_ring() {
+  TEST("Combined: MLSAG with mixed transparent + CT ring members");
+
+  const size_t RING = 6;
+  const size_t TRUE_IDX = 3;
+  const uint64_t REAL_AMOUNT = CryptoNote::DENOMINATIONS[10]; // some canonical denom
+
+  Crypto::PublicKey pubs[RING];
+  Crypto::SecretKey secs[RING];
+  Crypto::EllipticCurvePoint commits[RING];
+
+  // Generate keypairs for every slot.
+  for (size_t i = 0; i < RING; ++i) {
+    gen_keypair(pubs[i], secs[i]);
+  }
+
+  // Build mixed-bucket commitments:
+  //   slots 0, 2, 5  → transparent, varying amounts (commitment = amount*H)
+  //   slots 1, 4     → confidential, random (commitment = v*H + r*G)
+  //   slot  3 (real) → transparent at REAL_AMOUNT (zero blinding)
+  static const uint64_t kTransparentAmounts[RING] = {
+    CryptoNote::DENOMINATIONS[5],  // slot 0
+    0,                              // slot 1 (CT — unused)
+    CryptoNote::DENOMINATIONS[20], // slot 2
+    REAL_AMOUNT,                    // slot 3 (real)
+    0,                              // slot 4 (CT — unused)
+    CryptoNote::DENOMINATIONS[40]  // slot 5
+  };
+
+  for (size_t i = 0; i < RING; ++i) {
+    if (i == 1 || i == 4) {
+      // Confidential ring member with random blinding.
+      Crypto::EllipticCurveScalar dummy_v, dummy_r;
+      test_random_scalar(dummy_v);
+      test_random_scalar(dummy_r);
+      if (!Crypto::pedersen_commit(dummy_v, dummy_r, commits[i])) { FAIL("pedersen confidential"); return; }
+    } else {
+      // Transparent ring member: commitment = amount*H (zero blinding).
+      if (!Crypto::transparent_amount_to_commitment(kTransparentAmounts[i], commits[i])) {
+        FAIL("transparent_amount_to_commitment");
+        return;
+      }
+    }
+  }
+
+  // Real spend is transparent at REAL_AMOUNT: blinding factor is zero.
+  Crypto::EllipticCurveScalar real_blinding;
+  memset(real_blinding.data, 0, 32);
+
+  // Pseudo-commitment: v*H + r'*G with v = REAL_AMOUNT (must match real input
+  // amount or MLSAG cannot close).
+  Crypto::EllipticCurveScalar v_scalar;
+  uint64_to_scalar(REAL_AMOUNT, v_scalar);
+  Crypto::EllipticCurveScalar pseudo_blind;
+  test_random_scalar(pseudo_blind);
+  Crypto::EllipticCurvePoint pseudo;
+  if (!Crypto::pedersen_commit(v_scalar, pseudo_blind, pseudo)) { FAIL("pedersen pseudo"); return; }
+
+  Crypto::Hash msg;
+  random_hash(msg);
+
+  Crypto::KeyImage ki;
+  Crypto::MLSAGSignature sig;
+  if (!Crypto::mlsag_sign(msg, pubs, commits, pseudo, RING, TRUE_IDX,
+                          secs[TRUE_IDX], real_blinding, pseudo_blind, ki, sig)) {
+    FAIL("mlsag_sign rejected mixed ring");
+    return;
+  }
+  if (!Crypto::mlsag_verify(msg, pubs, commits, pseudo, RING, ki, sig)) {
+    FAIL("mlsag_verify rejected mixed ring");
+    return;
+  }
+  PASS();
+}
+
 static void test_ct_fork_height_decoupled() {
   TEST("Combined: CT_FORK_HEIGHT exists and display decimals stay at 12");
 
@@ -1335,6 +1418,7 @@ int main() {
   test_ct_fee_bounds();
   test_max_denomination_gk_in_balance();
   test_mlsag_ring_size_4();
+  test_mlsag_mixed_transparent_and_ct_ring();
   test_ct_fork_height_decoupled();
 
   printf("\n[Consistency + capacity]\n");
