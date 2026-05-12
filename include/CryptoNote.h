@@ -1,4 +1,5 @@
 // Copyright (c) 2012-2016, The CryptoNote developers, The Bytecoin developers
+// Copyright (c) 2016-2026, The Karbo developers
 //
 // This file is part of Karbo.
 //
@@ -117,19 +118,24 @@ struct TransactionKernel {
 // ---------------------------------------------------------------------------
 
 struct TransactionPrefix {
-  uint8_t version;
-  uint64_t unlockTime;  // v1-v3: unlock time; v4: must be 0
+  uint8_t version = 0;
+  // v1: unlock time; v2 (CT): must be 0.
+  uint64_t unlockTime = 0;
   TransactionInputs inputs;
   std::vector<TransactionOutput> outputs;
   std::vector<uint8_t> extra;
-  uint64_t fee;         // v4 only: plaintext fee in new atomic units
+  // v2 (CT) only: plaintext fee in atomic units. The v1 path derives fee from
+  // inputs - outputs and never reads this field, but it must stay zero on v1
+  // so any code path that happens to read it on a non-CT tx sees a defined
+  // value rather than uninitialized memory.
+  uint64_t fee = 0;
 };
 
 struct Transaction : public TransactionPrefix {
-  // v1-v3: per-input ring signatures
+  // v1: per-input ring signatures
   std::vector<std::vector<Crypto::Signature>> signatures;
 
-  // v4 (CT): proof body — separate from prefix so getTransactionPrefixHash() excludes them
+  // v2 (CT): proof body — separate from prefix so getTransactionPrefixHash() excludes them
   std::vector<CTInputSignature> ctSignatures;  // per-input MLSAG signatures
   std::vector<CTOutputProof>    ctProofs;      // per-output GK denomination proofs
   TransactionKernel             kernel;        // balance proof + Schnorr signature

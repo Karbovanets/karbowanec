@@ -32,25 +32,50 @@ namespace Crypto {
     // provided by pedersen_get_H() in pedersen.cpp.
   }
 
-  // Internal helper: derive scalar from shared secret concatenated with a varint index.
-  // Replicates the pattern used by derivation_to_scalar in crypto.cpp.
+  // Internal helper: derive a domain-separated scalar from the shared secret,
+  // varint(output_index), and a fixed ASCII domain tag.
+  //
+  // The domain tag is essential: without it, this function would produce the
+  // same scalar as derivation_to_scalar(D, i) in crypto.cpp (which the stealth
+  // address uses for P_i = derivation_to_scalar(D, i)*G + B_spend). Any passive
+  // observer who knows the recipient's public address B_spend could then
+  // compute r*G = P_i - B_spend and recover v from C_i = v*H + r*G by brute
+  // force over the 64 canonical denominations, completely defeating CT amount
+  // confidentiality.
   static void shared_secret_to_scalar(const KeyDerivation& shared_secret,
-                                      size_t index, EllipticCurveScalar& res) {
-    struct {
-      KeyDerivation derivation;
-      char index_buf[(sizeof(size_t) * 8 + 6) / 7];
-    } buf;
-    char* end = buf.index_buf;
-    buf.derivation = shared_secret;
-    Tools::write_varint(end, index);
-    assert(end <= buf.index_buf + sizeof buf.index_buf);
-    hash_to_scalar(&buf, end - reinterpret_cast<char*>(&buf), res);
+                                      size_t index,
+                                      const char* domain, size_t domain_len,
+                                      EllipticCurveScalar& res) {
+    // sizeof(KeyDerivation) + max varint encoding of size_t + domain bytes.
+    // 14 bytes is enough headroom for any domain string we use.
+    static const size_t kMaxDomainLen = 32;
+    assert(domain_len <= kMaxDomainLen);
+    unsigned char buf[sizeof(KeyDerivation) + ((sizeof(size_t) * 8 + 6) / 7) + kMaxDomainLen];
+    unsigned char* ptr = buf;
+    memcpy(ptr, &shared_secret, sizeof(shared_secret));
+    ptr += sizeof(shared_secret);
+    char* varintBegin = reinterpret_cast<char*>(ptr);
+    char* varintEnd = varintBegin;
+    Tools::write_varint(varintEnd, index);
+    ptr += (varintEnd - varintBegin);
+    memcpy(ptr, domain, domain_len);
+    ptr += domain_len;
+    assert(ptr <= buf + sizeof(buf));
+    hash_to_scalar(buf, ptr - buf, res);
   }
 
   void derive_blinding_factor(const KeyDerivation& shared_secret, size_t output_index,
                               EllipticCurveScalar& blinding_factor) {
-    // r = Hs(shared_secret || output_index)
-    shared_secret_to_scalar(shared_secret, output_index, blinding_factor);
+    // r = Hs(shared_secret || varint(output_index) || "ct-blinding-v1")
+    //
+    // The domain tag is CRITICAL: it separates this scalar from the stealth
+    // address derivation scalar used in derivation_to_scalar(). Without it,
+    // r equals the value of s in P = s*G + B_spend, which allows a passive
+    // observer who knows B_spend to recover the amount v from the public
+    // commitment C = v*H + r*G.
+    static const char domain[] = "ct-blinding-v1";
+    shared_secret_to_scalar(shared_secret, output_index,
+                            domain, sizeof(domain) - 1, blinding_factor);
   }
 
   bool pedersen_commit(uint64_t amount, const EllipticCurveScalar& blinding_factor,
