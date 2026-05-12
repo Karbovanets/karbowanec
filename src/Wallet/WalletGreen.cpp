@@ -3052,16 +3052,24 @@ void WalletGreen::prepareInputs(
     // couldn't supply enough, we proceed with a smaller ring; the validator
     // requires only that the ring size be >= CT_MIN_RING_SIZE.
     if (requestedMixing > 0 && i < mixingResult.size() && !mixingResult[i].outs.empty()) {
-      auto& mixOuts = mixingResult[i].outs;
+      // Copy out — mixingResult is const so we can't sort in place.
+      auto mixOuts = mixingResult[i].outs;
       std::sort(mixOuts.begin(), mixOuts.end(),
         [] (const out_entry& a, const out_entry& b) { return a.global_amount_index < b.global_amount_index; });
 
       const uint64_t mixDecoyBucket = mixingResult[i].amount;
+      const uint64_t realBucket = realIsConfidential
+        ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+        : input.out.amount;
       size_t mixedAdded = 0;
-      for (auto& fakeOut : mixOuts) {
+      for (const auto& fakeOut : mixOuts) {
         if (mixedAdded >= requestedMixing) break;
-        // Skip a member with the same (bucket, outputIndex) as one already in the
-        // ring — the canonical-order rule rejects duplicates.
+        // Skip a member coincidentally matching the real spend's (bucket, outputIndex).
+        if (mixDecoyBucket == realBucket && fakeOut.global_amount_index == input.out.globalOutputIndex) {
+          continue;
+        }
+        // Skip a member with the same (bucket, outputIndex) as one already in
+        // the ring — the canonical-order rule rejects duplicates.
         bool duplicate = false;
         for (const auto& existing : keyInfo.outputs) {
           if (existing.amount == mixDecoyBucket && existing.outputIndex == fakeOut.global_amount_index) {
@@ -3070,17 +3078,10 @@ void WalletGreen::prepareInputs(
           }
         }
         if (duplicate) continue;
-        // Skip a member coincidentally matching the real spend's (bucket, outputIndex).
-        const uint64_t realBucket = realIsConfidential
-          ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
-          : input.out.amount;
-        if (mixDecoyBucket == realBucket && fakeOut.global_amount_index == input.out.globalOutputIndex) {
-          continue;
-        }
 
         TransactionTypes::GlobalOutput globalOutput;
         globalOutput.outputIndex = static_cast<uint32_t>(fakeOut.global_amount_index);
-        globalOutput.targetKey = reinterpret_cast<PublicKey&>(fakeOut.out_key);
+        globalOutput.targetKey = reinterpret_cast<const PublicKey&>(fakeOut.out_key);
         globalOutput.commitment = fakeOut.commitment;
         globalOutput.blockHeight = fakeOut.block_height;
         globalOutput.isCoinbase = fakeOut.is_coinbase != 0;

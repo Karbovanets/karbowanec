@@ -649,7 +649,9 @@ void WalletTransactionSender::digitSplitStrategy(TransferId firstTransferId, siz
 void WalletTransactionSender::prepareInputs(
   const std::list<TransactionOutputInformation>& selectedTransfers,
   std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& outs,
-  std::vector<TxBuildInput>& inputs, const std::vector<uint64_t>& inputMixins) {
+  std::vector<TxBuildInput>& inputs, const std::vector<uint64_t>& inputMixins,
+  const std::vector<uint64_t>& mixingBuckets,
+  const std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixingOuts) {
 
   size_t i = 0;
   assert(inputMixins.size() == selectedTransfers.size());
@@ -670,15 +672,19 @@ void WalletTransactionSender::prepareInputs(
     const bool realIsCoinbase = haveTxInfo && txInfo.totalAmountIn == 0;
     const uint32_t realBlockHeight = haveTxInfo ? txInfo.blockHeight : 0;
 
+    // Reserve some ring slots for cross-bucket mixing decoys when this input
+    // has a mixing bucket allocated and mixing response is available.
+    const uint64_t mixingBucket = (i < mixingBuckets.size()) ? mixingBuckets[i] : 0;
+    const size_t requestedMixing = (mixingBucket != 0 && i < mixingOuts.size())
+      ? CryptoNote::parameters::CT_MIXING_DECOYS_PER_INPUT
+      : 0;
+    const uint64_t nativeQuota = (inputMixin > requestedMixing) ? inputMixin - requestedMixing : inputMixin;
+
     //paste mixin transaction
     if (inputMixin != 0 && outs.size()) {
       std::sort(outs[i].outs.begin(), outs[i].outs.end(),
         [](const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& a, const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& b){ return a.global_amount_index < b.global_amount_index; });
 
-      // Per-decoy bucket amount. Single-bucket sampling for now (one bucket
-      // per input); mixed-bucket sampling would call the daemon multiple
-      // times per input and merge, populating GlobalOutput.amount per
-      // member from its source bucket.
       const uint64_t decoyBucket = outs[i].amount;
       for (auto& daemon_oe: outs[i].outs) {
         if (td.globalOutputIndex == daemon_oe.global_amount_index)
@@ -692,8 +698,51 @@ void WalletTransactionSender::prepareInputs(
         go.isConfidential = daemon_oe.output_type == static_cast<uint8_t>(TransactionTypes::OutputType::Confidential);
         go.amount = decoyBucket;
         inp.keyInfo.outputs.push_back(go);
-        if (inp.keyInfo.outputs.size() >= inputMixin)
+        if (inp.keyInfo.outputs.size() >= nativeQuota)
           break;
+      }
+    }
+
+    // Cross-bucket mixing decoys: append up to CT_MIXING_DECOYS_PER_INPUT
+    // members from a different bucket. Best-effort: drops duplicates and the
+    // real-output collision case, and silently proceeds with a smaller ring
+    // if the daemon couldn't supply enough.
+    if (requestedMixing > 0 && i < mixingOuts.size() && !mixingOuts[i].outs.empty()) {
+      auto mixOuts = mixingOuts[i].outs; // copy: don't disturb caller
+      std::sort(mixOuts.begin(), mixOuts.end(),
+        [](const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& a,
+           const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& b) {
+          return a.global_amount_index < b.global_amount_index;
+        });
+      const uint64_t mixDecoyBucket = mixingOuts[i].amount;
+      const uint64_t realBucket = realIsConfidential
+        ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+        : td.amount;
+      size_t mixedAdded = 0;
+      for (auto& daemon_oe : mixOuts) {
+        if (mixedAdded >= requestedMixing) break;
+        if (mixDecoyBucket == realBucket && daemon_oe.global_amount_index == td.globalOutputIndex) {
+          continue;
+        }
+        bool duplicate = false;
+        for (const auto& existing : inp.keyInfo.outputs) {
+          if (existing.amount == mixDecoyBucket && existing.outputIndex == daemon_oe.global_amount_index) {
+            duplicate = true;
+            break;
+          }
+        }
+        if (duplicate) continue;
+
+        TransactionTypes::GlobalOutput go;
+        go.outputIndex = static_cast<uint32_t>(daemon_oe.global_amount_index);
+        go.targetKey = daemon_oe.out_key;
+        go.commitment = daemon_oe.commitment;
+        go.blockHeight = daemon_oe.block_height;
+        go.isCoinbase = daemon_oe.is_coinbase != 0;
+        go.isConfidential = daemon_oe.output_type == static_cast<uint8_t>(TransactionTypes::OutputType::Confidential);
+        go.amount = mixDecoyBucket;
+        inp.keyInfo.outputs.push_back(std::move(go));
+        ++mixedAdded;
       }
     }
 
