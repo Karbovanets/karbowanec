@@ -152,6 +152,35 @@ bool WalletTransactionSender::hasMixinInputs(const std::vector<uint64_t>& inputM
   return std::any_of(inputMixins.begin(), inputMixins.end(), [](uint64_t inputMixin) { return inputMixin != 0; });
 }
 
+std::vector<uint64_t> WalletTransactionSender::chooseCtMixingBuckets(
+  const std::list<TransactionOutputInformation>& selectedTransfers,
+  const std::vector<uint64_t>& inputMixins,
+  bool useCT) const {
+
+  std::vector<uint64_t> mixingBuckets(selectedTransfers.size(), 0);
+  if (!useCT) return mixingBuckets;
+  if (CryptoNote::parameters::CT_MIXING_DECOYS_PER_INPUT == 0) return mixingBuckets;
+  if (CryptoNote::parameters::CT_MIN_RING_SIZE_FOR_MIXING == 0) return mixingBuckets;
+
+  std::mt19937 rng = Random::generator();
+  std::uniform_int_distribution<size_t> denomDist(0, CryptoNote::DENOMINATIONS.size() - 1);
+
+  size_t i = 0;
+  for (const auto& transfer : selectedTransfers) {
+    if (inputMixins[i] == 0) { ++i; continue; }
+    if (inputMixins[i] + 1 < CryptoNote::parameters::CT_MIN_RING_SIZE_FOR_MIXING) { ++i; continue; }
+
+    const bool realIsConfidential = transfer.type == TransactionTypes::OutputType::Confidential;
+    if (realIsConfidential) {
+      mixingBuckets[i] = CryptoNote::DENOMINATIONS[denomDist(rng)];
+    } else {
+      mixingBuckets[i] = CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT;
+    }
+    ++i;
+  }
+  return mixingBuckets;
+}
+
 uint64_t WalletTransactionSender::maxInputMixin(const std::vector<uint64_t>& inputMixins) const {
   return inputMixins.empty() ? 0 : *std::max_element(inputMixins.begin(), inputMixins.end());
 }
@@ -207,6 +236,9 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::makeSendRequest(Transact
   context->transactionId = transactionId;
   context->mixIn = mixIn;
   context->inputMixins = chooseInputMixins(context->selectedTransfers, mixIn, useCT);
+  // CT cross-bucket mixing: per-input alternative-bucket assignment. Empty
+  // when CT is off or the ring is below CT_MIN_RING_SIZE_FOR_MIXING.
+  context->mixingBuckets = chooseCtMixingBuckets(context->selectedTransfers, context->inputMixins, useCT);
 
   if (hasMixinInputs(context->inputMixins)) {
     std::shared_ptr<WalletRequest> request = makeGetRandomOutsRequest(context);
@@ -254,6 +286,7 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
   context->transactionId = transactionId;
   context->mixIn = mixIn;
   context->inputMixins = chooseInputMixins(context->selectedTransfers, mixIn, useCT);
+  context->mixingBuckets = chooseCtMixingBuckets(context->selectedTransfers, context->inputMixins, useCT);
 
   if (hasMixinInputs(context->inputMixins)) {
     uint64_t outsCount = maxInputMixin(context->inputMixins) + 1; // add one to make possible (if need) to skip real output key
@@ -279,6 +312,26 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
     queryAmountsWaitFuture.get();
 
     checkIfEnoughMixins(context->outs, context->inputMixins);
+
+    // Fetch CT cross-bucket decoys synchronously, best-effort. Failures fall
+    // back to all-native rings instead of aborting the build.
+    if (std::any_of(context->mixingBuckets.begin(), context->mixingBuckets.end(),
+                    [](uint64_t b) { return b != 0; })) {
+      std::vector<uint64_t> mixingAmounts(context->mixingBuckets);
+      auto mixingCompleted = std::promise<std::error_code>();
+      auto mixingFuture = mixingCompleted.get_future();
+      m_node.getRandomOutsByAmounts(std::move(mixingAmounts),
+        CryptoNote::parameters::CT_MIXING_DECOYS_PER_INPUT + 1,
+        std::ref(context->mixingOuts),
+        [&mixingCompleted](std::error_code ec) {
+          auto detached = std::move(mixingCompleted);
+          detached.set_value(ec);
+        });
+      auto mixingEc = mixingFuture.get();
+      if (mixingEc) {
+        context->mixingOuts.clear(); // best-effort: silently drop on error
+      }
+    }
   }
 
   // instead of doSendTransaction prepare tx here to prevent relay
@@ -287,7 +340,8 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
     WalletLegacyTransaction& transaction = m_transactionsCache.getTransaction(context->transactionId);
 
     std::vector<TxBuildInput> inputs;
-    prepareInputs(context->selectedTransfers, context->outs, inputs, context->inputMixins);
+    prepareInputs(context->selectedTransfers, context->outs, inputs, context->inputMixins,
+                  context->mixingBuckets, context->mixingOuts);
 
     TxBuildOutput changeDts;
     changeDts.amount = 0;
@@ -339,7 +393,7 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::makeGetRandomOutsRequest
 
 void WalletTransactionSender::sendTransactionRandomOutsByAmount(std::shared_ptr<SendTransactionContext> context, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
     boost::optional<std::shared_ptr<WalletRequest> >& nextRequest, std::error_code ec) {
-  
+
   if (m_isStoping) {
     ec = make_error_code(error::TX_CANCELLED);
   }
@@ -354,6 +408,38 @@ void WalletTransactionSender::sendTransactionRandomOutsByAmount(std::shared_ptr<
   } catch (const std::system_error&) {
     events.push_back(makeCompleteEvent(m_transactionsCache, context->transactionId, make_error_code(error::MIXIN_COUNT_TOO_BIG)));
     return;
+  }
+
+  // Chain a second request for CT cross-bucket decoys if any input opted into
+  // mixing. The legacy wallet's request pipeline accepts a follow-up request
+  // via nextRequest; the callback (sendTransactionMixingOutsByAmount) then
+  // runs doSendTransaction with both native and mixing decoys.
+  if (std::any_of(context->mixingBuckets.begin(), context->mixingBuckets.end(),
+                  [](uint64_t b) { return b != 0; })) {
+    std::vector<uint64_t> mixingAmounts(context->mixingBuckets);
+    nextRequest = std::make_shared<WalletGetMixingOutsByAmountsRequest>(
+      mixingAmounts,
+      CryptoNote::parameters::CT_MIXING_DECOYS_PER_INPUT + 1,
+      context,
+      std::bind(&WalletTransactionSender::sendTransactionMixingOutsByAmount,
+        this, context, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+    return;
+  }
+
+  std::shared_ptr<WalletRequest> req = doSendTransaction(context, events);
+  if (req)
+    nextRequest = req;
+}
+
+void WalletTransactionSender::sendTransactionMixingOutsByAmount(std::shared_ptr<SendTransactionContext> context, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
+    boost::optional<std::shared_ptr<WalletRequest> >& nextRequest, std::error_code ec) {
+  if (m_isStoping) {
+    ec = make_error_code(error::TX_CANCELLED);
+  }
+  // Mixing is best-effort: a failure here is not fatal — we proceed with the
+  // native-bucket-only ring rather than aborting the user's spend.
+  if (ec) {
+    context->mixingOuts.clear();
   }
 
   std::shared_ptr<WalletRequest> req = doSendTransaction(context, events);
@@ -372,7 +458,8 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::doSendTransaction(std::s
     WalletLegacyTransaction& transaction = m_transactionsCache.getTransaction(context->transactionId);
 
     std::vector<TxBuildInput> inputs;
-    prepareInputs(context->selectedTransfers, context->outs, inputs, context->inputMixins);
+    prepareInputs(context->selectedTransfers, context->outs, inputs, context->inputMixins,
+                  context->mixingBuckets, context->mixingOuts);
 
     uint64_t totalAmount = -transaction.totalAmount;
     uint64_t changeAmount = context->foundMoney > totalAmount ? context->foundMoney - totalAmount : 0;

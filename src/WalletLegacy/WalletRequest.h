@@ -60,6 +60,29 @@ private:
   Callback m_cb;
 };
 
+// Second-stage request for CT cross-bucket decoy sampling. Stores its result
+// into SendTransactionContext::mixingOuts so the final tx-build callback can
+// merge it with the primary native-bucket response.
+class WalletGetMixingOutsByAmountsRequest: public WalletRequest
+{
+public:
+  WalletGetMixingOutsByAmountsRequest(const std::vector<uint64_t>& amounts, uint64_t outsCount, std::shared_ptr<SendTransactionContext> context, Callback cb) :
+    m_amounts(amounts), m_outsCount(outsCount), m_context(context), m_cb(cb) {};
+
+  virtual ~WalletGetMixingOutsByAmountsRequest() {};
+
+  virtual void perform(INode& node, std::function<void (WalletRequest::Callback, std::error_code)> cb) override
+  {
+    node.getRandomOutsByAmounts(std::move(m_amounts), m_outsCount, std::ref(m_context->mixingOuts), std::bind(cb, m_cb, std::placeholders::_1));
+  };
+
+private:
+  std::vector<uint64_t> m_amounts;
+  uint64_t m_outsCount;
+  std::shared_ptr<SendTransactionContext> m_context;
+  Callback m_cb;
+};
+
 class WalletRelayTransactionRequest: public WalletRequest
 {
 public:

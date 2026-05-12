@@ -75,6 +75,14 @@ const uint64_t MAX_EXTRA_SIZE                                = 1024;
 const size_t   CT_MIN_RING_SIZE                              = 4;     // min ring members per CT input
 const size_t   CT_MAX_RING_SIZE                              = 16;    // max ring members per CT input
 const uint64_t DEFAULT_TX_MIXIN                              = CT_MAX_RING_SIZE - 1; // decoys, gives ring size 16
+// Mixed-bucket decoy sampling for CT inputs (wallet policy, not consensus).
+// When a CT input's ring is at least CT_MIN_RING_SIZE_FOR_MIXING members,
+// the wallet reserves CT_MIXING_DECOYS_PER_INPUT slots for decoys drawn
+// from a *different* amount bucket than the real spend's bucket. Consensus
+// already supports mixed rings via the per-member ConfidentialInput schema;
+// these knobs control how aggressively the wallet exploits that capability.
+const size_t   CT_MIXING_DECOYS_PER_INPUT                    = 2;
+const size_t   CT_MIN_RING_SIZE_FOR_MIXING                   = 8;
 const uint64_t CT_MINIMUM_FEE                                = UINT64_C(10000000000);    // 0.01 KRB (= MIN_CT_DENOMINATION)
 const uint64_t CT_MAXIMUM_FEE                                = UINT64_C(100000000000000); // 100 KRB
 const uint64_t CT_CONFIDENTIAL_OUTPUT_AMOUNT                 = UINT64_MAX;      // internal bucket for hidden-output rings

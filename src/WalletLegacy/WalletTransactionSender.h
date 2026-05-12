@@ -51,12 +51,18 @@ private:
   std::shared_ptr<WalletRequest> makeGetRandomOutsRequest(std::shared_ptr<SendTransactionContext> context);
   std::shared_ptr<WalletRequest> doSendTransaction(std::shared_ptr<SendTransactionContext> context, std::deque<std::shared_ptr<WalletLegacyEvent>>& events);
   void prepareInputs(const std::list<TransactionOutputInformation>& selectedTransfers, std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& outs,
-      std::vector<TxBuildInput>& inputs, const std::vector<uint64_t>& inputMixins);
+      std::vector<TxBuildInput>& inputs, const std::vector<uint64_t>& inputMixins,
+      const std::vector<uint64_t>& mixingBuckets = {},
+      const std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixingOuts = {});
+  std::vector<uint64_t> chooseCtMixingBuckets(const std::list<TransactionOutputInformation>& selectedTransfers,
+      const std::vector<uint64_t>& inputMixins, bool useCT) const;
   void splitDestinations(TransferId firstTransferId, size_t transfersCount, const TxBuildOutput& changeDts,
     const TxDustPolicy& dustPolicy, std::vector<TxBuildOutput>& splittedDests);
   void digitSplitStrategy(TransferId firstTransferId, size_t transfersCount, const TxBuildOutput& change_dst, uint64_t dust_threshold,
     std::vector<TxBuildOutput>& splitted_dsts, uint64_t& dust);
   void sendTransactionRandomOutsByAmount(std::shared_ptr<SendTransactionContext> context, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
+      boost::optional<std::shared_ptr<WalletRequest> >& nextRequest, std::error_code ec);
+  void sendTransactionMixingOutsByAmount(std::shared_ptr<SendTransactionContext> context, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
       boost::optional<std::shared_ptr<WalletRequest> >& nextRequest, std::error_code ec);
   void relayTransactionCallback(std::shared_ptr<SendTransactionContext> context, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
                                 boost::optional<std::shared_ptr<WalletRequest> >& nextRequest, std::error_code ec);

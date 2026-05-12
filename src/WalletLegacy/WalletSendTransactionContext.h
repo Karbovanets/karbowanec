@@ -46,6 +46,12 @@ struct SendTransactionContext
   TxDustPolicy dustPolicy;
   uint64_t mixIn;
   std::vector<uint64_t> inputMixins;
+  // Cross-bucket mixed-ring sampling state. `mixingBuckets[i]` is the
+  // alternative bucket for CT input i (0 if no mixing). `mixingOuts[i]`
+  // is the daemon's per-input mixing decoy response, parallel to
+  // selectedTransfers. Both populated only on the CT path.
+  std::vector<uint64_t> mixingBuckets;
+  std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount> mixingOuts;
   Crypto::SecretKey tx_key = NULL_SECRET_KEY;
 };
 

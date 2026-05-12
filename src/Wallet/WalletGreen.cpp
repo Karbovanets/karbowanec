@@ -1628,8 +1628,19 @@ void WalletGreen::prepareTransaction(std::vector<WalletOuts>&& wallets,
     requestMixinOuts(selectedTransfers, inputMixins, mixinResult);
   }
 
+  // Cross-bucket decoy mixing: for CT inputs with a large enough ring, also
+  // pull a small batch of decoys from a *different* amount bucket so the
+  // ring doesn't trivially cluster by type. Best-effort — buckets that
+  // can't supply enough outputs are silently dropped per input and the
+  // ring falls back to all-native decoys.
+  std::vector<uint64_t> mixingBuckets = chooseCtMixingBuckets(selectedTransfers, inputMixins, useCT);
+  std::vector<outs_for_amount> mixingResult;
+  if (std::any_of(mixingBuckets.begin(), mixingBuckets.end(), [](uint64_t b) { return b != 0; })) {
+    requestCtMixingDecoys(selectedTransfers, mixingBuckets, mixingResult);
+  }
+
   std::vector<InputInfo> keysInfo;
-  prepareInputs(selectedTransfers, mixinResult, inputMixins, keysInfo);
+  prepareInputs(selectedTransfers, mixinResult, inputMixins, keysInfo, mixingBuckets, mixingResult);
 
   uint64_t donationAmount = pushDonationTransferIfPossible(donation, foundMoney - preparedTransaction.neededMoney, m_currency.defaultDustThreshold(), preparedTransaction.destinations);
   preparedTransaction.changeAmount = foundMoney - preparedTransaction.neededMoney - donationAmount;
@@ -2694,6 +2705,112 @@ void WalletGreen::requestMixinOuts(
   m_logger(DEBUGGING) << "Random outputs received";
 }
 
+std::vector<uint64_t> WalletGreen::chooseCtMixingBuckets(
+  const std::vector<OutputToTransfer>& selectedTransfers,
+  const std::vector<uint64_t>& inputMixins,
+  bool useCT) const {
+
+  std::vector<uint64_t> mixingBuckets(selectedTransfers.size(), 0);
+  if (!useCT) {
+    return mixingBuckets;
+  }
+  if (CryptoNote::parameters::CT_MIXING_DECOYS_PER_INPUT == 0) {
+    return mixingBuckets;
+  }
+  // Only mix into rings large enough to absorb the loss of native slots
+  // to mixing decoys (the ring size budget is fixed; mixing trades primary
+  // decoys for cross-bucket diversity).
+  if (CryptoNote::parameters::CT_MIN_RING_SIZE_FOR_MIXING == 0) {
+    return mixingBuckets;
+  }
+
+  std::mt19937 rng = Random::generator();
+  std::uniform_int_distribution<size_t> denomDist(0, CryptoNote::DENOMINATIONS.size() - 1);
+
+  for (size_t i = 0; i < selectedTransfers.size(); ++i) {
+    // Skip ring-size-1 (coinbase carve-out) and below-threshold rings.
+    if (inputMixins[i] == 0) continue;
+    if (inputMixins[i] + 1 < CryptoNote::parameters::CT_MIN_RING_SIZE_FOR_MIXING) continue;
+
+    const bool realIsConfidential = selectedTransfers[i].out.type == TransactionTypes::OutputType::Confidential;
+    if (realIsConfidential) {
+      // Native bucket is CT; mix in transparent decoys from a random canonical
+      // denomination. The chosen bucket may turn out to be sparsely populated,
+      // in which case requestCtMixingDecoys silently falls back to no mixing
+      // for this input.
+      mixingBuckets[i] = CryptoNote::DENOMINATIONS[denomDist(rng)];
+    } else {
+      // Native bucket is transparent; mix in CT decoys.
+      mixingBuckets[i] = CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT;
+    }
+  }
+  return mixingBuckets;
+}
+
+void WalletGreen::requestCtMixingDecoys(
+  const std::vector<OutputToTransfer>& selectedTransfers,
+  const std::vector<uint64_t>& mixingBuckets,
+  std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixingResult) {
+
+  if (selectedTransfers.size() != mixingBuckets.size()) {
+    throw std::runtime_error("requestCtMixingDecoys: mixingBuckets size mismatch");
+  }
+
+  // Build the amounts list for the daemon RPC. We always include one entry
+  // per input so the response stays positionally aligned with selectedTransfers,
+  // even when an input opted out (bucket == 0) — those entries are filled
+  // with empty results client-side.
+  std::vector<uint64_t> amounts;
+  amounts.reserve(selectedTransfers.size());
+  bool haveAny = false;
+  for (uint64_t bucket : mixingBuckets) {
+    amounts.push_back(bucket);
+    if (bucket != 0) haveAny = true;
+  }
+  if (!haveAny) {
+    mixingResult.clear();
+    return;
+  }
+
+  std::error_code mixinError;
+  throwIfStopped();
+
+  // +1 above the desired mixing count because the daemon may return our own
+  // real output in the response; the wallet filters it out below in
+  // prepareInputs. CT_MIXING_DECOYS_PER_INPUT is the target count after
+  // dedup.
+  const uint64_t requestCount = CryptoNote::parameters::CT_MIXING_DECOYS_PER_INPUT + 1;
+
+  m_logger(DEBUGGING) << "Requesting CT mixing decoys, buckets="
+    << std::count_if(mixingBuckets.begin(), mixingBuckets.end(), [](uint64_t b) { return b != 0; });
+  try {
+    System::EventLock lk(m_readyEvent);
+
+    System::RemoteContext<std::error_code> context(m_dispatcher, [this, &amounts, requestCount, &mixingResult]() {
+      std::promise<std::error_code> p;
+      auto f = p.get_future();
+      m_node.getRandomOutsByAmounts(std::vector<uint64_t>(amounts), requestCount, mixingResult,
+        [&p](std::error_code ec) mutable { p.set_value(ec); });
+      return f.get();
+    });
+    mixinError = context.get();
+  } catch (const std::exception& e) {
+    m_logger(WARNING, BRIGHT_YELLOW) << "CT mixing decoys request failed: " << e.what()
+      << " — falling back to all-native rings";
+    mixingResult.clear();
+    return;
+  }
+
+  if (mixinError) {
+    m_logger(WARNING, BRIGHT_YELLOW) << "CT mixing decoys request error: " << mixinError.message()
+      << " — falling back to all-native rings";
+    mixingResult.clear();
+    return;
+  }
+
+  m_logger(DEBUGGING) << "CT mixing decoys received";
+}
+
 uint64_t WalletGreen::selectTransfers(
   uint64_t neededMoney,
   bool dust,
@@ -2871,7 +2988,9 @@ void WalletGreen::prepareInputs(
   const std::vector<OutputToTransfer>& selectedTransfers,
   std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult,
   const std::vector<uint64_t>& inputMixins,
-  std::vector<InputInfo>& keysInfo) {
+  std::vector<InputInfo>& keysInfo,
+  const std::vector<uint64_t>& mixingBuckets,
+  const std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixingResult) {
 
   typedef CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry out_entry;
 
@@ -2893,14 +3012,20 @@ void WalletGreen::prepareInputs(
     const bool realIsCoinbase = haveTxInfo && txInfo.totalAmountIn == 0;
     const uint32_t realBlockHeight = haveTxInfo ? txInfo.blockHeight : 0;
 
+    // Determine whether this input has a mixing bucket allocated. If yes,
+    // reserve CT_MIXING_DECOYS_PER_INPUT slots for mixing-bucket members
+    // and pull the rest from the native bucket.
+    const uint64_t mixingBucket = (i < mixingBuckets.size()) ? mixingBuckets[i] : 0;
+    const size_t requestedMixing = (mixingBucket != 0 && i < mixingResult.size())
+      ? CryptoNote::parameters::CT_MIXING_DECOYS_PER_INPUT
+      : 0;
+    const uint64_t nativeQuota = (inputMixin > requestedMixing) ? inputMixin - requestedMixing : inputMixin;
+
     if(inputMixin != 0 && mixinResult.size()) {
       std::sort(mixinResult[i].outs.begin(), mixinResult[i].outs.end(),
         [] (const out_entry& a, const out_entry& b) { return a.global_amount_index < b.global_amount_index; });
 
-      // Bucket amount for all decoys in this response. Single-bucket sampling
-      // for now; CT mixed-ring sampling can query additional buckets per
-      // input and merge the result lists, populating GlobalOutput.amount
-      // per member from its source bucket.
+      // Native-bucket decoys go in with member.amount == this response's bucket.
       const uint64_t decoyBucket = mixinResult[i].amount;
       for (auto& fakeOut: mixinResult[i].outs) {
 
@@ -2917,8 +3042,52 @@ void WalletGreen::prepareInputs(
         globalOutput.isConfidential = fakeOut.output_type == static_cast<uint8_t>(TransactionTypes::OutputType::Confidential);
         globalOutput.amount = decoyBucket;
         keyInfo.outputs.push_back(std::move(globalOutput));
-        if(keyInfo.outputs.size() >= inputMixin)
+        if(keyInfo.outputs.size() >= nativeQuota)
           break;
+      }
+    }
+
+    // Mixing-bucket decoys (best-effort): append up to CT_MIXING_DECOYS_PER_INPUT
+    // members from a *different* bucket than the real spend's. If the daemon
+    // couldn't supply enough, we proceed with a smaller ring; the validator
+    // requires only that the ring size be >= CT_MIN_RING_SIZE.
+    if (requestedMixing > 0 && i < mixingResult.size() && !mixingResult[i].outs.empty()) {
+      auto& mixOuts = mixingResult[i].outs;
+      std::sort(mixOuts.begin(), mixOuts.end(),
+        [] (const out_entry& a, const out_entry& b) { return a.global_amount_index < b.global_amount_index; });
+
+      const uint64_t mixDecoyBucket = mixingResult[i].amount;
+      size_t mixedAdded = 0;
+      for (auto& fakeOut : mixOuts) {
+        if (mixedAdded >= requestedMixing) break;
+        // Skip a member with the same (bucket, outputIndex) as one already in the
+        // ring — the canonical-order rule rejects duplicates.
+        bool duplicate = false;
+        for (const auto& existing : keyInfo.outputs) {
+          if (existing.amount == mixDecoyBucket && existing.outputIndex == fakeOut.global_amount_index) {
+            duplicate = true;
+            break;
+          }
+        }
+        if (duplicate) continue;
+        // Skip a member coincidentally matching the real spend's (bucket, outputIndex).
+        const uint64_t realBucket = realIsConfidential
+          ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+          : input.out.amount;
+        if (mixDecoyBucket == realBucket && fakeOut.global_amount_index == input.out.globalOutputIndex) {
+          continue;
+        }
+
+        TransactionTypes::GlobalOutput globalOutput;
+        globalOutput.outputIndex = static_cast<uint32_t>(fakeOut.global_amount_index);
+        globalOutput.targetKey = reinterpret_cast<PublicKey&>(fakeOut.out_key);
+        globalOutput.commitment = fakeOut.commitment;
+        globalOutput.blockHeight = fakeOut.block_height;
+        globalOutput.isCoinbase = fakeOut.is_coinbase != 0;
+        globalOutput.isConfidential = fakeOut.output_type == static_cast<uint8_t>(TransactionTypes::OutputType::Confidential);
+        globalOutput.amount = mixDecoyBucket;
+        keyInfo.outputs.push_back(std::move(globalOutput));
+        ++mixedAdded;
       }
     }
 

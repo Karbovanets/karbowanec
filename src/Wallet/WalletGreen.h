@@ -285,10 +285,29 @@ protected:
     const std::vector<uint64_t>& inputMixins,
     std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult);
 
+  // Returns the per-input mixing-bucket assignment when CT is active. A zero
+  // entry means "do not mix for this input" (ring too small, or no sensible
+  // mixing bucket exists). The bucket is always *different* from the input's
+  // native bucket so decoys actually broaden the ring's type signature.
+  std::vector<uint64_t> chooseCtMixingBuckets(const std::vector<OutputToTransfer>& selectedTransfers,
+    const std::vector<uint64_t>& inputMixins,
+    bool useCT) const;
+
+  // Pulls a small batch of cross-bucket decoys for CT inputs whose native
+  // bucket appears in mixingBuckets[i] != 0. Single daemon round trip; the
+  // result is parallel to selectedTransfers and may be empty for inputs that
+  // opted out of mixing. Errors are non-fatal: an input that fails to get
+  // mixing decoys falls back to a pure native-bucket ring.
+  void requestCtMixingDecoys(const std::vector<OutputToTransfer>& selectedTransfers,
+    const std::vector<uint64_t>& mixingBuckets,
+    std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixingResult);
+
   void prepareInputs(const std::vector<OutputToTransfer>& selectedTransfers,
     std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult,
     const std::vector<uint64_t>& inputMixins,
-    std::vector<InputInfo>& keysInfo);
+    std::vector<InputInfo>& keysInfo,
+    const std::vector<uint64_t>& mixingBuckets = {},
+    const std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixingResult = {});
 
   uint64_t selectTransfers(uint64_t needeMoney,
     bool dust,
