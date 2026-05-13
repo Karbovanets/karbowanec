@@ -94,4 +94,16 @@ bool gk_verify_batch_naive(const EllipticCurvePoint* commitments,
                            size_t n,
                            const Hash& tx_hash);
 
+// Computes V[k]*H from scratch (one variable-base scalarmult per k) and
+// writes the 32-byte compressed encoding into out[k].
+//
+// Exposed solely so the unit test BakedVkHTableMatchesFromScratch can
+// verify that the literals in gk_denomination_table.h agree with the
+// from-scratch result on every build. The runtime path uses the baked
+// constants directly and never calls this function.
+//
+// Returns true on success, false if the canonical H point fails to
+// decode or any scalarmult fails.
+bool gk_compute_vkH_table_from_scratch(unsigned char out[64][32]);
+
 } // namespace Crypto

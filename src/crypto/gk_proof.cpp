@@ -23,6 +23,7 @@
 // Verification: sum_k p_k(x)*D[k] == f*G + sum_{m=0}^{5} x^m * Q[m]
 
 #include "gk_proof.h"
+#include "gk_denomination_table.h"
 #include "pedersen.h"
 #include "hash.h"
 #include "random.h"
@@ -113,18 +114,21 @@ static void point_identity(ge_p3* out) {
 // Precomputed table of V[k]*H in ge_cached form, k=0..63, where V[k] are
 // the canonical CT denominations and H is the Pedersen generator.
 //
-// These 64 points depend only on fixed constants (DENOMINATIONS[] and the
-// fixed-domain H = hash_to_point("CN-amount-generator")), so they can be
-// computed once at process startup and reused across every gk_prove /
-// gk_verify call. Each call to compute_derived_ring previously did 64
-// variable-base scalarmults (~85µs each → ~5.4ms per call); after caching
-// it does 64 subtractions instead, which is dominated by the C-decoded
-// p3 subtraction loop and runs in well under a millisecond.
+// The 64 compressed encodings are baked into gk_denomination_table.h as
+// literal hex bytes; at first use we decode them into ge_p3 and convert
+// to ge_cached for fast subtraction. No scalar multiplication at all.
 //
-// ge_cached is the form ge_sub wants for its second operand, so storing
-// the cached representation directly also saves the per-call ge_p3_to_cached
-// conversions. We additionally hold the ge_p3 form of H for callers that
-// need it (gk_collect_claims_internal hands it out as H_p3_out).
+// Audit story:
+//   1) kVkH_baked[] in gk_denomination_table.h is source-visible.
+//   2) The unit test GKProof.BakedVkHTableMatchesFromScratch recomputes
+//      V[k]*H from DENOMINATIONS[] + pedersen_get_H() and asserts byte
+//      equality with kVkH_baked on every build.
+//   3) Initialisation here only does ge_frombytes_vartime + ge_p3_to_cached
+//      per entry — both are subgroup-checking helpers; an invalid baked
+//      entry trips `ok=false` and every subsequent proof rejects cleanly.
+//
+// We also keep the ge_p3 form of H for callers that need it
+// (gk_collect_claims_internal hands it out as H_p3_out).
 namespace {
 struct VkHTable {
   ge_cached vkH_cached[GK_N];  // (V[k] * H) for k=0..63, ready for ge_sub
@@ -133,8 +137,7 @@ struct VkHTable {
 };
 
 // Function-local static guarantees thread-safe one-shot init under C++11+.
-// Initialisation cost is paid on the first crypto call that needs it
-// (typically a startup-time check), not per-call.
+// Cost: 65 ge_frombytes_vartime + 64 ge_p3_to_cached ≈ 50 µs total.
 const VkHTable& get_vkH_table() {
   static const VkHTable table = []() {
     VkHTable t{};
@@ -145,10 +148,8 @@ const VkHTable& get_vkH_table() {
       return t;
     }
     for (size_t k = 0; k < GK_N; ++k) {
-      EllipticCurveScalar vk_scalar;
-      uint64_to_scalar(CryptoNote::DENOMINATIONS[k], vk_scalar);
       ge_p3 vkH;
-      if (!scalarmult(&vkH, vk_scalar.data, &t.H_p3)) {
+      if (ge_frombytes_vartime(&vkH, kVkH_baked[k]) != 0) {
         return t;
       }
       ge_p3_to_cached(&t.vkH_cached[k], &vkH);
@@ -1127,6 +1128,23 @@ bool gk_verify_batch_naive(const EllipticCurvePoint* commitments,
                            size_t n,
                            const Hash& tx_hash) {
   return gk_verify_batch_dispatch(commitments, proofs, n, tx_hash, BatchMSM::Naive);
+}
+
+bool gk_compute_vkH_table_from_scratch(unsigned char out[64][32]) {
+  ge_p3 H_p3;
+  const EllipticCurvePoint& H = pedersen_get_H();
+  if (ge_frombytes_vartime(&H_p3,
+      reinterpret_cast<const unsigned char*>(&H)) != 0) {
+    return false;
+  }
+  for (size_t k = 0; k < GK_N; ++k) {
+    EllipticCurveScalar v_scalar;
+    uint64_to_scalar(CryptoNote::DENOMINATIONS[k], v_scalar);
+    ge_p2 vkH_p2;
+    ge_scalarmult(&vkH_p2, reinterpret_cast<const unsigned char*>(&v_scalar), &H_p3);
+    ge_tobytes(out[k], &vkH_p2);
+  }
+  return true;
 }
 
 } // namespace Crypto

@@ -7,6 +7,7 @@
 //        /link ../build/src/Release/Crypto.lib
 
 #include "crypto/gk_proof.h"
+#include "crypto/gk_denomination_table.h"
 #include "crypto/mlsag.h"
 #include "crypto/pedersen.h"
 #include "crypto/transaction_balance.h"
@@ -1436,6 +1437,55 @@ static void test_gk_batch_single_equivalent_to_per_proof() {
 // the naive sequential version is kept as an audit-friendly reference.
 // Disagreement at any batch size would indicate a Pippenger
 // implementation bug.
+// The 64 V[k]*H values baked into src/crypto/gk_denomination_table.h must
+// match the values you'd get by computing V[k]*H from scratch using the
+// canonical denomination set and the pedersen_get_H() generator. If this
+// ever diverges, either DENOMINATIONS[] changed, the H domain string
+// changed, or someone hand-edited the baked file. All three of those would
+// silently break consensus — the assert here catches them at build time.
+//
+// Regeneration command if this test legitimately fails after an intentional
+// change:  tests/Release/CTBench --print-vkh-table > src/crypto/gk_denomination_table.h
+// (then edit headers/footers to match the existing file).
+static void test_baked_vkH_table_matches_from_scratch() {
+  TEST("Baked V[k]*H table matches from-scratch computation");
+
+  unsigned char scratch[64][32];
+  if (!Crypto::gk_compute_vkH_table_from_scratch(scratch)) {
+    FAIL("from-scratch computation failed");
+    return;
+  }
+
+  // Drive a verify-batch call through the baked path to confirm
+  // initialisation succeeded — if any baked entry decoded badly, the
+  // table's ok flag is false and every proof would now reject. We piggy-
+  // back on a 1-proof batch as a smoke test.
+  Crypto::Hash tx_hash;
+  std::vector<Crypto::EllipticCurvePoint> commits;
+  std::vector<Crypto::GKProof> proofs;
+  build_n_legit_proofs(1, tx_hash, commits, proofs);
+  if (!Crypto::gk_verify_batch(commits.data(), proofs.data(), 1, tx_hash)) {
+    FAIL("baked table failed to drive a legitimate single-proof batch");
+    return;
+  }
+
+  // Byte-for-byte equality check between baked and from-scratch.
+  // The baked array lives in gk_denomination_table.h (included at the
+  // top of this file). Smoke-test above already confirmed init succeeded;
+  // the explicit byte compare here is the audit-trail check.
+  for (size_t k = 0; k < 64; ++k) {
+    if (memcmp(scratch[k], Crypto::kVkH_baked[k], 32) != 0) {
+      char msg[128];
+      snprintf(msg, sizeof(msg),
+               "baked != from-scratch at k=%zu (V=%llu)",
+               k, (unsigned long long)CryptoNote::DENOMINATIONS[k]);
+      FAIL(msg);
+      return;
+    }
+  }
+  PASS();
+}
+
 static void test_gk_batch_naive_matches_pippenger_legit() {
   TEST("Batched GK: naive and Pippenger agree on legitimate batch");
   for (size_t n : {size_t{1}, size_t{4}, size_t{16}, size_t{32}}) {
@@ -1629,6 +1679,7 @@ int main() {
   test_gk_batch_rejects_wrong_tx_hash();
   test_gk_batch_naive_matches_pippenger_legit();
   test_gk_batch_naive_matches_pippenger_tampered();
+  test_baked_vkH_table_matches_from_scratch();
 
   printf("\n[Consistency + capacity]\n");
   test_wallet_fee_absorption_policy_consistency();
