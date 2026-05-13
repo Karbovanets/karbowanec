@@ -282,6 +282,64 @@ static VerifyTiming verifyCtTx(const CtTxStub& tx) {
   return t;
 }
 
+// Same as verifyCtTx but uses Crypto::gk_verify_batch over all outputs
+// instead of looping gk_verify per output. The MLSAG and balance steps
+// are identical; only the GK timing changes.
+static VerifyTiming verifyCtTxBatchedGK(const CtTxStub& tx) {
+  VerifyTiming t;
+
+  // MLSAG verify per input (same path as the non-batched flow).
+  {
+    auto start = clock_t_::now();
+    for (size_t i = 0; i < tx.numInputs; ++i) {
+      bool ok = Crypto::mlsag_verify(tx.txHash,
+                                     tx.ringPubkeys[i].data(),
+                                     tx.ringCommits[i].data(),
+                                     tx.pseudoCommits[i],
+                                     tx.ringSize,
+                                     tx.keyImages[i],
+                                     tx.mlsagSigs[i]);
+      if (!ok) {
+        t.allPassed = false;
+        std::fprintf(stderr, "[bench] MLSAG verify FAILED at input %zu\n", i);
+      }
+    }
+    auto end = clock_t_::now();
+    t.mlsagMicros = std::chrono::duration<double, std::micro>(end - start).count();
+  }
+
+  // Batched GK verify over all outputs at once.
+  {
+    auto start = clock_t_::now();
+    bool ok = Crypto::gk_verify_batch(tx.outputCommits.data(),
+                                       tx.gkProofs.data(),
+                                       tx.numOutputs,
+                                       tx.txHash);
+    if (!ok) {
+      t.allPassed = false;
+      std::fprintf(stderr, "[bench] BATCHED GK verify FAILED\n");
+    }
+    auto end = clock_t_::now();
+    t.gkMicros = std::chrono::duration<double, std::micro>(end - start).count();
+  }
+
+  // Balance equation + kernel signature (same path as the non-batched flow).
+  {
+    auto start = clock_t_::now();
+    bool ok = Crypto::verify_transaction_balance(tx.pseudoCommits.data(), tx.numInputs,
+                                                 tx.outputCommits.data(), tx.numOutputs,
+                                                 tx.fee, tx.txHash, tx.kernel);
+    if (!ok) {
+      t.allPassed = false;
+    }
+    auto end = clock_t_::now();
+    t.balanceMicros = std::chrono::duration<double, std::micro>(end - start).count();
+  }
+
+  t.totalMicros = t.mlsagMicros + t.gkMicros + t.balanceMicros;
+  return t;
+}
+
 // ─── Worst-case size estimate ──────────────────────────────────────────
 //
 // Per-input wire cost at ring size R:
@@ -321,12 +379,12 @@ static const Preset kPresets[] = {
 };
 static const size_t kNumPresets = sizeof(kPresets) / sizeof(kPresets[0]);
 
-static void runPreset(const Preset& p) {
+static void runPreset(const Preset& p, bool batchedGK) {
   const size_t wireSize = estimateWireSize(p.numInputs, p.ringSize, p.numOutputs);
   const double wireKb = wireSize / 1024.0;
   const size_t sizeCap = CryptoNote::parameters::MAX_TRANSACTION_SIZE_LIMIT;
 
-  std::printf("\n[%s] %s\n", p.name, p.note);
+  std::printf("\n[%s%s] %s\n", p.name, batchedGK ? " +batched-gk" : "", p.note);
   std::printf("  inputs=%zu ring=%zu outputs=%zu iterations=%zu\n",
               p.numInputs, p.ringSize, p.numOutputs, p.iterations);
   std::printf("  estimated wire size ≈ %.1f KB (consensus cap = %.1f KB)%s\n",
@@ -342,14 +400,18 @@ static void runPreset(const Preset& p) {
   double buildMs = std::chrono::duration<double, std::milli>(buildEnd - buildStart).count();
   std::printf("done in %.1f ms\n", buildMs);
 
+  auto runOnce = [&]() {
+    return batchedGK ? verifyCtTxBatchedGK(tx) : verifyCtTx(tx);
+  };
+
   // Warm-up
-  (void)verifyCtTx(tx);
+  (void)runOnce();
 
   // Timed iterations
   double sumMlsag = 0, sumGk = 0, sumBalance = 0, sumTotal = 0;
   double minTotal = 1e18, maxTotal = 0;
   for (size_t it = 0; it < p.iterations; ++it) {
-    VerifyTiming t = verifyCtTx(tx);
+    VerifyTiming t = runOnce();
     sumMlsag += t.mlsagMicros;
     sumGk += t.gkMicros;
     sumBalance += t.balanceMicros;
@@ -367,8 +429,9 @@ static void runPreset(const Preset& p) {
 
   std::printf("  MLSAG verify : %8.1f ms total  (%.1f us / input)\n",
               avgMlsag / 1000.0, mlsagPerInputUs);
-  std::printf("  GK    verify : %8.1f ms total  (%.1f us / output)\n",
-              avgGk / 1000.0, gkPerOutputUs);
+  std::printf("  GK    verify : %8.1f ms total  (%.1f us / output)%s\n",
+              avgGk / 1000.0, gkPerOutputUs,
+              batchedGK ? "  [batched]" : "");
   std::printf("  Balance+kern : %8.1f ms total\n", avgBalance / 1000.0);
   std::printf("  TOTAL        : %8.1f ms  (min %.1f, max %.1f ms over %zu iters)\n",
               avgTotal / 1000.0, minTotal / 1000.0, maxTotal / 1000.0, p.iterations);
@@ -397,13 +460,23 @@ int main(int argc, char** argv) {
               "Verify-only; excludes per-ring-member DB lookups (I/O cost).\n");
 
   std::string single;
-  for (int i = 1; i + 1 < argc; ++i) {
-    if (std::string(argv[i]) == "--config") single = argv[i + 1];
+  bool batchedGK = false;
+  bool compareBoth = false;
+  for (int i = 1; i < argc; ++i) {
+    std::string a = argv[i];
+    if (a == "--config" && i + 1 < argc)      { single = argv[i + 1]; ++i; }
+    else if (a == "--batched-gk")             { batchedGK = true; }
+    else if (a == "--compare-gk")             { compareBoth = true; }
   }
 
   for (size_t i = 0; i < kNumPresets; ++i) {
     if (!single.empty() && single != kPresets[i].name) continue;
-    runPreset(kPresets[i]);
+    if (compareBoth) {
+      runPreset(kPresets[i], false);   // baseline (per-output gk_verify)
+      runPreset(kPresets[i], true);    // batched gk_verify_batch
+    } else {
+      runPreset(kPresets[i], batchedGK);
+    }
   }
 
   std::printf("\nDone.\n");

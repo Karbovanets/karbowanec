@@ -1284,6 +1284,153 @@ static void test_mlsag_mixed_transparent_and_ct_ring() {
   PASS();
 }
 
+// Build N legitimate GK proofs over a shared tx hash. Each output uses a
+// different denomination index to keep the proofs distinct. Returns the
+// per-output commitments and proofs alongside the tx hash.
+static void build_n_legit_proofs(size_t n, Crypto::Hash& tx_hash,
+                                  std::vector<Crypto::EllipticCurvePoint>& commitments,
+                                  std::vector<Crypto::GKProof>& proofs) {
+  random_hash(tx_hash);
+  commitments.resize(n);
+  proofs.resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    const size_t denomIdx = i % CryptoNote::DENOMINATION_COUNT;
+    const uint64_t v = CryptoNote::DENOMINATIONS[denomIdx];
+
+    Crypto::EllipticCurveScalar r;
+    test_random_scalar(r);
+
+    Crypto::EllipticCurveScalar v_scalar;
+    uint64_to_scalar(v, v_scalar);
+    if (!Crypto::pedersen_commit(v_scalar, r, commitments[i])) { FAIL("pedersen_commit"); return; }
+
+    if (!Crypto::gk_prove(commitments[i], v, r, denomIdx, tx_hash, proofs[i])) {
+      FAIL("gk_prove"); return;
+    }
+  }
+}
+
+static void test_gk_batch_positive_small() {
+  TEST("Batched GK: 4 legitimate proofs verify together");
+  Crypto::Hash tx_hash;
+  std::vector<Crypto::EllipticCurvePoint> commits;
+  std::vector<Crypto::GKProof> proofs;
+  build_n_legit_proofs(4, tx_hash, commits, proofs);
+
+  // Sanity: per-proof verify all pass.
+  for (size_t i = 0; i < proofs.size(); ++i) {
+    if (!Crypto::gk_verify(commits[i], proofs[i], tx_hash)) { FAIL("per-proof verify"); return; }
+  }
+
+  if (!Crypto::gk_verify_batch(commits.data(), proofs.data(), commits.size(), tx_hash)) {
+    FAIL("batched verify rejected legitimate proofs");
+    return;
+  }
+  PASS();
+}
+
+static void test_gk_batch_positive_large() {
+  TEST("Batched GK: 32 legitimate proofs (CT_MAX_OUTPUTS) verify together");
+  Crypto::Hash tx_hash;
+  std::vector<Crypto::EllipticCurvePoint> commits;
+  std::vector<Crypto::GKProof> proofs;
+  build_n_legit_proofs(32, tx_hash, commits, proofs);
+
+  if (!Crypto::gk_verify_batch(commits.data(), proofs.data(), commits.size(), tx_hash)) {
+    FAIL("batched verify rejected 32 legitimate proofs");
+    return;
+  }
+  PASS();
+}
+
+static void test_gk_batch_rejects_one_tampered_scalar() {
+  TEST("Batched GK: one proof with tampered f scalar → batch rejects");
+  Crypto::Hash tx_hash;
+  std::vector<Crypto::EllipticCurvePoint> commits;
+  std::vector<Crypto::GKProof> proofs;
+  build_n_legit_proofs(8, tx_hash, commits, proofs);
+
+  // Sanity-check the unmodified batch passes.
+  if (!Crypto::gk_verify_batch(commits.data(), proofs.data(), commits.size(), tx_hash)) {
+    FAIL("clean batch should verify"); return;
+  }
+
+  // Tamper one byte of the f scalar in proof[3]. Stays in range so the
+  // sc_check pre-pass doesn't reject — the batched MSM has to catch it.
+  proofs[3].f.data[1] ^= 0x01;
+  if (proofs[3].f.data[1] == 0) proofs[3].f.data[1] = 0x02;
+
+  if (Crypto::gk_verify_batch(commits.data(), proofs.data(), commits.size(), tx_hash)) {
+    FAIL("batched verify accepted a tampered proof");
+    return;
+  }
+  PASS();
+}
+
+static void test_gk_batch_rejects_one_tampered_point() {
+  TEST("Batched GK: one proof with tampered Q point → batch rejects");
+  Crypto::Hash tx_hash;
+  std::vector<Crypto::EllipticCurvePoint> commits;
+  std::vector<Crypto::GKProof> proofs;
+  build_n_legit_proofs(8, tx_hash, commits, proofs);
+
+  // Tamper a Q point in proof[5] by swapping in a randomly-generated valid
+  // point. Stays subgroup-valid so the pre-check passes; the MSM must
+  // detect the mismatch.
+  Crypto::EllipticCurveScalar randSec;
+  test_random_scalar(randSec);
+  ge_scalarmult_base(&proofs[5].Q[2], reinterpret_cast<const unsigned char*>(&randSec));
+
+  if (Crypto::gk_verify_batch(commits.data(), proofs.data(), commits.size(), tx_hash)) {
+    FAIL("batched verify accepted a tampered proof");
+    return;
+  }
+  PASS();
+}
+
+static void test_gk_batch_rejects_wrong_tx_hash() {
+  TEST("Batched GK: wrong tx_hash → batch rejects");
+  Crypto::Hash tx_hash;
+  std::vector<Crypto::EllipticCurvePoint> commits;
+  std::vector<Crypto::GKProof> proofs;
+  build_n_legit_proofs(4, tx_hash, commits, proofs);
+
+  Crypto::Hash wrong;
+  random_hash(wrong);
+  if (Crypto::gk_verify_batch(commits.data(), proofs.data(), commits.size(), wrong)) {
+    FAIL("batched verify accepted wrong tx_hash");
+    return;
+  }
+  PASS();
+}
+
+static void test_gk_batch_empty() {
+  TEST("Batched GK: n==0 returns true (degenerate case)");
+  Crypto::Hash tx_hash;
+  random_hash(tx_hash);
+  if (!Crypto::gk_verify_batch(nullptr, nullptr, 0, tx_hash)) {
+    FAIL("empty batch should trivially verify");
+    return;
+  }
+  PASS();
+}
+
+static void test_gk_batch_single_equivalent_to_per_proof() {
+  TEST("Batched GK: n==1 agrees with single gk_verify");
+  Crypto::Hash tx_hash;
+  std::vector<Crypto::EllipticCurvePoint> commits;
+  std::vector<Crypto::GKProof> proofs;
+  build_n_legit_proofs(1, tx_hash, commits, proofs);
+
+  const bool single = Crypto::gk_verify(commits[0], proofs[0], tx_hash);
+  const bool batch  = Crypto::gk_verify_batch(commits.data(), proofs.data(), 1, tx_hash);
+  if (single != batch) {
+    FAIL("single-element batch disagreed with per-proof verify");
+    return;
+  }
+  PASS();
+}
+
 static void test_ct_fork_height_decoupled() {
   TEST("Combined: CT_FORK_HEIGHT exists and display decimals stay at 12");
 
@@ -1420,6 +1567,15 @@ int main() {
   test_mlsag_ring_size_4();
   test_mlsag_mixed_transparent_and_ct_ring();
   test_ct_fork_height_decoupled();
+
+  printf("\n[Batched GK proof verification]\n");
+  test_gk_batch_empty();
+  test_gk_batch_single_equivalent_to_per_proof();
+  test_gk_batch_positive_small();
+  test_gk_batch_positive_large();
+  test_gk_batch_rejects_one_tampered_scalar();
+  test_gk_batch_rejects_one_tampered_point();
+  test_gk_batch_rejects_wrong_tx_hash();
 
   printf("\n[Consistency + capacity]\n");
   test_wallet_fee_absorption_policy_consistency();

@@ -62,4 +62,26 @@ bool gk_verify(const EllipticCurvePoint& C,
                const GKProof& proof,
                const Hash& tx_hash);
 
+// Batched GK proof verification.
+//
+// Verifies n proofs together — equivalent to looping gk_verify(commitments[i],
+// proofs[i], tx_hash) for i=0..n-1, but ~2-3× faster by collapsing the per-
+// proof linear-combination checks into a single multi-scalar multiplication
+// with random-coefficient batching.
+//
+// Soundness: verifier samples fresh random α_i / β_i per proof and per
+// equation, so a prover can't bias the collapsed check to mask a bad proof.
+// If any proof is invalid the batched check fails with overwhelming
+// probability (~2^-252 collision on the randoms).
+//
+// The original gk_verify is unchanged and still callable; the validator uses
+// the batched path for speed, and the per-proof path remains available for
+// diagnostic fall-back when a batch fails (to pinpoint which output broke).
+//
+// Returns true iff all n proofs verify.
+bool gk_verify_batch(const EllipticCurvePoint* commitments,
+                     const GKProof* proofs,
+                     size_t n,
+                     const Hash& tx_hash);
+
 } // namespace Crypto

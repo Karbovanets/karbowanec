@@ -2293,11 +2293,23 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
     return false;
   }
 
-  // Step 3: For each output: verify GK denomination membership proof
+  // Step 3: For all outputs: verify GK denomination membership proofs in
+  // one batched call. Reconstruct each on-wire CTOutputProof into a
+  // Crypto::GKProof first (point decode + scalar copy); any output that
+  // fails to decode is rejected up-front the same way as the per-output
+  // path. Then run a single gk_verify_batch over all outputs.
+  //
+  // On a batched failure we fall back to per-output gk_verify to pinpoint
+  // *which* output is bad — this only fires on rejection, so the happy
+  // path stays purely batched.
+  std::vector<Crypto::EllipticCurvePoint> gkCommitments;
+  std::vector<Crypto::GKProof>            gkProofs;
+  gkCommitments.reserve(tx.outputs.size());
+  gkProofs.reserve(tx.outputs.size());
+
   for (size_t i = 0; i < tx.outputs.size(); ++i) {
     const auto& cout = boost::get<ConfidentialOutput>(tx.outputs[i].target);
     const auto& gkp = tx.ctProofs[i];
-    // Reconstruct GKProof from body proof fields
     Crypto::GKProof proof;
     for (size_t j = 0; j < 6; ++j) {
       if (ge_frombytes_vartime(&proof.I[j],
@@ -2326,10 +2338,28 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
     }
     proof.f = gkp.f;
 
-    if (!Crypto::gk_verify(cout.commitment, proof, ct_signing_hash)) {
-      logger(ERROR) << "CT validation: output " << i << " GK membership proof failed in tx " << txHash;
-      return false;
+    gkCommitments.push_back(cout.commitment);
+    gkProofs.push_back(std::move(proof));
+  }
+
+  if (!gkCommitments.empty() &&
+      !Crypto::gk_verify_batch(gkCommitments.data(), gkProofs.data(),
+                               gkCommitments.size(), ct_signing_hash)) {
+    // Slow diagnostic path: identify the first offending output so the log
+    // doesn't just say "the batch failed". Only runs on rejection, so the
+    // happy path stays purely batched.
+    for (size_t i = 0; i < gkProofs.size(); ++i) {
+      if (!Crypto::gk_verify(gkCommitments[i], gkProofs[i], ct_signing_hash)) {
+        logger(ERROR) << "CT validation: output " << i << " GK membership proof failed in tx " << txHash;
+        return false;
+      }
     }
+    // All per-output checks passed individually but the batched check
+    // failed — should be statistically impossible (~2^-252). Log as a
+    // soundness anomaly rather than silently accepting.
+    logger(ERROR) << "CT validation: batched GK proof failed but all proofs verify individually in tx "
+                  << txHash << " (soundness anomaly — investigate)";
+    return false;
   }
 
   // Step 4: For each input, validate on-chain ring member binding and subgroup checks.
