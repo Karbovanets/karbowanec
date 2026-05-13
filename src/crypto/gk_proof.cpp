@@ -110,7 +110,57 @@ static void point_identity(ge_p3* out) {
   ge_frombytes_vartime(out, identity_bytes);
 }
 
-// Compute D[k] = C - V[k]*H for all k.
+// Precomputed table of V[k]*H in ge_cached form, k=0..63, where V[k] are
+// the canonical CT denominations and H is the Pedersen generator.
+//
+// These 64 points depend only on fixed constants (DENOMINATIONS[] and the
+// fixed-domain H = hash_to_point("CN-amount-generator")), so they can be
+// computed once at process startup and reused across every gk_prove /
+// gk_verify call. Each call to compute_derived_ring previously did 64
+// variable-base scalarmults (~85µs each → ~5.4ms per call); after caching
+// it does 64 subtractions instead, which is dominated by the C-decoded
+// p3 subtraction loop and runs in well under a millisecond.
+//
+// ge_cached is the form ge_sub wants for its second operand, so storing
+// the cached representation directly also saves the per-call ge_p3_to_cached
+// conversions. We additionally hold the ge_p3 form of H for callers that
+// need it (gk_collect_claims_internal hands it out as H_p3_out).
+namespace {
+struct VkHTable {
+  ge_cached vkH_cached[GK_N];  // (V[k] * H) for k=0..63, ready for ge_sub
+  ge_p3     H_p3;              // the Pedersen generator H in ge_p3 form
+  bool      ok;
+};
+
+// Function-local static guarantees thread-safe one-shot init under C++11+.
+// Initialisation cost is paid on the first crypto call that needs it
+// (typically a startup-time check), not per-call.
+const VkHTable& get_vkH_table() {
+  static const VkHTable table = []() {
+    VkHTable t{};
+    t.ok = false;
+    const EllipticCurvePoint& H = pedersen_get_H();
+    if (ge_frombytes_vartime(&t.H_p3,
+        reinterpret_cast<const unsigned char*>(&H)) != 0) {
+      return t;
+    }
+    for (size_t k = 0; k < GK_N; ++k) {
+      EllipticCurveScalar vk_scalar;
+      uint64_to_scalar(CryptoNote::DENOMINATIONS[k], vk_scalar);
+      ge_p3 vkH;
+      if (!scalarmult(&vkH, vk_scalar.data, &t.H_p3)) {
+        return t;
+      }
+      ge_p3_to_cached(&t.vkH_cached[k], &vkH);
+    }
+    t.ok = true;
+    return t;
+  }();
+  return table;
+}
+}  // namespace
+
+// Compute D[k] = C - V[k]*H for all k, using the precomputed V[k]*H table.
 static bool compute_derived_ring(const EllipticCurvePoint& C,
                                  ge_p3 D[GK_N],
                                  ge_p3& C_p3) {
@@ -118,26 +168,14 @@ static bool compute_derived_ring(const EllipticCurvePoint& C,
       reinterpret_cast<const unsigned char*>(&C)) != 0) {
     return false;
   }
-
-  ge_p3 H_p3;
-  const EllipticCurvePoint& H = pedersen_get_H();
-  if (ge_frombytes_vartime(&H_p3,
-      reinterpret_cast<const unsigned char*>(&H)) != 0) {
-    return false;
-  }
+  const VkHTable& table = get_vkH_table();
+  if (!table.ok) return false;
 
   for (size_t k = 0; k < GK_N; ++k) {
-    EllipticCurveScalar vk_scalar;
-    uint64_to_scalar(CryptoNote::DENOMINATIONS[k], vk_scalar);
-
-    ge_p3 vkH;
-    if (!scalarmult(&vkH, vk_scalar.data, &H_p3)) {
-      return false;
-    }
-
-    point_sub(&D[k], &C_p3, &vkH);
+    ge_p1p1 diff;
+    ge_sub(&diff, &C_p3, &table.vkH_cached[k]);
+    ge_p1p1_to_p3(&D[k], &diff);
   }
-
   return true;
 }
 
@@ -879,11 +917,9 @@ static bool gk_collect_claims_internal(const EllipticCurvePoint& C,
   EllipticCurveScalar x;
   compute_challenge(tx_hash, D, proof.I, proof.A, proof.B, proof.Q, x);
 
-  // Decode H once.
-  if (ge_frombytes_vartime(&H_p3_out,
-      reinterpret_cast<const unsigned char*>(&pedersen_get_H())) != 0) {
-    return false;
-  }
+  // Reuse the precomputed H_p3 from the VkH table. Avoids a per-call
+  // ge_frombytes_vartime that's already been done at static init.
+  H_p3_out = get_vkH_table().H_p3;
 
   // Initialise per-equation G/H accumulators to zero.
   for (size_t e = 0; e < 13; ++e) {
