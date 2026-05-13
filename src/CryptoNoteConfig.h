@@ -86,15 +86,32 @@ const size_t   CT_MIN_RING_SIZE_FOR_MIXING                   = 8;
 const uint64_t CT_MINIMUM_FEE                                = UINT64_C(10000000000);    // 0.01 KRB (= MIN_CT_DENOMINATION)
 const uint64_t CT_MAXIMUM_FEE                                = UINT64_C(100000000000000); // 100 KRB
 const uint64_t CT_CONFIDENTIAL_OUTPUT_AMOUNT                 = UINT64_MAX;      // internal bucket for hidden-output rings
-// Per-tx structural caps. The binding consensus cap on tx blob size is
-// MAX_TRANSACTION_SIZE_LIMIT (~244 KB at current parameters). With CT-output
-// GK proofs at ~1.4 KB each and CT inputs at ~0.6 KB (ring 4) to ~2.2 KB
-// (ring 16), the size cap is reached well before these counts in practice.
-// They remain as defense in depth against pathological/buggy txs and to
-// bound per-tx CPU verification cost (GK verify ~3-5 ms/output, MLSAG +
-// per-ring-member subgroup checks and DB lookups per input).
-const size_t   CT_MAX_INPUTS                                 = 512;
-const size_t   CT_MAX_OUTPUTS                                = 256;
+// Per-tx structural caps — chosen to keep worst-case validation under a
+// ~1 s/tx budget on commodity single-thread CPUs.
+//
+// Measured per-op verify cost (workstation, MSVC Release, see
+// docs/CT_PERF_AND_FUZZ_M3.md):
+//   - GK proof verify : ~21.5 ms / output   (dominant)
+//   - MLSAG verify    : ~5.6 ms / input  (ring 16)
+//   - balance+kernel  : <1 ms / tx
+//
+// At these caps the worst-case reachable verify time is roughly
+//   64 * 5.6 + 32 * 21.5 + 1 ≈ 1.05 s
+// and the worst-case wire size is roughly
+//   64 * 2.78 KB + 32 * 1.45 KB ≈ 224 KB,
+// which fits the consensus MAX_TRANSACTION_SIZE_LIMIT.
+//
+// The previous structural caps (512 inputs / 256 outputs) only mattered
+// for shapes the wire-size cap already rejected, leaving the in-budget
+// shape 50/50/ring-16 at ~1.4 s — a DoS vector. These tighter caps fix
+// that. They also frame the user-experience envelope: 32 outputs covers
+// batch-pay merchants with up to ~10 recipients × ~3 denomination digits.
+//
+// Once batched GK verification lands (see docs/CT_GK_BATCH_VERIFY_PLAN.md)
+// the GK term collapses by ~3-5×, at which point CT_MAX_OUTPUTS can be
+// raised back at fork height without breaking the budget.
+const size_t   CT_MAX_INPUTS                                 = 64;
+const size_t   CT_MAX_OUTPUTS                                = 32;
 
 const uint64_t MAX_TRANSACTION_SIZE_LIMIT                    = CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE_CURRENT / 4 - CRYPTONOTE_COINBASE_BLOB_RESERVED_SIZE;
 
