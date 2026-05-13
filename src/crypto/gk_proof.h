@@ -65,9 +65,9 @@ bool gk_verify(const EllipticCurvePoint& C,
 // Batched GK proof verification.
 //
 // Verifies n proofs together — equivalent to looping gk_verify(commitments[i],
-// proofs[i], tx_hash) for i=0..n-1, but ~2-3× faster by collapsing the per-
+// proofs[i], tx_hash) for i=0..n-1, but ~1.5× faster by collapsing the per-
 // proof linear-combination checks into a single multi-scalar multiplication
-// with random-coefficient batching.
+// (Pippenger windowed bucket method, c=4) with random-coefficient batching.
 //
 // Soundness: verifier samples fresh random α_i / β_i per proof and per
 // equation, so a prover can't bias the collapsed check to mask a bad proof.
@@ -83,5 +83,15 @@ bool gk_verify_batch(const EllipticCurvePoint* commitments,
                      const GKProof* proofs,
                      size_t n,
                      const Hash& tx_hash);
+
+// Reference (naive) batched verification: same contract as gk_verify_batch
+// but uses sequential s*P + ge_scalarmult_base inside, instead of Pippenger.
+// Kept exported so tests can cross-check the two implementations agree.
+// Production code should always call gk_verify_batch; this variant is
+// 1.2-1.5× slower at every batch size we measure.
+bool gk_verify_batch_naive(const EllipticCurvePoint* commitments,
+                           const GKProof* proofs,
+                           size_t n,
+                           const Hash& tx_hash);
 
 } // namespace Crypto

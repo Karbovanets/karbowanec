@@ -1431,6 +1431,57 @@ static void test_gk_batch_single_equivalent_to_per_proof() {
   PASS();
 }
 
+// Cross-check: both batched MSM implementations must agree on every
+// input — legitimate or tampered. Pippenger is the production path;
+// the naive sequential version is kept as an audit-friendly reference.
+// Disagreement at any batch size would indicate a Pippenger
+// implementation bug.
+static void test_gk_batch_naive_matches_pippenger_legit() {
+  TEST("Batched GK: naive and Pippenger agree on legitimate batch");
+  for (size_t n : {size_t{1}, size_t{4}, size_t{16}, size_t{32}}) {
+    Crypto::Hash tx_hash;
+    std::vector<Crypto::EllipticCurvePoint> commits;
+    std::vector<Crypto::GKProof> proofs;
+    build_n_legit_proofs(n, tx_hash, commits, proofs);
+
+    bool fast = Crypto::gk_verify_batch(commits.data(), proofs.data(), n, tx_hash);
+    bool ref  = Crypto::gk_verify_batch_naive(commits.data(), proofs.data(), n, tx_hash);
+    if (fast != ref) {
+      FAIL("Pippenger and naive disagreed on legitimate batch");
+      return;
+    }
+    if (!fast) {
+      FAIL("both reported failure on legitimate batch");
+      return;
+    }
+  }
+  PASS();
+}
+
+static void test_gk_batch_naive_matches_pippenger_tampered() {
+  TEST("Batched GK: naive and Pippenger agree on tampered batch");
+  Crypto::Hash tx_hash;
+  std::vector<Crypto::EllipticCurvePoint> commits;
+  std::vector<Crypto::GKProof> proofs;
+  build_n_legit_proofs(8, tx_hash, commits, proofs);
+
+  // Tamper proof[2]: flip one bit in f.
+  proofs[2].f.data[3] ^= 0x10;
+  if (proofs[2].f.data[3] == 0) proofs[2].f.data[3] = 0x20;
+
+  bool fast = Crypto::gk_verify_batch(commits.data(), proofs.data(), proofs.size(), tx_hash);
+  bool ref  = Crypto::gk_verify_batch_naive(commits.data(), proofs.data(), proofs.size(), tx_hash);
+  if (fast != ref) {
+    FAIL("Pippenger and naive disagreed on tampered batch");
+    return;
+  }
+  if (fast) {
+    FAIL("both accepted a tampered proof");
+    return;
+  }
+  PASS();
+}
+
 static void test_ct_fork_height_decoupled() {
   TEST("Combined: CT_FORK_HEIGHT exists and display decimals stay at 12");
 
@@ -1576,6 +1627,8 @@ int main() {
   test_gk_batch_rejects_one_tampered_scalar();
   test_gk_batch_rejects_one_tampered_point();
   test_gk_batch_rejects_wrong_tx_hash();
+  test_gk_batch_naive_matches_pippenger_legit();
+  test_gk_batch_naive_matches_pippenger_tampered();
 
   printf("\n[Consistency + capacity]\n");
   test_wallet_fee_absorption_policy_consistency();
