@@ -130,6 +130,7 @@ const uint32_t UPGRADE_HEIGHT_V4_2                           = 500000; // Fee pe
 const uint32_t UPGRADE_HEIGHT_V4_3                           = 667000; // Fixed min fee + fee per-byte for extra
 const uint32_t UPGRADE_HEIGHT_V5                             = 700000; // Block v5, back to LWMA1+, Alt. Signed Proof-of-Work
 const uint32_t UPGRADE_HEIGHT_V6                             = 4294967294; // Block v6
+const uint32_t UPGRADE_HEIGHT_V7                             = 4294967294; // Block v7 (reserved for future PQ-plain activation)
 const uint32_t CT_FORK_HEIGHT                                = UPGRADE_HEIGHT_V6; // Confidential Transactions, Pubkey-referenced rings for CT transactions, enable mempool-based zero-conf transactions chaining
 
 const unsigned UPGRADE_VOTING_THRESHOLD                      = 90; // percent
@@ -172,6 +173,7 @@ const uint8_t  BLOCK_MAJOR_VERSION_3                         =  3;
 const uint8_t  BLOCK_MAJOR_VERSION_4                         =  4;
 const uint8_t  BLOCK_MAJOR_VERSION_5                         =  5;
 const uint8_t  BLOCK_MAJOR_VERSION_6                         =  6;
+const uint8_t  BLOCK_MAJOR_VERSION_7                         =  7;
 const uint8_t  BLOCK_MINOR_VERSION_0                         =  0;
 const uint8_t  BLOCK_MINOR_VERSION_1                         =  1;
 

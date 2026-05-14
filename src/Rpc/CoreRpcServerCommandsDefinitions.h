@@ -436,6 +436,12 @@ struct COMMAND_RPC_GET_INFO {
     uint64_t start_time;
     uint8_t block_major_version;
     std::string already_generated_coins;
+    // Visible value currently locked inside the ECC CT pool (consensus-tracked).
+    // Formatted, just like `already_generated_coins`, because both are uint64_t
+    // values that can exceed JavaScript's safe integer range.
+    std::string confidential_supply;
+    // Visible value held by PQ-owned plain outputs (stub; 0 today).
+    std::string pq_plain_supply;
     std::string contact;
     bool deep_reorg_protection;
     uint32_t max_reorg_depth;
@@ -465,6 +471,8 @@ struct COMMAND_RPC_GET_INFO {
       KV_MEMBER(start_time)
       KV_MEMBER(block_major_version)
       KV_MEMBER(already_generated_coins)
+      KV_MEMBER(confidential_supply)
+      KV_MEMBER(pq_plain_supply)
       KV_MEMBER(contact)
       KV_MEMBER(deep_reorg_protection)
       KV_MEMBER(max_reorg_depth)

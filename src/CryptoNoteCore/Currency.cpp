@@ -83,6 +83,7 @@ namespace CryptoNote {
       m_upgradeHeightV4 = 70;
       m_upgradeHeightV5 = 80;
       m_upgradeHeightV6 = 100;
+      m_upgradeHeightV7 = 120;
       m_blocksFileName = "testnet_" + m_blocksFileName;
       m_blocksCacheFileName = "testnet_" + m_blocksCacheFileName;
       m_blockIndexesFileName = "testnet_" + m_blockIndexesFileName;
@@ -134,7 +135,10 @@ namespace CryptoNote {
   }
 
   uint32_t Currency::upgradeHeight(uint8_t majorVersion) const {
-    if (majorVersion == BLOCK_MAJOR_VERSION_6) {
+    if (majorVersion == BLOCK_MAJOR_VERSION_7) {
+      return m_upgradeHeightV7;
+    }
+    else if (majorVersion == BLOCK_MAJOR_VERSION_6) {
       return m_upgradeHeightV6;
     }
     else if (majorVersion == BLOCK_MAJOR_VERSION_5) {
@@ -813,6 +817,7 @@ namespace CryptoNote {
     case BLOCK_MAJOR_VERSION_4:
     case BLOCK_MAJOR_VERSION_5:
     case BLOCK_MAJOR_VERSION_6:
+    case BLOCK_MAJOR_VERSION_7:
       return checkProofOfWorkV1(context, block, currentDiffic, proofOfWork);
 
     case BLOCK_MAJOR_VERSION_2:
@@ -903,6 +908,7 @@ namespace CryptoNote {
     upgradeHeightV4(parameters::UPGRADE_HEIGHT_V4);
     upgradeHeightV5(parameters::UPGRADE_HEIGHT_V5);
     upgradeHeightV6(parameters::UPGRADE_HEIGHT_V6);
+    upgradeHeightV7(parameters::UPGRADE_HEIGHT_V7);
     upgradeVotingThreshold(parameters::UPGRADE_VOTING_THRESHOLD);
     upgradeVotingWindow(parameters::UPGRADE_VOTING_WINDOW);
     upgradeWindow(parameters::UPGRADE_WINDOW);

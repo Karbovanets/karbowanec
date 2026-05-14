@@ -459,6 +459,14 @@ namespace CryptoNote {
 
     BlockTemplate blockTemplate;
 
+    // Running CT pool liability used to skip CT-exit txs whose *cumulative*
+    // outflow would underflow the pool at block-push time. The per-tx
+    // pre-block check in checkConfidentialTransaction catches single oversized
+    // exits but not chains of exits that individually fit yet collectively
+    // exceed the pool; tracking the running pool here prevents the miner from
+    // mining a block that consensus would reject.
+    uint64_t running_ct_pool = m_core.getConfidentialSupply();
+
     for (auto i = m_fee_index.begin(); i != m_fee_index.end(); ++i) {
       const auto& txd = *i;
 
@@ -477,6 +485,30 @@ namespace CryptoNote {
       if (!m_core.check_tx_fee(txd.tx, getObjectHash(txd.tx), txd.blobSize, tvc, m_core.getCurrentBlockchainHeight())) {
         logger(DEBUGGING) << "Transaction " << txd.id << " not included to block template because fee is insufficient";
         continue;
+      }
+
+      // ── CT pool solvency simulation ─────────────────────────────────────────
+      // Compute the visible-value delta this tx would apply to the CT pool
+      // (same formula as Blockchain::pushBlock and checkConfidentialTransaction:
+      // delta = plain_in - plain_out - fee). If including this tx would drive
+      // the running pool below zero, skip it — a later cheaper tx may still
+      // fit, so we don't abort the whole template build.
+      const uint64_t plain_in  = getInputAmount(txd.tx);
+      const uint64_t plain_out = getOutputAmount(txd.tx);
+      const uint64_t tx_fee    = (txd.tx.version == TRANSACTION_VERSION_CT)
+                                 ? txd.tx.fee
+                                 : (plain_in - plain_out);
+      const int64_t  ct_delta  = static_cast<int64_t>(plain_in)
+                                - static_cast<int64_t>(plain_out)
+                                - static_cast<int64_t>(tx_fee);
+      if (ct_delta < 0) {
+        const uint64_t outflow = static_cast<uint64_t>(-ct_delta);
+        if (outflow > running_ct_pool) {
+          logger(DEBUGGING) << "Transaction " << txd.id
+                            << " not included: would underflow CT pool"
+                            << " (outflow=" << outflow << ", pool=" << running_ct_pool << ")";
+          continue;
+        }
       }
 
       TransactionCheckInfo checkInfo(txd);
@@ -499,6 +531,12 @@ namespace CryptoNote {
       if (ready && blockTemplate.addTransaction(txd.id, txd.tx)) {
         total_size += txd.blobSize;
         fee += txd.fee;
+        // Commit the CT pool delta only once the tx actually lands in the template.
+        if (ct_delta < 0) {
+          running_ct_pool -= static_cast<uint64_t>(-ct_delta);
+        } else {
+          running_ct_pool += static_cast<uint64_t>(ct_delta);
+        }
         logger(DEBUGGING) << "Transaction " << txd.id << " included to block template";
       } else {
         logger(DEBUGGING) << "Transaction " << txd.id << " is failed to include to block template";

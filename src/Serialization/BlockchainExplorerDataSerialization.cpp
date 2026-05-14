@@ -230,6 +230,8 @@ void serialize(BlockDetails& block, ISerializer& serializer) {
   serializer(block.blockSize, "blockSize");
   serializer(block.transactionsCumulativeSize, "transactionsCumulativeSize");
   serializer(block.alreadyGeneratedCoins, "alreadyGeneratedCoins");
+  serializer(block.confidentialSupply, "confidentialSupply");
+  serializer(block.pqPlainSupply, "pqPlainSupply");
   serializer(block.alreadyGeneratedTransactions, "alreadyGeneratedTransactions");
   serializer(block.sizeMedian, "sizeMedian");
   serializer(block.effectiveSizeMedian, "effectiveSizeMedian");

@@ -166,6 +166,12 @@ struct BlockDetails {
   uint64_t blockSize = 0;
   uint64_t transactionsCumulativeSize = 0;
   uint64_t alreadyGeneratedCoins = 0;
+  // Consensus-tracked: total visible value currently locked inside the ECC CT
+  // pool at this block height. See Blockchain::getConfidentialSupply.
+  uint64_t confidentialSupply = 0;
+  // Consensus-tracked: total visible value held by PQ-owned plain outputs.
+  // Stubbed at 0 today; will become non-zero once PQ-plain activates.
+  uint64_t pqPlainSupply = 0;
   uint64_t alreadyGeneratedTransactions = 0;
   uint64_t sizeMedian = 0;
   uint64_t effectiveSizeMedian = 0;

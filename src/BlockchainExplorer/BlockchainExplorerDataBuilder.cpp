@@ -171,6 +171,16 @@ bool BlockchainExplorerDataBuilder::fillBlockDetails(const Block &block, BlockDe
     return false;
   }
 
+  // CT pool liability / PQ-plain supply at this block height. Unknown blocks
+  // are reported as zero (consistent with pre-CT-fork history) rather than a
+  // hard failure so the explorer can still render the block.
+  if (!m_core.getConfidentialSupplyAtBlock(hash, blockDetails.confidentialSupply)) {
+    blockDetails.confidentialSupply = 0;
+  }
+  if (!m_core.getPqPlainSupplyAtBlock(hash, blockDetails.pqPlainSupply)) {
+    blockDetails.pqPlainSupply = 0;
+  }
+
   if (!m_core.getGeneratedTransactionsNumber(blockDetails.height, blockDetails.alreadyGeneratedTransactions)) {
     return false;
   }

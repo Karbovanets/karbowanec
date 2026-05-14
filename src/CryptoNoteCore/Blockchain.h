@@ -105,6 +105,19 @@ namespace CryptoNote {
     uint64_t getBlockTimestamp(uint32_t height);
     uint64_t getCoinsInCirculation();
     uint64_t getCoinsInCirculation(uint32_t height);
+    // Total visible value currently locked in the ECC CT pool at the chain tip
+    // (or at a specific height). This is consensus-tracked: every block updates
+    // it from the per-tx visible-value delta and the invariant
+    //   visible_plain_supply + pq_plain_supply + confidential_supply
+    //     == already_generated_coins
+    // is preserved across all chain operations including reorg.
+    uint64_t getConfidentialSupply();
+    uint64_t getConfidentialSupply(uint32_t height);
+    // Total visible value held by PQ-owned plain outputs. Stubbed at 0 today
+    // (no PQ output types exist yet); included so the consensus invariant and
+    // RPC surface are forward-compatible with the planned PQ-plain activation.
+    uint64_t getPqPlainSupply();
+    uint64_t getPqPlainSupply(uint32_t height);
     uint8_t getBlockMajorVersionForHeight(uint32_t height) const;
     bool addNewBlock(const Block& bl, block_verification_context& bvc);
     bool resetAndSetGenesisBlock(const Block& b);
@@ -135,6 +148,8 @@ namespace CryptoNote {
     bool getBlockContainingTransaction(const Crypto::Hash& txId, Crypto::Hash& blockId,
                                         uint32_t& blockHeight);
     bool getAlreadyGeneratedCoins(const Crypto::Hash& hash, uint64_t& generatedCoins);
+    bool getConfidentialSupplyAtBlock(const Crypto::Hash& hash, uint64_t& supply);
+    bool getPqPlainSupplyAtBlock(const Crypto::Hash& hash, uint64_t& supply);
     bool getBlockSize(const Crypto::Hash& hash, size_t& size);
     bool getGeneratedTransactionsNumber(uint32_t height, uint64_t& generatedTransactions);
     bool getOrphanBlockIdsByHeight(uint32_t height, std::vector<Crypto::Hash>& blockHashes);
@@ -274,6 +289,16 @@ namespace CryptoNote {
       uint64_t block_cumulative_size  = 0;
       difficulty_type cumulative_difficulty = 0;
       uint64_t already_generated_coins = 0;
+      // Consensus-tracked total visible value currently locked inside the ECC
+      // CT pool (plain → CT increases it; CT → plain / CT → CT visible fee
+      // decreases it). When this reaches zero the CT subsystem can be safely
+      // deactivated.
+      uint64_t confidential_supply    = 0;
+      // Total visible value currently held by PQ-owned plain outputs. Stub for
+      // a future PQ-plain output type; today this is always 0 because no PQ
+      // outputs are minted. Tracked so that CN → PQ migration and the global
+      // supply invariant can be validated cheaply when PQ activates.
+      uint64_t pq_plain_supply        = 0;
       std::vector<TransactionEntry> transactions;
 
       void serialize(ISerializer& s) {
@@ -282,6 +307,8 @@ namespace CryptoNote {
         s(block_cumulative_size, "block_cumulative_size");
         s(cumulative_difficulty, "cumulative_difficulty");
         s(already_generated_coins, "already_generated_coins");
+        s(confidential_supply, "confidential_supply");
+        s(pq_plain_supply, "pq_plain_supply");
         s(transactions, "transactions");
       }
     };
@@ -319,6 +346,7 @@ namespace CryptoNote {
     UpgradeDetector m_upgradeDetectorV4;
     UpgradeDetector m_upgradeDetectorV5;
     UpgradeDetector m_upgradeDetectorV6;
+    UpgradeDetector m_upgradeDetectorV7;
 
     bool m_no_blobs;
 

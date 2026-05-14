@@ -87,6 +87,7 @@ Blockchain::Blockchain(const Currency& currency, tx_memory_pool& tx_pool,
     m_upgradeDetectorV4(currency, m_blockView, BLOCK_MAJOR_VERSION_4, logger),
     m_upgradeDetectorV5(currency, m_blockView, BLOCK_MAJOR_VERSION_5, logger),
     m_upgradeDetectorV6(currency, m_blockView, BLOCK_MAJOR_VERSION_6, logger),
+    m_upgradeDetectorV7(currency, m_blockView, BLOCK_MAJOR_VERSION_7, logger),
     m_checkpoints(logger, rejectDeepReorgDepth),
     m_no_blobs(noBlobs)
 {
@@ -455,7 +456,8 @@ bool Blockchain::init(const std::string& config_folder, bool load_existing) {
   }
 
   if (!m_upgradeDetectorV2.init() || !m_upgradeDetectorV3.init() ||
-      !m_upgradeDetectorV4.init() || !m_upgradeDetectorV5.init() || !m_upgradeDetectorV6.init()) {
+      !m_upgradeDetectorV4.init() || !m_upgradeDetectorV5.init() ||
+      !m_upgradeDetectorV6.init() || !m_upgradeDetectorV7.init()) {
     logger(ERROR, BRIGHT_RED) << "Failed to initialize upgrade detector.";
   }
 
@@ -483,10 +485,12 @@ bool Blockchain::init(const std::string& config_folder, bool load_existing) {
   else if (checkAndRollback(m_upgradeDetectorV4)) {}
   else if (checkAndRollback(m_upgradeDetectorV5)) {}
   else if (checkAndRollback(m_upgradeDetectorV6)) {}
+  else if (checkAndRollback(m_upgradeDetectorV7)) {}
 
   if (reinitUpgradeDetectors &&
       (!m_upgradeDetectorV2.init() || !m_upgradeDetectorV3.init() ||
-       !m_upgradeDetectorV4.init() || !m_upgradeDetectorV5.init() || !m_upgradeDetectorV6.init())) {
+       !m_upgradeDetectorV4.init() || !m_upgradeDetectorV5.init() ||
+       !m_upgradeDetectorV6.init() || !m_upgradeDetectorV7.init())) {
     logger(ERROR, BRIGHT_RED) << "Failed to initialize upgrade detector";
     return false;
   }
@@ -741,8 +745,42 @@ uint64_t Blockchain::getCoinsInCirculation(uint32_t height) {
   return meta.alreadyGeneratedCoins;
 }
 
+uint64_t Blockchain::getConfidentialSupply() {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  uint32_t h = m_db.getChainHeight();
+  if (h == 0) return 0;
+  DbBlockMeta meta{};
+  m_db.getBlockMeta(h - 1, meta);
+  return meta.confidentialSupply;
+}
+
+uint64_t Blockchain::getConfidentialSupply(uint32_t height) {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  DbBlockMeta meta{};
+  m_db.getBlockMeta(height, meta);
+  return meta.confidentialSupply;
+}
+
+uint64_t Blockchain::getPqPlainSupply() {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  uint32_t h = m_db.getChainHeight();
+  if (h == 0) return 0;
+  DbBlockMeta meta{};
+  m_db.getBlockMeta(h - 1, meta);
+  return meta.pqPlainSupply;
+}
+
+uint64_t Blockchain::getPqPlainSupply(uint32_t height) {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  DbBlockMeta meta{};
+  m_db.getBlockMeta(height, meta);
+  return meta.pqPlainSupply;
+}
+
 uint8_t Blockchain::getBlockMajorVersionForHeight(uint32_t height) const {
-  if (height > m_upgradeDetectorV6.upgradeHeight()) {
+  if (height > m_upgradeDetectorV7.upgradeHeight()) {
+    return m_upgradeDetectorV7.targetVersion();
+  } else if (height > m_upgradeDetectorV6.upgradeHeight()) {
     return m_upgradeDetectorV6.targetVersion();
   } else if (height > m_upgradeDetectorV5.upgradeHeight()) {
     return m_upgradeDetectorV5.targetVersion();
@@ -2652,6 +2690,42 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
   // Step 10: Verify fee >= 0 and within network fee policy
   // (Already checked in Core::check_tx_fee; fee field is uint64_t so >= 0 is implicit)
 
+  // Step 11: CT pool liability solvency.
+  // Reject before block inclusion if this tx would withdraw more visible value
+  // from the ECC CT pool than the pool currently holds. This duplicates the
+  // safety check performed at block-push time so that mempool admission, RPC
+  // sendrawtransaction, and block-template construction all fail-fast on a
+  // doomed tx instead of waiting for the miner to discover it.
+  //
+  // delta = visible_plain_inputs - visible_plain_outputs - fee
+  //   < 0 means value is leaving the CT pool; |delta| must fit in the
+  //   currently-accumulated pool. Mempool chaining can produce a sequence
+  //   whose combined outflow exceeds the pool — that is caught at block-push
+  //   time. The per-tx check here is necessary but not sufficient.
+  {
+    const uint64_t plain_in  = getInputAmount(tx);
+    const uint64_t plain_out = getOutputAmount(tx);
+    const int64_t  delta     = static_cast<int64_t>(plain_in)
+                              - static_cast<int64_t>(plain_out)
+                              - static_cast<int64_t>(tx.fee);
+    if (delta < 0) {
+      const uint64_t outflow = static_cast<uint64_t>(-delta);
+      uint32_t h = m_db.getChainHeight();
+      uint64_t pool = 0;
+      if (h > 0) {
+        DbBlockMeta tipMeta{};
+        m_db.getBlockMeta(h - 1, tipMeta);
+        pool = tipMeta.confidentialSupply;
+      }
+      if (outflow > pool) {
+        logger(ERROR) << "CT validation: tx " << txHash
+                      << " would underflow CT pool liability"
+                      << " (outflow=" << outflow << ", pool=" << pool << ")";
+        return false;
+      }
+    }
+  }
+
   return true;
 }
 
@@ -3019,11 +3093,15 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
   const size_t coinbase_blob_size = getObjectBinarySize(blockData.baseTransaction);
 
   uint64_t already_generated_coins = 0;
+  uint64_t confidential_supply     = 0;
+  uint64_t pq_plain_supply         = 0;
   difficulty_type prevCumulativeDifficulty = 0;
   if (newHeight > 0) {
     DbBlockMeta prevMeta{};
     m_db.getBlockMeta(newHeight - 1, prevMeta);
     already_generated_coins   = prevMeta.alreadyGeneratedCoins;
+    confidential_supply       = prevMeta.confidentialSupply;
+    pq_plain_supply           = prevMeta.pqPlainSupply;
     prevCumulativeDifficulty  = prevMeta.cumulativeDifficulty;
   }
 
@@ -3078,21 +3156,57 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
 
       size_t blob_size = toBinaryArray(block.transactions.back().tx).size();
       // CT transactions carry an explicit fee field; transparent txs derive fee from I/O difference.
+      const Transaction& curTx = block.transactions.back().tx;
       uint64_t fee = (transactions[i].version == TRANSACTION_VERSION_CT)
                      ? transactions[i].fee
-                     : getInputAmount(block.transactions.back().tx) -
-                       getOutputAmount(block.transactions.back().tx);
+                     : getInputAmount(curTx) - getOutputAmount(curTx);
 
       // Under a confirmed checkpoint the block hash has already been verified by
       // the network. Skip the expensive per-input validation (key-image domain
       // check, output-key LMDB scans) - pushTransaction still records everything.
-      if (!inCheckpoint && !checkTransactionInputs(block.transactions.back().tx, TxValidationContext::Block)) {
+      if (!inCheckpoint && !checkTransactionInputs(curTx, TxValidationContext::Block)) {
         logger(INFO, BRIGHT_WHITE) << "Block " << blockHash
           << " has at least one transaction with wrong inputs: " << tx_id;
         bvc.m_verification_failed = true;
         m_db.abortTxn();
         m_batchCount = 0;
         return false;
+      }
+
+      // ── CT pool liability accounting (consensus) ────────────────────────────
+      // For each non-coinbase tx, the delta to the CT pool's visible value is:
+      //   delta = visible_plain_inputs - visible_plain_outputs - visible_fee
+      // where visible_plain_* sums only KeyInput / KeyOutput amounts (CT inputs
+      // and CT outputs contribute 0 because their amounts are hidden in
+      // Pedersen commitments and ConfidentialOutput sets TransactionOutput.amount
+      // to 0). The miner fee is always paid in plain visible value.
+      //   plain → plain:  delta == 0  (fee == in - out)
+      //   plain → CT:     delta > 0   (visible value entering the pool)
+      //   CT    → plain:  delta < 0   (visible value leaving the pool)
+      //   CT    → CT:     delta == -fee (only the visible fee leaves)
+      // Reject the block if any tx would underflow the pool — that would mean
+      // visible value is being conjured from CT outputs that don't exist.
+      {
+        const uint64_t plain_in  = getInputAmount(curTx);   // sums KeyInput.amount only
+        const uint64_t plain_out = getOutputAmount(curTx);  // ConfidentialOutput contributes 0
+        const int64_t  delta     = static_cast<int64_t>(plain_in)
+                                  - static_cast<int64_t>(plain_out)
+                                  - static_cast<int64_t>(fee);
+        if (delta < 0) {
+          const uint64_t outflow = static_cast<uint64_t>(-delta);
+          if (outflow > confidential_supply) {
+            logger(ERROR, BRIGHT_RED) << "Block " << blockHash
+              << " tx " << tx_id << " would underflow CT pool liability"
+              << " (outflow=" << outflow << ", pool=" << confidential_supply << ")";
+            bvc.m_verification_failed = true;
+            m_db.abortTxn();
+            m_batchCount = 0;
+            return false;
+          }
+          confidential_supply -= outflow;
+        } else {
+          confidential_supply += static_cast<uint64_t>(delta);
+        }
       }
 
       ++transactionIndex.transaction;
@@ -3125,6 +3239,8 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
 
     block.block_cumulative_size   = cumulative_block_size;
     block.already_generated_coins = already_generated_coins + emissionChange;
+    block.confidential_supply     = confidential_supply;
+    block.pq_plain_supply         = pq_plain_supply;
     block.cumulative_difficulty   = currentDifficulty + prevCumulativeDifficulty;
 
     pushBlock(block, blockHash);  // writes block-level LMDB data
@@ -3182,6 +3298,7 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
   m_upgradeDetectorV4.blockPushed();
   m_upgradeDetectorV5.blockPushed();
   m_upgradeDetectorV6.blockPushed();
+  m_upgradeDetectorV7.blockPushed();
 
   update_next_cumulative_size_limit();
   return true;
@@ -3199,6 +3316,8 @@ bool Blockchain::pushBlock(BlockEntry& block, const Crypto::Hash& blockHash) {
   meta.timestamp            = block.bl.timestamp;
   meta.cumulativeDifficulty = block.cumulative_difficulty;
   meta.alreadyGeneratedCoins = block.already_generated_coins;
+  meta.confidentialSupply   = block.confidential_supply;
+  meta.pqPlainSupply        = block.pq_plain_supply;
   meta.blockCumulativeSize  = static_cast<uint32_t>(block.block_cumulative_size);
   meta.height               = height;
   meta.txCount              = static_cast<uint16_t>(block.transactions.size());
@@ -3264,6 +3383,7 @@ void Blockchain::popBlock() {
   m_upgradeDetectorV4.blockPopped();
   m_upgradeDetectorV5.blockPopped();
   m_upgradeDetectorV6.blockPopped();
+  m_upgradeDetectorV7.blockPopped();
 }
 
 bool Blockchain::pushTransaction(BlockEntry& block, const Crypto::Hash& transactionHash,
@@ -3593,6 +3713,40 @@ bool Blockchain::getAlreadyGeneratedCoins(const Crypto::Hash& hash, uint64_t& ge
   }
   logger(DEBUGGING) << "Can't find block with hash " << hash
     << " to get already generated coins.";
+  return false;
+}
+
+bool Blockchain::getConfidentialSupplyAtBlock(const Crypto::Hash& hash, uint64_t& supply) {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  uint32_t height = 0;
+  if (m_db.getHashHeight(hash, height)) {
+    DbBlockMeta meta{};
+    m_db.getBlockMeta(height, meta);
+    supply = meta.confidentialSupply;
+    return true;
+  }
+  auto it = m_alternative_chains.find(hash);
+  if (it != m_alternative_chains.end()) {
+    supply = it->second.confidential_supply;
+    return true;
+  }
+  return false;
+}
+
+bool Blockchain::getPqPlainSupplyAtBlock(const Crypto::Hash& hash, uint64_t& supply) {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  uint32_t height = 0;
+  if (m_db.getHashHeight(hash, height)) {
+    DbBlockMeta meta{};
+    m_db.getBlockMeta(height, meta);
+    supply = meta.pqPlainSupply;
+    return true;
+  }
+  auto it = m_alternative_chains.find(hash);
+  if (it != m_alternative_chains.end()) {
+    supply = it->second.pq_plain_supply;
+    return true;
+  }
   return false;
 }
 

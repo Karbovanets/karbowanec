@@ -106,6 +106,10 @@ public:
   virtual uint64_t getMinimalFee() override;
   virtual uint64_t getNextBlockDifficulty() override;
   virtual uint64_t getTotalGeneratedAmount() override;
+  virtual uint64_t getConfidentialSupply() override;
+  virtual uint64_t getPqPlainSupply() override;
+  virtual bool getConfidentialSupplyAtBlock(const Crypto::Hash& blockHash, uint64_t& supply) override;
+  virtual bool getPqPlainSupplyAtBlock(const Crypto::Hash& blockHash, uint64_t& supply) override;
   virtual bool check_tx_fee(const CryptoNote::Transaction& tx, const Crypto::Hash& txHash, size_t blobSize, CryptoNote::tx_verification_context& tvc, uint32_t height) override;
   virtual size_t getPoolTransactionsCount() override;
   virtual size_t getBlockchainTotalTransactions() override;

@@ -1406,6 +1406,22 @@ uint64_t Core::getTotalGeneratedAmount() {
   return m_blockchain.getCoinsInCirculation();
 }
 
+uint64_t Core::getConfidentialSupply() {
+  return m_blockchain.getConfidentialSupply();
+}
+
+uint64_t Core::getPqPlainSupply() {
+  return m_blockchain.getPqPlainSupply();
+}
+
+bool Core::getConfidentialSupplyAtBlock(const Crypto::Hash& blockHash, uint64_t& supply) {
+  return m_blockchain.getConfidentialSupplyAtBlock(blockHash, supply);
+}
+
+bool Core::getPqPlainSupplyAtBlock(const Crypto::Hash& blockHash, uint64_t& supply) {
+  return m_blockchain.getPqPlainSupplyAtBlock(blockHash, supply);
+}
+
 uint8_t Core::getBlockMajorVersionForHeight(uint32_t height) const {
   return m_blockchain.getBlockMajorVersionForHeight(height);
 }

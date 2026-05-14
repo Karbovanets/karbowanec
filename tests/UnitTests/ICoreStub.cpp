@@ -570,6 +570,24 @@ uint64_t ICoreStub::getTotalGeneratedAmount() {
   return generatedCoins;
 }
 
+uint64_t ICoreStub::getConfidentialSupply() {
+  return 0;
+}
+
+uint64_t ICoreStub::getPqPlainSupply() {
+  return 0;
+}
+
+bool ICoreStub::getConfidentialSupplyAtBlock(const Crypto::Hash& /*blockHash*/, uint64_t& supply) {
+  supply = 0;
+  return true;
+}
+
+bool ICoreStub::getPqPlainSupplyAtBlock(const Crypto::Hash& /*blockHash*/, uint64_t& supply) {
+  supply = 0;
+  return true;
+}
+
 bool ICoreStub::check_tx_fee(const CryptoNote::Transaction& tx, const Crypto::Hash& txHash, size_t blobSize, CryptoNote::tx_verification_context& tvc, uint32_t height) {
   return true;
 }
