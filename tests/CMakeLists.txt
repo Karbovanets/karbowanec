@@ -41,6 +41,7 @@ add_executable(MLSAGTests test_mlsag.cpp)
 add_executable(TxBalanceTests test_transaction_balance.cpp)
 add_executable(CTIntegrationTests test_ct_integration.cpp)
 add_executable(CTBench bench_ct_validation.cpp)
+add_executable(PqPrimitivesTests test_pq_primitives.cpp)
 # CT serializer fuzz harness, standalone PRNG-driven mode.
 # For coverage-guided fuzzing rebuild with clang -fsanitize=fuzzer,address,undefined
 # and drop the CTFUZZER_STANDALONE define so LLVMFuzzerTestOneInput becomes the entrypoint.
@@ -64,6 +65,7 @@ target_link_libraries(MLSAGTests Crypto Common ${Boost_LIBRARIES})
 target_link_libraries(TxBalanceTests Crypto Common ${Boost_LIBRARIES})
 target_link_libraries(CTIntegrationTests Crypto Common ${Boost_LIBRARIES})
 target_link_libraries(CTBench Crypto Common ${Boost_LIBRARIES})
+target_link_libraries(PqPrimitivesTests CryptoPq gtest ${Boost_LIBRARIES})
 target_link_libraries(CTFuzz CryptoNoteCore Serialization Crypto Common Logging ${Boost_LIBRARIES})
 if(MSVC)
   # CryptoNoteCore.lib pulls in StringTools which references the inline sscanf;
@@ -118,6 +120,7 @@ set_property(TARGET
   MLSAGTests
   TxBalanceTests
   CTIntegrationTests
+  PqPrimitivesTests
 PROPERTY FOLDER "tests")
 
 add_dependencies(IntegrationTestLibrary version)
@@ -138,6 +141,7 @@ set_property(TARGET GKProofTests PROPERTY OUTPUT_NAME "gk_proof_tests")
 set_property(TARGET MLSAGTests PROPERTY OUTPUT_NAME "mlsag_tests")
 set_property(TARGET TxBalanceTests PROPERTY OUTPUT_NAME "tx_balance_tests")
 set_property(TARGET CTIntegrationTests PROPERTY OUTPUT_NAME "ct_integration_tests")
+set_property(TARGET PqPrimitivesTests PROPERTY OUTPUT_NAME "pq_primitives_tests")
 
 add_test(CoreTests core_tests --generate_and_play_test_data)
 add_test(CryptoTests crypto_tests ${CMAKE_CURRENT_SOURCE_DIR}/crypto/tests.txt)
@@ -152,5 +156,6 @@ add_test(GKProofTests gk_proof_tests)
 add_test(MLSAGTests mlsag_tests)
 add_test(TxBalanceTests tx_balance_tests)
 add_test(CTIntegrationTests ct_integration_tests)
+add_test(PqPrimitivesTests pq_primitives_tests)
 add_test(LMDBReorgTests lmdb_reorg_tests)
 
