@@ -219,6 +219,9 @@ namespace CryptoNote
     bool m_do_not_relay_tx;
     bool m_dump_keys_file;
     bool m_initial_remote_fee_mess;
+    // --legacy-tx: force v1 plain (transparent) transactions even after the CT
+    // fork. Default false; wallets default to CT post-fork.
+    bool m_legacy_tx = false;
     
     std::unique_ptr<std::promise<std::error_code>> m_initResultPromise;
 

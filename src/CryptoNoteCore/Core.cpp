@@ -958,8 +958,7 @@ bool Core::check_tx_syntax(const Transaction& tx, const Crypto::Hash& tx_hash, u
     return false;
   }
 
-  const uint8_t currentTransactionVersion = m_currency.currentTransactionVersion(height);
-  const bool ctActivated = currentTransactionVersion == TRANSACTION_VERSION_CT;
+  const bool ctActivated = m_currency.isConfidentialTransactionsActivated(height);
   if (tx.version == TRANSACTION_VERSION_CT && !ctActivated) {
     logger(ERROR) << "CT transaction " << Common::podToHex(tx_hash)
                   << " arrived before CT activation height "
@@ -968,12 +967,9 @@ bool Core::check_tx_syntax(const Transaction& tx, const Crypto::Hash& tx_hash, u
     return false;
   }
 
-  if (tx.version == CURRENT_TRANSACTION_VERSION && currentTransactionVersion != CURRENT_TRANSACTION_VERSION) {
-    logger(ERROR) << "Legacy transaction " << Common::podToHex(tx_hash)
-                  << " rejected for block height " << height
-                  << " (CT-only era)";
-    return false;
-  }
+  // Both versions remain valid post-fork: wallets default to CT, but v1 plain
+  // is still accepted so opt-out users (e.g. simplewallet --legacy-tx) and
+  // existing tooling/exchanges can keep sending transparent transactions.
 
   return true;
 }

@@ -77,14 +77,15 @@ bool isTransparentNonCanonicalCtAmount(const TransactionOutputInformation& outpu
 
 namespace CryptoNote {
 
-WalletTransactionSender::WalletTransactionSender(const Currency& currency, WalletUserTransactionsCache& transactionsCache, AccountKeys keys, ITransfersContainer& transfersContainer, INode& node) :
+WalletTransactionSender::WalletTransactionSender(const Currency& currency, WalletUserTransactionsCache& transactionsCache, AccountKeys keys, ITransfersContainer& transfersContainer, INode& node, bool forceLegacy) :
   m_currency(currency),
   m_node(node),
   m_transactionsCache(transactionsCache),
   m_isStoping(false),
   m_keys(keys),
   m_transferDetails(transfersContainer),
-  m_upperTransactionSizeLimit(m_currency.maxTransactionSizeLimit()) {
+  m_upperTransactionSizeLimit(m_currency.maxTransactionSizeLimit()),
+  m_forceLegacy(forceLegacy) {
 }
 
 void WalletTransactionSender::stop() {
@@ -211,7 +212,8 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::makeSendRequest(Transact
   throwIf(transfers.empty(), error::ZERO_DESTINATION);
   validateTransfersAddresses(transfers);
   uint64_t neededMoney = countNeededMoney(fee, transfers);
-  const bool useCT = m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
+  const bool useCT = !m_forceLegacy &&
+    m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
 
   std::shared_ptr<SendTransactionContext> context = std::make_shared<SendTransactionContext>();
 
@@ -260,7 +262,8 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
   throwIf(transfers.empty(), error::ZERO_DESTINATION);
   validateTransfersAddresses(transfers);
   uint64_t neededMoney = countNeededMoney(fee, transfers);
-  const bool useCT = m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
+  const bool useCT = !m_forceLegacy &&
+    m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
 
   std::shared_ptr<SendTransactionContext> context = std::make_shared<SendTransactionContext>();
 
@@ -464,7 +467,8 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::doSendTransaction(std::s
     uint64_t totalAmount = -transaction.totalAmount;
     uint64_t changeAmount = context->foundMoney > totalAmount ? context->foundMoney - totalAmount : 0;
 
-    const bool useCT = m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
+    const bool useCT = !m_forceLegacy &&
+    m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
 
     Transaction tx;
     if (useCT) {

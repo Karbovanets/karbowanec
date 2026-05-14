@@ -69,6 +69,12 @@ public:
   WalletLegacy(const CryptoNote::Currency& currency, INode& node, Logging::ILogger& log);
   virtual ~WalletLegacy();
 
+  // Force v1 plain (transparent) transactions even after the CT fork. The
+  // setting is captured at WalletTransactionSender construction time, so call
+  // this before the first send. Used by simplewallet's --legacy-tx flag.
+  void setForceLegacyTxs(bool force) { m_forceLegacyTxs = force; }
+  bool forceLegacyTxs() const { return m_forceLegacyTxs; }
+
   virtual void addObserver(IWalletLegacyObserver* observer) override;
   virtual void removeObserver(IWalletLegacyObserver* observer) override;
 
@@ -184,6 +190,7 @@ private:
 
   WalletUserTransactionsCache m_transactionsCache;
   std::unique_ptr<WalletTransactionSender> m_sender;
+  bool m_forceLegacyTxs = false;
 
   WalletAsyncContextCounter m_asyncContextCounter;
   Tools::ObserverManager<CryptoNote::IWalletLegacyObserver> m_observerManager;

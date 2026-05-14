@@ -126,6 +126,7 @@ const command_line::arg_descriptor<std::string> arg_log_file = {"log-file", "Set
 const command_line::arg_descriptor<uint32_t> arg_log_level = { "log-level", "Set the log verbosity level", INFO, true };
 const command_line::arg_descriptor<bool> arg_testnet = { "testnet", "Used to deploy test nets. The daemon must be launched with --testnet flag", false };
 const command_line::arg_descriptor<bool> arg_reset = { "reset", "Discard cache data and start synchronizing from scratch", false };
+const command_line::arg_descriptor<bool> arg_legacy_tx = { "legacy-tx", "Send legacy v1 plain (transparent) transactions instead of CT v2 (default is CT post-fork)", false };
 const command_line::arg_descriptor<uint32_t> arg_scan_height = { "scan-height", "The height to begin scanning a wallet from", 0 };
 const command_line::arg_descriptor< std::vector<std::string> > arg_command = { "command", "" };
 
@@ -1183,7 +1184,11 @@ bool simple_wallet::init(const boost::program_options::variables_map& vm)
   }
   else if (command_line::has_arg(vm, arg_change_password) && command_line::has_arg(vm, arg_password) && !m_wallet_file_arg.empty())
   {
-    m_wallet.reset(new WalletLegacy(m_currency, *m_node, m_logManager));
+    {
+      auto* w = new WalletLegacy(m_currency, *m_node, m_logManager);
+      w->setForceLegacyTxs(m_legacy_tx);
+      m_wallet.reset(w);
+    }
     pwd_container.password(command_line::get_arg(vm, arg_password));
     try
     {
@@ -1427,7 +1432,11 @@ bool simple_wallet::init(const boost::program_options::variables_map& vm)
   }
   else
   {
-    m_wallet.reset(new WalletLegacy(m_currency, *m_node, m_logManager));
+    {
+      auto* w = new WalletLegacy(m_currency, *m_node, m_logManager);
+      w->setForceLegacyTxs(m_legacy_tx);
+      m_wallet.reset(w);
+    }
 
     try
     {
@@ -1494,6 +1503,7 @@ void simple_wallet::handle_command_line(const boost::program_options::variables_
   m_view_key                     = command_line::get_arg(vm, arg_view_secret_key);
   m_spend_key                    = command_line::get_arg(vm, arg_spend_secret_key);
   m_scan_height                  = command_line::get_arg(vm, arg_scan_height);
+  m_legacy_tx                    = command_line::get_arg(vm, arg_legacy_tx);
 }
 
 //----------------------------------------------------------------------------------------------------
@@ -1501,7 +1511,11 @@ bool simple_wallet::new_wallet(const std::string &wallet_file, const std::string
 {
   m_wallet_file = wallet_file;
 
-  m_wallet.reset(new WalletLegacy(m_currency, *m_node.get(), m_logManager));
+  {
+    auto* w = new WalletLegacy(m_currency, *m_node.get(), m_logManager);
+    w->setForceLegacyTxs(m_legacy_tx);
+    m_wallet.reset(w);
+  }
   m_node->addObserver(static_cast<INodeObserver*>(this));
   m_wallet->addObserver(this);
 
@@ -1598,7 +1612,11 @@ bool simple_wallet::new_wallet(const std::string &wallet_file, const std::string
 bool simple_wallet::new_wallet(const std::string &wallet_file, const std::string& password, const Crypto::SecretKey &secret_key, const Crypto::SecretKey &view_key) {
   m_wallet_file = wallet_file;
 
-  m_wallet.reset(new WalletLegacy(m_currency, *m_node.get(), m_logManager));
+  {
+    auto* w = new WalletLegacy(m_currency, *m_node.get(), m_logManager);
+    w->setForceLegacyTxs(m_legacy_tx);
+    m_wallet.reset(w);
+  }
   m_node->addObserver(static_cast<INodeObserver*>(this));
   m_wallet->addObserver(this);
   try {
@@ -1656,7 +1674,11 @@ bool simple_wallet::new_wallet(const std::string &wallet_file, const std::string
 bool simple_wallet::new_wallet(const std::string &wallet_file, const std::string& password, const AccountKeys& private_keys) {
     m_wallet_file = wallet_file;
 
-    m_wallet.reset(new WalletLegacy(m_currency, *m_node.get(), m_logManager));
+    {
+    auto* w = new WalletLegacy(m_currency, *m_node.get(), m_logManager);
+    w->setForceLegacyTxs(m_legacy_tx);
+    m_wallet.reset(w);
+  }
     m_node->addObserver(static_cast<INodeObserver*>(this));
     m_wallet->addObserver(this);
     try {
@@ -1714,7 +1736,11 @@ bool simple_wallet::new_wallet(const std::string &wallet_file, const std::string
 bool simple_wallet::new_tracking_wallet(AccountKeys &tracking_key, const std::string &wallet_file, const std::string& password) {
     m_wallet_file = wallet_file;
 
-    m_wallet.reset(new WalletLegacy(m_currency, *m_node.get(), m_logManager));
+    {
+    auto* w = new WalletLegacy(m_currency, *m_node.get(), m_logManager);
+    w->setForceLegacyTxs(m_legacy_tx);
+    m_wallet.reset(w);
+  }
     m_node->addObserver(static_cast<INodeObserver*>(this));
     m_wallet->addObserver(this);
     try {
@@ -2719,6 +2745,7 @@ int main(int argc, char* argv[]) {
   command_line::add_arg(desc_params, arg_testnet);
   command_line::add_arg(desc_params, arg_reset);
   command_line::add_arg(desc_params, arg_scan_height);
+  command_line::add_arg(desc_params, arg_legacy_tx);
   Tools::wallet_rpc_server::init_options(desc_params);
 
   po::positional_options_description positional_options;
@@ -2858,7 +2885,9 @@ int main(int argc, char* argv[]) {
       return 1;
     }
 
-    std::unique_ptr<IWalletLegacy> wallet(new WalletLegacy(currency, *node.get(), logManager));
+    auto* walletImpl = new WalletLegacy(currency, *node.get(), logManager);
+    walletImpl->setForceLegacyTxs(command_line::get_arg(vm, arg_legacy_tx));
+    std::unique_ptr<IWalletLegacy> wallet(walletImpl);
 
     std::string walletFileName;
     try  {

@@ -50,8 +50,14 @@ namespace CryptoNote {
       if (tx.version != CURRENT_TRANSACTION_VERSION && tx.version != TRANSACTION_VERSION_CT) {
         return false;
       }
-
-      return tx.version == currency.currentTransactionVersion(height);
+      // Pre-fork: only legacy v1. Post-fork: both v1 plain and v2 CT remain
+      // valid — wallets default to CT but v1 plain is opt-out (e.g. via the
+      // simplewallet --legacy-tx flag).
+      if (tx.version == TRANSACTION_VERSION_CT &&
+          !currency.isConfidentialTransactionsActivated(height)) {
+        return false;
+      }
+      return true;
     }
   } // namespace
 

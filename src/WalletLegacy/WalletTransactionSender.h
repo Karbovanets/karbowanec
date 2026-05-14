@@ -35,7 +35,7 @@ namespace CryptoNote {
 class WalletTransactionSender
 {
 public:
-  WalletTransactionSender(const Currency& currency, WalletUserTransactionsCache& transactionsCache, AccountKeys keys, ITransfersContainer& transfersContainer, INode& node);
+  WalletTransactionSender(const Currency& currency, WalletUserTransactionsCache& transactionsCache, AccountKeys keys, ITransfersContainer& transfersContainer, INode& node, bool forceLegacy = false);
 
   void stop();
 
@@ -93,6 +93,11 @@ private:
   ITransfersContainer& m_transferDetails;
 
   INode& m_node;
+
+  // When true, force v1 plain transactions even when CT is active on the
+  // chain. Set via simplewallet --legacy-tx; intended for users who deliberately
+  // opt out of confidential transactions (e.g. tooling, exchanges, audits).
+  bool m_forceLegacy;
 };
 
 } /* namespace CryptoNote */

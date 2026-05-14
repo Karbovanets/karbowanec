@@ -3141,13 +3141,15 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
       block.transactions.resize(block.transactions.size() + 1);
       block.transactions.back().tx = transactions[i];
 
-      // Block v6: only confidential transactions (version 2) are allowed.
-      // This prevents old-style transparent outputs with large pre-fork amounts.
-      if (blockData.majorVersion >= BLOCK_MAJOR_VERSION_6 &&
+      // Post-CT-fork blocks accept both legacy v1 plain and v2 CT transactions.
+      // Wallets default to CT after the fork; v1 plain remains available for
+      // tooling, exchanges, and users who explicitly opt out (e.g. via the
+      // simplewallet --legacy-tx flag). Unknown versions are still rejected.
+      if (transactions[i].version != CURRENT_TRANSACTION_VERSION &&
           transactions[i].version != TRANSACTION_VERSION_CT) {
         logger(ERROR, BRIGHT_RED) << "Block " << blockHash
-          << " (v6+) contains non-CT transaction " << tx_id
-          << " with version " << (int)transactions[i].version << ", rejected";
+          << " contains transaction " << tx_id
+          << " with unsupported version " << (int)transactions[i].version << ", rejected";
         bvc.m_verification_failed = true;
         m_db.abortTxn();
         m_batchCount = 0;
