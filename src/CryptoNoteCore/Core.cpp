@@ -1480,6 +1480,19 @@ bool Core::handleIncomingTransaction(const Transaction& tx, const Crypto::Hash& 
       return false;
     }
 
+    // v6+: drop the legacy dual height/timestamp unlock_time interpretation.
+    // New txs must use a height ≤ CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6, or 0.
+    // CT txs already require unlock_time == 0 (enforced in check_tx_semantic);
+    // this also constrains v1 plain txs that remain valid post-fork.
+    if (m_currency.isUnlockTimeCappedAt(height) &&
+        tx.unlockTime > CryptoNote::parameters::CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6) {
+      logger(ERROR) << "Transaction verification failed: unlock_time " << tx.unlockTime
+                    << " exceeds v6 cap " << CryptoNote::parameters::CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6
+                    << " for transaction " << txHash << ", rejected";
+      tvc.m_verification_failed = true;
+      return false;
+    }
+
   }
 
   if (!check_tx_semantic(tx, txHash, keptByBlock)) {

@@ -30,6 +30,15 @@ namespace parameters {
 const uint64_t DIFFICULTY_TARGET                             = 240; // seconds
 const uint64_t EXPECTED_NUMBER_OF_BLOCKS_PER_DAY             = 24 * 60 * 60 / DIFFICULTY_TARGET;
 const uint64_t CRYPTONOTE_MAX_BLOCK_NUMBER                   = 500000000;
+// Maximum unlock_time accepted at block major v6+. Plain txs at v6+ must use
+// height interpretation only and stay at or below this cap; the timestamp
+// branch is removed. Pre-v6 outputs whose tx carries an unlock_time exceeding
+// this cap (e.g. accidental Unix timestamps in seconds) are treated as
+// unlocked when referenced from a v6+ tip, recovering funds that were
+// effectively frozen by user error under the dual height/timestamp scheme.
+// 10,000,000 blocks ≈ 76 years from genesis at 240s/block — well beyond any
+// legitimate lock; clearly bogus for everything above it.
+const uint64_t CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6               = UINT64_C(10000000);
 const size_t   CRYPTONOTE_MAX_BLOCK_BLOB_SIZE                = 500000000;
 const size_t   CRYPTONOTE_MAX_TX_SIZE                        = 1000000000;
 const uint64_t CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX       = 111; // addresses start with "K"

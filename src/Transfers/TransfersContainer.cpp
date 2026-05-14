@@ -1060,6 +1060,14 @@ void TransfersContainer::repair() {
 }
 
 bool TransfersContainer::isSpendTimeUnlocked(uint64_t unlockTime) const {
+  if (m_currency.isUnlockTimeCappedAt(m_currentHeight)) {
+    // Mirror v6+ consensus (see Blockchain::is_tx_spendtime_unlocked): absurd
+    // unlock_time values from old txs are treated as unlocked so previously
+    // frozen outputs are now displayed as spendable.
+    if (unlockTime == 0) return true;
+    if (unlockTime > CryptoNote::parameters::CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6) return true;
+    return m_currentHeight + m_currency.lockedTxAllowedDeltaBlocks() >= unlockTime;
+  }
   if (unlockTime < m_currency.maxBlockHeight()) {
     // interpret as block index
     return m_currentHeight + m_currency.lockedTxAllowedDeltaBlocks() >= unlockTime;

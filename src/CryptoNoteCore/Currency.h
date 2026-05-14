@@ -131,6 +131,11 @@ public:
   uint32_t maxUpgradeDistance() const { return 7 * m_upgradeWindow; }
   uint32_t calculateUpgradeHeight(uint32_t voteCompleteHeight) const { return voteCompleteHeight + m_upgradeWindow; }
   bool isConfidentialTransactionsActivated(uint32_t height) const { return height >= CryptoNote::parameters::CT_FORK_HEIGHT; }
+  // Block major v6+ replaces the legacy dual height/timestamp unlock_time
+  // interpretation with a height-only rule capped at
+  // CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6, both for accepting new txs and for
+  // deciding whether referenced outputs from old txs are spendable.
+  bool isUnlockTimeCappedAt(uint32_t height) const { return height >= CryptoNote::parameters::UPGRADE_HEIGHT_V6; }
   uint8_t currentTransactionVersion(uint32_t height) const {
     return isConfidentialTransactionsActivated(height) ? TRANSACTION_VERSION_CT : CURRENT_TRANSACTION_VERSION;
   }

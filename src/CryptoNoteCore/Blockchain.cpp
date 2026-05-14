@@ -2183,13 +2183,23 @@ bool Blockchain::checkTransactionInputs(const Transaction& tx, const Crypto::Has
 }
 
 bool Blockchain::is_tx_spendtime_unlocked(uint64_t unlock_time) {
+  const uint32_t currentHeight = getCurrentBlockchainHeight();
+  if (m_currency.isUnlockTimeCappedAt(currentHeight)) {
+    // v6+ consensus: height-only, capped. Any unlock_time above the cap was
+    // set under the legacy dual-interpretation rules (e.g. a Unix timestamp
+    // mistakenly placed in unlock_time) and is treated as unlocked here so
+    // the underlying output becomes spendable again.
+    if (unlock_time == 0) return true;
+    if (unlock_time > CryptoNote::parameters::CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6) return true;
+    return currentHeight - 1 + m_currency.lockedTxAllowedDeltaBlocks() >= unlock_time;
+  }
   if (unlock_time < m_currency.maxBlockHeight()) {
-    if (getCurrentBlockchainHeight() - 1 + m_currency.lockedTxAllowedDeltaBlocks() >= unlock_time)
+    if (currentHeight - 1 + m_currency.lockedTxAllowedDeltaBlocks() >= unlock_time)
       return true;
     else
       return false;
   } else {
-    const uint64_t lastBlockTimestamp = getBlockTimestamp(getCurrentBlockchainHeight() - 1);
+    const uint64_t lastBlockTimestamp = getBlockTimestamp(currentHeight - 1);
     if (lastBlockTimestamp + m_currency.lockedTxAllowedDeltaSeconds() >= unlock_time)
       return true;
     else
@@ -2199,6 +2209,11 @@ bool Blockchain::is_tx_spendtime_unlocked(uint64_t unlock_time) {
 }
 
 bool Blockchain::is_tx_spendtime_unlocked(uint64_t unlock_time, uint32_t height) {
+  if (m_currency.isUnlockTimeCappedAt(height)) {
+    if (unlock_time == 0) return true;
+    if (unlock_time > CryptoNote::parameters::CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6) return true;
+    return height - 1 + m_currency.lockedTxAllowedDeltaBlocks() >= unlock_time;
+  }
   if (unlock_time < m_currency.maxBlockHeight()) {
     if (height - 1 + m_currency.lockedTxAllowedDeltaBlocks() >= unlock_time)
       return true;
