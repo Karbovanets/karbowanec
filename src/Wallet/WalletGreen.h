@@ -44,6 +44,12 @@ public:
 
   INode& getNode() { return m_node; }
 
+  // Force v1 plain (transparent) transactions even after the CT fork. When
+  // set, transfer paths skip the CT codepath regardless of chain height.
+  // Used by GreenWallet --legacy-tx and walletd's legacy-tx config option.
+  void setForceLegacyTxs(bool force) { m_forceLegacyTxs = force; }
+  bool forceLegacyTxs() const { return m_forceLegacyTxs; }
+
   virtual void initialize(const std::string& path, const std::string& password) override;
   virtual void initializeWithViewKey(const std::string& path, const std::string& password, const Crypto::SecretKey& viewSecretKey) override;
   virtual void initializeWithViewKey(const std::string& path, const std::string& password, const Crypto::SecretKey& viewSecretKey, const uint64_t& creationTimestamp) override;
@@ -402,6 +408,7 @@ protected:
   INode& m_node;
   mutable Logging::LoggerRef m_logger;
   bool m_stopped;
+  bool m_forceLegacyTxs = false;
 
   WalletsContainer m_walletsContainer;
   ContainerStorage m_containerStorage;

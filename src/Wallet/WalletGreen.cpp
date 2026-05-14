@@ -1601,9 +1601,12 @@ void WalletGreen::prepareTransaction(std::vector<WalletOuts>&& wallets,
   preparedTransaction.destinations = convertOrdersToTransfers(orders);
   preparedTransaction.neededMoney = countNeededMoney(preparedTransaction.destinations, fee);
 
-  // CT activation: at and above CT_FORK_HEIGHT, regular transactions must use the
-  // confidential path with canonical denomination decomposition.
-  const bool useCT = m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
+  // CT activation: at and above CT_FORK_HEIGHT, regular transactions use the
+  // confidential path with canonical denomination decomposition — unless the
+  // wallet was opted out via setForceLegacyTxs (GreenWallet --legacy-tx,
+  // walletd legacy-tx config), in which case v1 plain is sent instead.
+  const bool useCT = !m_forceLegacyTxs &&
+    m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
 
   std::vector<OutputToTransfer> selectedTransfers;
   uint64_t foundMoney = selectTransfers(
