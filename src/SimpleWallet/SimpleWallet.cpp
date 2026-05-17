@@ -2142,7 +2142,6 @@ bool simple_wallet::show_balance(const std::vector<std::string>& args/* = std::v
   const uint32_t walletHeight = m_node->getLastLocalBlockHeight();
   success_msg_writer() << "available: " << m_currency.formatAmount(m_wallet->actualBalance(), walletHeight);
   success_msg_writer() << "pending: " << m_currency.formatAmount(m_wallet->pendingBalance(), walletHeight);
-  success_msg_writer() << "unmixable: " << m_currency.formatAmount(m_wallet->unmixableBalance(), walletHeight);
   success_msg_writer() << "total balance: " << m_currency.formatAmount(m_wallet->actualBalance() + m_wallet->pendingBalance(), walletHeight);
 
   // Sub-MIN_CT outputs are spendable as transparent inputs but cannot become CT outputs;
@@ -2307,18 +2306,11 @@ bool simple_wallet::transfer(const std::vector<std::string> &args) {
     return true;
   }
 
-  uint64_t unmixable_balance = m_wallet->unmixableBalance();
-
   try {
     TransferCommand cmd(m_currency, *m_node);
 
     if (!cmd.parseArguments(logger, args))
       return true;
-
-    if (cmd.fake_outs_count != 0 && unmixable_balance != 0) {
-      logger(WARNING, BRIGHT_YELLOW) << "You have unmixable coins " << m_currency.formatAmount(unmixable_balance) << " in your wallet. "
-                                     << "If you encounter problems with sending, sweep them by making transaction with zero <mixin_count>.";
-    }
 
 #ifndef __ANDROID__
     for (auto& kv : cmd.aliases) {
@@ -2897,8 +2889,7 @@ int main(int argc, char* argv[]) {
 
       const uint32_t walletHeight = node->getLastLocalBlockHeight();
       logger(INFO) << "available balance: " << currency.formatAmount(wallet->actualBalance(), walletHeight)
-                   << ", locked amount: " << currency.formatAmount(wallet->pendingBalance(), walletHeight)
-                   << ", unmixable: " << currency.formatAmount(wallet->unmixableBalance(), walletHeight);
+                   << ", locked amount: " << currency.formatAmount(wallet->pendingBalance(), walletHeight);
 
       logger(INFO, BRIGHT_GREEN) << "Loaded ok";
     } catch (const std::exception& e)  {

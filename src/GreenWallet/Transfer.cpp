@@ -310,11 +310,6 @@ void transfer(std::shared_ptr<WalletInfo> walletInfo, uint32_t height, bool send
 
     const uint64_t balance = walletInfo->wallet.getActualBalance();
 
-    const uint64_t balanceNoDust = walletInfo->wallet.getBalanceMinusDust
-    (
-        { walletInfo->walletAddress }
-    );
-
     const auto maybeAddress = getDestinationAddress();
 
     if (!maybeAddress.isJust)
@@ -425,46 +420,9 @@ void transfer(std::shared_ptr<WalletInfo> walletInfo, uint32_t height, bool send
         }
     }
 
-    /* This doesn't account for dust. We should probably make a function to
-       check for balance minus dust */
     if (sendAll)
     {
-        if (WalletConfig::defaultMixin != 0 && balance != balanceNoDust)
-        {
-            uint64_t unsendable = balance - balanceNoDust;
-
-            amount = balanceNoDust - fee - nodeFee;
-
-            if (!nodeAddress.empty())
-                nodeFee = calculateNodeFee(amount);
-
-            std::cout << WarningMsg("Due to unmixable inputs, we are unable to ")
-                << WarningMsg("send ")
-                << InformationMsg(formatAmount(unsendable))
-                << WarningMsg("of your balance.") << std::endl;
-
-            if (!WalletConfig::mixinZeroDisabled ||
-                height < WalletConfig::mixinZeroDisabledHeight)
-            {
-                std::cout << "Alternatively, you can set the mixin count to "
-                    << "zero to send it all." << std::endl;
-
-                if (confirm("Set mixin to 0 so we can send your whole balance? "
-                    "This will compromise privacy."))
-                {
-                    mixin = 0;
-                    amount = balance - fee - nodeFee;
-                }
-            }
-            else
-            {
-                std::cout << "Sorry." << std::endl;
-            }
-        }
-        else
-        {
-            amount = balance - fee;
-        }
+        amount = balance - fee - nodeFee;
     }
 
     const auto maybeExtra = getExtra();
@@ -484,12 +442,8 @@ BalanceInfo doWeHaveEnoughBalance(uint64_t amount, uint64_t fee,
                                   std::shared_ptr<WalletInfo> walletInfo,
                                   uint32_t height, uint64_t nodeFee)
 {
+    (void)height;
     const uint64_t balance = walletInfo->wallet.getActualBalance();
-
-    const uint64_t balanceNoDust = walletInfo->wallet.getBalanceMinusDust
-    (
-        { walletInfo->walletAddress }
-    );
 
     /* They have to include at least a fee of this large */
     if (balance < amount + fee + nodeFee)
@@ -511,39 +465,8 @@ BalanceInfo doWeHaveEnoughBalance(uint64_t amount, uint64_t fee,
 
         return NotEnoughBalance;
     }
-    else if (WalletConfig::defaultMixin != 0 &&
-        balanceNoDust < amount + WalletConfig::minimumFee + nodeFee)
-    {
-        std::cout << std::endl
-            << WarningMsg("This transaction is unable to be sent ")
-            << WarningMsg("due to unmixable inputs.") << std::endl
-            << "You can send "
-            << InformationMsg(formatAmount(balanceNoDust))
-            << " without issues (includes a network fee of "
-            << InformationMsg(formatAmount(fee)) << " and "
-            << " a node fee of "
-            << InformationMsg(formatAmount(nodeFee))
-            << ")"
-            << std::endl;
 
-        if (!WalletConfig::mixinZeroDisabled ||
-            height < WalletConfig::mixinZeroDisabledHeight)
-        {
-            std::cout << "Alternatively, you can set the mixin "
-                << "count to 0." << std::endl;
-
-            if (confirm("Set mixin to 0? This will compromise privacy."))
-            {
-                return SetMixinToZero;
-            }
-        }
-    }
-    else
-    {
-        return EnoughBalance;
-    }
-
-    return NotEnoughBalance;
+    return EnoughBalance;
 }
 
 void doTransfer(std::string address, uint64_t amount, uint64_t fee,
