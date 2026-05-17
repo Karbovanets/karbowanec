@@ -28,7 +28,7 @@
 #include "crypto/random.h"
 #include "crypto/ct_ecdh.h"
 #include "crypto/gk_proof.h"
-#include "crypto/mlsag.h"
+#include "crypto/triptych.h"
 #include "crypto/transaction_balance.h"
 #include "CryptoNoteConfig.h"
 
@@ -251,22 +251,42 @@ Transaction buildConfidentialTransaction(
   CTBuildSecretCleanup cleanup{outputBlindings, pseudoBlindings, inputs};
 
   for (size_t i = 0; i < inputs.size(); ++i) {
-    // Generate random pseudo-blinding factor
-    Crypto::EllipticCurveScalar r_pseudo;
-    Random::randomBytes(32, r_pseudo.data);
-    sc_reduce32(r_pseudo.data);
-    pseudoBlindings[i] = r_pseudo;
+    if (inputs[i].isTransparent) {
+      // KeyInput (transparent shielding). All ring members must come from the
+      // same transparent bucket as the real input — the on-chain verifier
+      // resolves the ring via scanOutputKeysForIndexes which only accepts
+      // KeyOutput targets in a single amount bucket.
+      for (const auto& m : inputs[i].ringMembers) {
+        if (m.amount != inputs[i].amount) {
+          throw std::invalid_argument("Transparent CT input " + std::to_string(i)
+            + " has cross-bucket ring member (bucket " + std::to_string(m.amount)
+            + " vs input amount " + std::to_string(inputs[i].amount) + ")");
+        }
+      }
+      // Deterministic pseudo-commitment for the balance kernel: amount*H + 0*G.
+      // pseudoBlinding stays zero so excess scalar gets no contribution from
+      // this input (matches the verifier's reconstruction).
+      std::memset(&pseudoBlindings[i], 0, sizeof(pseudoBlindings[i]));
+      if (!Crypto::transparent_amount_to_commitment(inputs[i].amount, pseudoCommitments[i])) {
+        throw std::runtime_error("Failed to compute transparent pseudo-commitment for input " + std::to_string(i));
+      }
+    } else {
+      // ConfidentialInput: random blinding, Pedersen commitment.
+      Crypto::EllipticCurveScalar r_pseudo;
+      Random::randomBytes(32, r_pseudo.data);
+      sc_reduce32(r_pseudo.data);
+      pseudoBlindings[i] = r_pseudo;
 
-    // Compute pseudo-commitment: C' = amount*H + r'*G
-    Crypto::PublicKey pseudo_pk;
-    bool pcOk = Crypto::pedersen_commit(inputs[i].amount, r_pseudo, pseudo_pk);
-    sodium_memzero(&r_pseudo, sizeof(r_pseudo));
-    if (!pcOk) {
-      throw std::runtime_error("Failed to compute pseudo-commitment for input " + std::to_string(i));
+      Crypto::PublicKey pseudo_pk;
+      bool pcOk = Crypto::pedersen_commit(inputs[i].amount, r_pseudo, pseudo_pk);
+      sodium_memzero(&r_pseudo, sizeof(r_pseudo));
+      if (!pcOk) {
+        throw std::runtime_error("Failed to compute pseudo-commitment for input " + std::to_string(i));
+      }
+      std::memcpy(&pseudoCommitments[i], &pseudo_pk, 32);
     }
-    std::memcpy(&pseudoCommitments[i], &pseudo_pk, 32);
 
-    // Compute key image: I = x * Hp(P_real)
+    // Compute key image: I = x * Hp(P_real). Same regardless of input shape.
     Crypto::PublicKey realPubkey = inputs[i].ringMembers[inputs[i].realIndex].pubkey;
     Crypto::generate_key_image(realPubkey, inputs[i].spendPrivkey, keyImages[i]);
   }
@@ -282,19 +302,37 @@ Transaction buildConfidentialTransaction(
 
   tx.inputs.resize(inputs.size());
   for (size_t i = 0; i < inputs.size(); ++i) {
-    ConfidentialInput cin;
     const size_t ringSize = inputs[i].ringMembers.size();
-    cin.ringMembers.reserve(ringSize);
-    cin.ringPubkeys.reserve(ringSize);
-    cin.ringCommitments.reserve(ringSize);
-    for (const auto& m : inputs[i].ringMembers) {
-      cin.ringMembers.push_back(RingMemberRef{m.amount, m.outputIndex});
-      cin.ringPubkeys.push_back(m.pubkey);
-      cin.ringCommitments.push_back(m.commitment);
+
+    if (inputs[i].isTransparent) {
+      // KeyInput: ring is encoded as relative-offset list into the bucket
+      // identified by `amount`. After canonicalisation above, ringMembers are
+      // sorted ascending by outputIndex (all share the same amount bucket),
+      // so absolute_output_offsets_to_relative produces a valid delta list.
+      KeyInput ki;
+      ki.amount = inputs[i].amount;
+      ki.keyImage = keyImages[i];
+      std::vector<uint32_t> absoluteOffsets;
+      absoluteOffsets.reserve(ringSize);
+      for (const auto& m : inputs[i].ringMembers) {
+        absoluteOffsets.push_back(m.outputIndex);
+      }
+      ki.outputIndexes = absolute_output_offsets_to_relative(absoluteOffsets);
+      tx.inputs[i] = std::move(ki);
+    } else {
+      ConfidentialInput cin;
+      cin.ringMembers.reserve(ringSize);
+      cin.ringPubkeys.reserve(ringSize);
+      cin.ringCommitments.reserve(ringSize);
+      for (const auto& m : inputs[i].ringMembers) {
+        cin.ringMembers.push_back(RingMemberRef{m.amount, m.outputIndex});
+        cin.ringPubkeys.push_back(m.pubkey);
+        cin.ringCommitments.push_back(m.commitment);
+      }
+      cin.pseudoCommitment = pseudoCommitments[i];
+      cin.keyImage = keyImages[i];
+      tx.inputs[i] = std::move(cin);
     }
-    cin.pseudoCommitment = pseudoCommitments[i];
-    cin.keyImage = keyImages[i];
-    tx.inputs[i] = std::move(cin);
   }
 
   // ── Step 3: Deterministic tx key from view secret key + inputs hash ────────
@@ -420,16 +458,48 @@ Transaction buildConfidentialTransaction(
     gkp.f = proof.f;
   }
 
-  // ── Step 6: Generate MLSAG ring signatures for each input ──────────────────
+  // ── Step 6: Per-input signing ──────────────────────────────────────────────
+  // ConfidentialInput slots → Triptych spend proof in tx.ctSignatures[i].
+  // KeyInput slots → legacy ring sig in tx.signatures[i]. Both arrays stay
+  // parallel to tx.inputs (ctSignatures has empty entry for KeyInput slots,
+  // tx.signatures has empty inner vector for ConfidentialInput slots).
   tx.ctSignatures.resize(inputs.size());
+  tx.signatures.resize(inputs.size());
   for (size_t i = 0; i < inputs.size(); ++i) {
-    Crypto::MLSAGSignature mlsag;
+    const size_t ringSize = inputs[i].ringMembers.size();
+
+    if (inputs[i].isTransparent) {
+      // Legacy ring signature: prove knowledge of spendPrivkey for one of the
+      // ring's pubkeys, bound to (signingHash, keyImage). Verifier replays via
+      // check_tx_input which resolves the ring members from outputIndexes.
+      std::vector<Crypto::PublicKey> ringPubkeys;
+      ringPubkeys.reserve(ringSize);
+      for (const auto& m : inputs[i].ringMembers) {
+        ringPubkeys.push_back(m.pubkey);
+      }
+      std::vector<const Crypto::PublicKey*> ringPubkeyPtrs;
+      ringPubkeyPtrs.reserve(ringSize);
+      for (const auto& pk : ringPubkeys) {
+        ringPubkeyPtrs.push_back(&pk);
+      }
+
+      std::vector<Crypto::Signature> sigs(ringSize);
+      Crypto::generate_ring_signature(signingHash, keyImages[i],
+        ringPubkeyPtrs, inputs[i].spendPrivkey, inputs[i].realIndex, sigs.data());
+      tx.signatures[i] = std::move(sigs);
+      continue;
+    }
+
+    // ConfidentialInput: Triptych spend proof.
+    Crypto::TriptychSignature proof;
     Crypto::KeyImage ki;
 
-    // mlsag_sign wants flat pubkey / commitment arrays. Extract them from the
-    // canonicalised ringMembers in the same order as the consensus verifier
-    // will see them on chain.
-    const size_t ringSize = inputs[i].ringMembers.size();
+    if (!Crypto::triptych_ring_size_supported(ringSize)) {
+      throw std::runtime_error("Triptych: unsupported ring size " +
+                               std::to_string(ringSize) +
+                               " for input " + std::to_string(i));
+    }
+
     std::vector<Crypto::PublicKey> ringPubkeys;
     std::vector<Crypto::EllipticCurvePoint> ringCommitments;
     ringPubkeys.reserve(ringSize);
@@ -439,7 +509,7 @@ Transaction buildConfidentialTransaction(
       ringCommitments.push_back(m.commitment);
     }
 
-    if (!Crypto::mlsag_sign(
+    if (!Crypto::triptych_sign(
         signingHash,
         ringPubkeys.data(),
         ringCommitments.data(),
@@ -450,17 +520,30 @@ Transaction buildConfidentialTransaction(
         inputs[i].realBlinding,
         pseudoBlindings[i],
         ki,
-        mlsag)) {
-      throw std::runtime_error("MLSAG sign failed for input " + std::to_string(i));
+        proof)) {
+      throw std::runtime_error("Triptych sign failed for input " + std::to_string(i));
     }
 
     // Update key image in the prefix input
     auto& cin = boost::get<ConfidentialInput>(tx.inputs[i]);
     cin.keyImage = ki;
 
-    // Copy MLSAG signature into transaction body
-    tx.ctSignatures[i].c0 = mlsag.c0;
-    tx.ctSignatures[i].ss = std::move(mlsag.ss);
+    // Copy Triptych proof into transaction body. The on-wire CTInputSignature
+    // struct mirrors Crypto::TriptychSignature field-for-field; we move the
+    // vectors over so we don't pay a copy on each n×32-byte payload.
+    auto& s = tx.ctSignatures[i];
+    s.I_bits = std::move(proof.I_bits);
+    s.A      = std::move(proof.A);
+    s.B      = std::move(proof.B);
+    s.Q_P    = std::move(proof.Q_P);
+    s.Q_M    = std::move(proof.Q_M);
+    s.Q_U    = std::move(proof.Q_U);
+    s.z      = std::move(proof.z);
+    s.za     = std::move(proof.za);
+    s.zb     = std::move(proof.zb);
+    s.f_P    = proof.f_P;
+    s.f_M    = proof.f_M;
+    s.f_U    = proof.f_U;
   }
 
   // ── Step 7: Compute excess and sign kernel ─────────────────────────────────

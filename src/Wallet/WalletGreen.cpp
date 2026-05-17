@@ -1769,18 +1769,33 @@ std::vector<uint64_t> WalletGreen::chooseInputMixins(
     return inputMixins;
   }
 
+  // Triptych supports ring sizes {1, 4, 8, 16}. A wallet that asks for a
+  // mixin landing on any other ring size (e.g. mixin=4 ⇒ ring 5) would
+  // build a transaction consensus rejects. We round the requested mixin
+  // up to the next supported Triptych shape so the wallet UX matches the
+  // consensus rules.
   const uint64_t minCtMixin = CryptoNote::parameters::CT_MIN_RING_SIZE - 1;
   const uint64_t maxCtMixin = CryptoNote::parameters::CT_MAX_RING_SIZE - 1;
   const uint64_t normalMixin = std::max<uint64_t>(requestedMixin, minCtMixin);
+  if (normalMixin > maxCtMixin) {
+    throw std::system_error(make_error_code(CryptoNote::error::MIXIN_COUNT_TOO_BIG));
+  }
+  // Round up to the next supported ring size: 4, 8, or 16.
+  auto roundUpToTriptychMixin = [](uint64_t mixin) -> uint64_t {
+    const uint64_t ringSize = mixin + 1;
+    if (ringSize <= 4)  return 3;   // ring 4
+    if (ringSize <= 8)  return 7;   // ring 8
+    return 15;                      // ring 16 (caller-side cap already enforced above)
+  };
+  const uint64_t roundedMixin = roundUpToTriptychMixin(normalMixin);
 
   for (size_t i = 0; i < selectedTransfers.size(); ++i) {
     if (isCoinbaseOutput(selectedTransfers[i])) {
+      // Schnorr-branch carve-out: a v5+ coinbase output is publicly mined
+      // and carries no privacy expectation, so we keep it at ring size 1.
       inputMixins[i] = 0;
     } else {
-      if (normalMixin > maxCtMixin) {
-        throw std::system_error(make_error_code(CryptoNote::error::MIXIN_COUNT_TOO_BIG));
-      }
-      inputMixins[i] = normalMixin;
+      inputMixins[i] = roundedMixin;
     }
   }
 
@@ -2539,6 +2554,11 @@ CryptoNote::Transaction WalletGreen::makeConfidentialTransaction(
 
     cti.realBlinding = ki.realOutputBlinding;
     cti.amount = ki.realOutputAmount;
+    // Route transparent dust (real KeyOutput) as a v2 KeyInput so the
+    // shielded value enters the CT pool visibly. ConfidentialOutput inputs
+    // stay confidential — Triptych is only useful when the real amount is
+    // genuinely hidden.
+    cti.isTransparent = !ki.realOutputIsConfidential;
 
     // Store ephKeys back for caller
     input.ephKeys = ephKeys;
@@ -2731,7 +2751,10 @@ std::vector<uint64_t> WalletGreen::chooseCtMixingBuckets(
   std::uniform_int_distribution<size_t> denomDist(0, CryptoNote::DENOMINATIONS.size() - 1);
 
   for (size_t i = 0; i < selectedTransfers.size(); ++i) {
-    // Skip ring-size-1 (coinbase carve-out) and below-threshold rings.
+    // Skip ring-size-1 (v5+ coinbase carve-out) and below-threshold rings.
+    // Coinbase outputs have no privacy expectation, so Triptych's Schnorr
+    // branch handles them with ring size 1; cross-bucket mixing only
+    // makes sense once the ring is big enough to mask the real input.
     if (inputMixins[i] == 0) continue;
     if (inputMixins[i] + 1 < CryptoNote::parameters::CT_MIN_RING_SIZE_FOR_MIXING) continue;
 
@@ -2743,8 +2766,9 @@ std::vector<uint64_t> WalletGreen::chooseCtMixingBuckets(
       // for this input.
       mixingBuckets[i] = CryptoNote::DENOMINATIONS[denomDist(rng)];
     } else {
-      // Native bucket is transparent; mix in CT decoys.
-      mixingBuckets[i] = CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT;
+      // Transparent reals route to KeyInput in v2 mixed mode; the legacy ring
+      // sig only resolves a single-bucket transparent ring, so cross-bucket
+      // mixing isn't available here.
     }
   }
   return mixingBuckets;
@@ -2759,18 +2783,22 @@ void WalletGreen::requestCtMixingDecoys(
     throw std::runtime_error("requestCtMixingDecoys: mixingBuckets size mismatch");
   }
 
-  // Build the amounts list for the daemon RPC. We always include one entry
-  // per input so the response stays positionally aligned with selectedTransfers,
-  // even when an input opted out (bucket == 0) — those entries are filled
-  // with empty results client-side.
-  std::vector<uint64_t> amounts;
-  amounts.reserve(selectedTransfers.size());
-  bool haveAny = false;
-  for (uint64_t bucket : mixingBuckets) {
-    amounts.push_back(bucket);
-    if (bucket != 0) haveAny = true;
+  // Build the filtered amounts list for the daemon RPC. The daemon rejects
+  // amount=0 (logged as "not outs for amount 0"), so inputs that opted out
+  // of cross-bucket mixing (bucket == 0) are dropped from the wire request.
+  // We restore positional alignment with selectedTransfers below using
+  // originalIndex.
+  std::vector<uint64_t> filteredAmounts;
+  std::vector<size_t> originalIndex;
+  filteredAmounts.reserve(selectedTransfers.size());
+  originalIndex.reserve(selectedTransfers.size());
+  for (size_t i = 0; i < mixingBuckets.size(); ++i) {
+    if (mixingBuckets[i] != 0) {
+      filteredAmounts.push_back(mixingBuckets[i]);
+      originalIndex.push_back(i);
+    }
   }
-  if (!haveAny) {
+  if (filteredAmounts.empty()) {
     mixingResult.clear();
     return;
   }
@@ -2784,15 +2812,16 @@ void WalletGreen::requestCtMixingDecoys(
   // dedup.
   const uint64_t requestCount = CryptoNote::parameters::CT_MIXING_DECOYS_PER_INPUT + 1;
 
-  m_logger(DEBUGGING) << "Requesting CT mixing decoys, buckets="
-    << std::count_if(mixingBuckets.begin(), mixingBuckets.end(), [](uint64_t b) { return b != 0; });
+  m_logger(DEBUGGING) << "Requesting CT mixing decoys, buckets=" << filteredAmounts.size();
+
+  std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount> rawOuts;
   try {
     System::EventLock lk(m_readyEvent);
 
-    System::RemoteContext<std::error_code> context(m_dispatcher, [this, &amounts, requestCount, &mixingResult]() {
+    System::RemoteContext<std::error_code> context(m_dispatcher, [this, &filteredAmounts, requestCount, &rawOuts]() {
       std::promise<std::error_code> p;
       auto f = p.get_future();
-      m_node.getRandomOutsByAmounts(std::vector<uint64_t>(amounts), requestCount, mixingResult,
+      m_node.getRandomOutsByAmounts(std::vector<uint64_t>(filteredAmounts), requestCount, rawOuts,
         [&p](std::error_code ec) mutable { p.set_value(ec); });
       return f.get();
     });
@@ -2809,6 +2838,14 @@ void WalletGreen::requestCtMixingDecoys(
       << " — falling back to all-native rings";
     mixingResult.clear();
     return;
+  }
+
+  // Expand the filtered response back into a vector aligned with
+  // selectedTransfers; opted-out slots stay default-constructed (empty outs).
+  mixingResult.assign(selectedTransfers.size(),
+    CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount{});
+  for (size_t k = 0; k < rawOuts.size() && k < originalIndex.size(); ++k) {
+    mixingResult[originalIndex[k]] = std::move(rawOuts[k]);
   }
 
   m_logger(DEBUGGING) << "CT mixing decoys received";

@@ -70,8 +70,14 @@ struct CTBuildRingMember {
 };
 
 // CT input: a spent output with its ring members and the sender's secret keys.
-// For pre-fork transparent inputs spent into CT, realBlinding is zero scalar
-// and amount is the scaled (redenominated) amount.
+//
+// `isTransparent` decides the on-wire input shape:
+//   true  → emit a KeyInput (legacy ring sig in tx.signatures). Used for
+//           transparent shielding into the CT pool. Ring must be all-KeyOutput
+//           and all members must share the same amount bucket as `amount`.
+//           realBlinding is ignored (always 0 for transparent outputs).
+//   false → emit a ConfidentialInput (Triptych in tx.ctSignatures). Used for
+//           CT-to-CT or transparent-decoy spend. Ring may be mixed-bucket.
 //
 // Ring members are NOT required to be sorted on entry — buildConfidentialTransaction
 // canonicalises them by (amount, outputIndex) before signing and updates
@@ -82,6 +88,7 @@ struct CTBuildInput {
   Crypto::SecretKey              spendPrivkey; // ephemeral spend key for real input: P_real = x*G
   Crypto::EllipticCurveScalar    realBlinding; // blinding of the real input's commitment (0 for transparent)
   uint64_t                       amount;       // plaintext amount of the real input in atomic units
+  bool                           isTransparent = false;
 };
 
 // CT output: a single canonical denomination going to a destination address.
@@ -98,7 +105,7 @@ struct CTBuildOutput {
 //   3. For each input: choose random pseudo-blinding factor, compute pseudo-commitment
 //   4. Compute CT signing hash (excludes proof response fields)
 //   5. Generate GK denomination proofs for each output
-//   6. Generate MLSAG ring signatures for each input
+//   6. Generate Triptych spend proofs for each input
 //   7. Compute excess scalar, sign kernel Schnorr signature
 //
 // viewSecretKey:  wallet view secret key for deterministic tx key derivation.

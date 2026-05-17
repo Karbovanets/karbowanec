@@ -121,7 +121,13 @@ void serialize(ConfidentialInputDetails& ctIn, ISerializer& serializer) {
     ctIn.ringMembers.resize(ringSize);
   }
   for (size_t i = 0; i < ringSize; ++i) {
-    serialize(ctIn.ringMembers[i], serializer);
+    // Each ring member has two differently-typed fields (amount, outputIndex).
+    // The JSON / KV-binary array protocol requires each element to be a
+    // self-contained object — calling the free serialize() directly emits
+    // the fields flat at array-element level, which leaves the
+    // standalone explorer seeing members[k] without an outputIndex.
+    // Routing through serializer() wraps each element in begin/endObject.
+    serializer(ctIn.ringMembers[i], "");
   }
   serializer.endArray();
   serializer(ctIn.outputs, "outputs");
@@ -202,9 +208,11 @@ void serialize(TransactionDetails& transaction, ISerializer& serializer) {
     }
   }
 
-  // CT (v4) proof body. Serialized only when transaction is CT — the vectors and
-  // kernel are value-initialized to empty/zero for non-CT, but emitting them
-  // unconditionally would clutter every transparent-tx response and waste bytes.
+  // CT (v2) proof body — Triptych spend proofs, GK denomination proofs,
+  // balance kernel. Serialized only when the transaction is CT; the
+  // vectors and kernel are value-initialized to empty/zero for non-CT,
+  // but emitting them unconditionally would clutter every transparent-tx
+  // response and waste bytes.
   if (transaction.version == TRANSACTION_VERSION_CT) {
     serializer(transaction.ctSignatures, "ctSignatures");
     serializer(transaction.ctProofs, "ctProofs");

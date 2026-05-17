@@ -37,7 +37,7 @@ add_executable(HashTargetTests HashTarget.cpp)
 add_executable(HashTests Hash/main.cpp)
 
 add_executable(GKProofTests test_gk_proof.cpp)
-add_executable(MLSAGTests test_mlsag.cpp)
+add_executable(TriptychTests test_triptych.cpp)
 add_executable(TxBalanceTests test_transaction_balance.cpp)
 add_executable(CTIntegrationTests test_ct_integration.cpp)
 add_executable(CTBench bench_ct_validation.cpp)
@@ -46,6 +46,16 @@ add_executable(CTBench bench_ct_validation.cpp)
 # and drop the CTFUZZER_STANDALONE define so LLVMFuzzerTestOneInput becomes the entrypoint.
 add_executable(CTFuzz fuzz_ct_serializer.cpp)
 target_compile_definitions(CTFuzz PRIVATE CTFUZZER_STANDALONE=1)
+add_executable(MixedV2Roundtrip test_mixed_v2_roundtrip.cpp)
+target_link_libraries(MixedV2Roundtrip CryptoNoteCore Serialization Crypto Common Logging ${Boost_LIBRARIES})
+if(MSVC)
+  target_link_libraries(MixedV2Roundtrip legacy_stdio_definitions.lib)
+endif()
+add_executable(KVMixedV2Roundtrip test_kv_v2_roundtrip.cpp)
+target_link_libraries(KVMixedV2Roundtrip CryptoNoteCore Serialization Crypto Common Logging ${Boost_LIBRARIES})
+if(MSVC)
+  target_link_libraries(KVMixedV2Roundtrip legacy_stdio_definitions.lib)
+endif()
 
 target_link_libraries(CoreTests TestGenerator Wallet CryptoNoteCore Serialization System Logging Common Crypto BlockchainExplorer ${Boost_LIBRARIES})
 target_link_libraries(IntegrationTests IntegrationTestLibrary Wallet NodeRpcProxy InProcessNode P2P Rpc Http Transfers Serialization System CryptoNoteCore Logging Common Crypto BlockchainExplorer gtest Mnemonics upnpc-static ${Boost_LIBRARIES})
@@ -60,7 +70,7 @@ target_link_libraries(HashTargetTests CryptoNoteCore Crypto)
 target_link_libraries(HashTests Crypto)
 
 target_link_libraries(GKProofTests Crypto Common ${Boost_LIBRARIES})
-target_link_libraries(MLSAGTests Crypto Common ${Boost_LIBRARIES})
+target_link_libraries(TriptychTests Crypto Common ${Boost_LIBRARIES})
 target_link_libraries(TxBalanceTests Crypto Common ${Boost_LIBRARIES})
 target_link_libraries(CTIntegrationTests Crypto Common ${Boost_LIBRARIES})
 target_link_libraries(CTBench Crypto Common ${Boost_LIBRARIES})
@@ -115,7 +125,7 @@ set_property(TARGET
   HashTargetTests
   HashTests
   GKProofTests
-  MLSAGTests
+  TriptychTests
   TxBalanceTests
   CTIntegrationTests
 PROPERTY FOLDER "tests")
@@ -135,7 +145,7 @@ set_property(TARGET DifficultyTests PROPERTY OUTPUT_NAME "difficulty_tests")
 set_property(TARGET HashTargetTests PROPERTY OUTPUT_NAME "hash_target_tests")
 set_property(TARGET HashTests PROPERTY OUTPUT_NAME "hash_tests")
 set_property(TARGET GKProofTests PROPERTY OUTPUT_NAME "gk_proof_tests")
-set_property(TARGET MLSAGTests PROPERTY OUTPUT_NAME "mlsag_tests")
+set_property(TARGET TriptychTests PROPERTY OUTPUT_NAME "triptych_tests")
 set_property(TARGET TxBalanceTests PROPERTY OUTPUT_NAME "tx_balance_tests")
 set_property(TARGET CTIntegrationTests PROPERTY OUTPUT_NAME "ct_integration_tests")
 
@@ -149,7 +159,7 @@ add_test(HashTargetTests hash_target_tests)
 add_test(SystemTests system_tests)
 add_test(UnitTests unit_tests)
 add_test(GKProofTests gk_proof_tests)
-add_test(MLSAGTests mlsag_tests)
+add_test(TriptychTests triptych_tests)
 add_test(TxBalanceTests tx_balance_tests)
 add_test(CTIntegrationTests ct_integration_tests)
 add_test(LMDBReorgTests lmdb_reorg_tests)
