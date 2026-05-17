@@ -146,9 +146,16 @@ uint64_t calculateDonationAmount(uint64_t freeAmount, uint64_t donationThreshold
   return donationAmount;
 }
 
+// A transparent output is "non-canonical" relative to the v2 CT path if its
+// amount can't be expressed cleanly as a canonical CN denomination — either
+// because it's sub-cent / not 0.01-aligned (e.g. a 0.001 KRB dust piece), or
+// because it's 0.01-aligned but not a {1,2,5}×10^k CN denomination (e.g.
+// the 2.92… KRB v5+ coinbase reward). Both shapes route through v2 KeyInput
+// in CT mode — coinbase uses ring size 1, others fall back gracefully.
 bool isTransparentNonCanonicalCtAmount(const TransactionOutputInformation& output) {
-  return output.type != TransactionTypes::OutputType::Confidential &&
-         output.amount % CryptoNote::MIN_CT_DENOMINATION != 0;
+  if (output.type == TransactionTypes::OutputType::Confidential) return false;
+  return output.amount % CryptoNote::MIN_CT_DENOMINATION != 0 ||
+         !is_valid_decomposed_amount(output.amount);
 }
 
 }
