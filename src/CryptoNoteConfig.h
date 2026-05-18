@@ -95,9 +95,14 @@ const size_t   CT_MIN_RING_SIZE_FOR_MIXING                   = 8;
 const uint64_t CT_MINIMUM_FEE                                = UINT64_C(10000000000);    // 0.01 KRB (= MIN_CT_DENOMINATION)
 const uint64_t CT_MAXIMUM_FEE                                = UINT64_C(100000000000000); // 100 KRB
 const uint64_t CT_CONFIDENTIAL_OUTPUT_AMOUNT                 = UINT64_MAX;      // internal bucket for hidden-output rings
-// Per-tx structural caps - chosen to keep worst-case validation under a
-// ~1 s/tx budget on commodity single-thread CPUs.
-const size_t   CT_MAX_INPUTS                                 = 128;
+// Per-tx structural caps. CT_MAX_INPUTS sized for coinbase batch
+// consolidation (a long-running miner can spend many cheap KeyInput
+// shields in one tx; KeyInput verify is microseconds, Triptych
+// ConfidentialInput verify is single-digit ms even batched, so the
+// worst-case all-Triptych ring-16 shape is still under ~2 s/tx).
+// CT_MAX_OUTPUTS stays narrow because GK output proofs are the real
+// asymmetric verifier cost.
+const size_t   CT_MAX_INPUTS                                 = 512;
 const size_t   CT_MAX_OUTPUTS                                = 64;
 
 const uint64_t MAX_TRANSACTION_SIZE_LIMIT                    = CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE_CURRENT / 4 - CRYPTONOTE_COINBASE_BLOB_RESERVED_SIZE;
