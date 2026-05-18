@@ -32,13 +32,11 @@ namespace Crypto {
 
 namespace {
 
-// log2(N) for the supported ring sizes. Returns 0 for ring_size = 1
-// (the Schnorr branch; no bit decomposition) and for any unsupported
+// log2(N) for the supported ring sizes. Returns 0 for any unsupported
 // shape — callers MUST validate ring_size with
 // triptych_ring_size_supported() before allocating buffers.
 inline size_t log2_ring(size_t ring_size) {
   switch (ring_size) {
-    case 1:  return 0;
     case 4:  return 2;
     case 8:  return 3;
     case 16: return 4;
@@ -48,8 +46,17 @@ inline size_t log2_ring(size_t ring_size) {
 
 } // anonymous namespace
 
+// Triptych supports power-of-two ring sizes 4, 8, 16. Ring size 1 was
+// considered as a Schnorr-branch carve-out for v5+ coinbase, but a sound
+// Schnorr shape for ring size 1 needs a DLEQ proof binding P = xG to
+// I = x·Hp(P) (same x). The simpler "two independent Schnorr proofs"
+// shape does NOT bind both witnesses to the same x and would allow a
+// holder to forge fresh key images for the same spend. Phase B routes
+// transparent shielding (coinbase included) through v2 KeyInput with a
+// legacy ring signature, so a ConfidentialInput never needs ring size 1
+// in practice. Consensus rejects ring size 1 outright here.
 bool triptych_ring_size_supported(size_t ring_size) {
-  return ring_size == 1 || ring_size == 4 || ring_size == 8 || ring_size == 16;
+  return ring_size == 4 || ring_size == 8 || ring_size == 16;
 }
 
 // ── Scalar / point primitives ───────────────────────────────────────────
@@ -415,72 +422,13 @@ bool triptych_sign(
     hash_to_ec(ring_pubkeys[k], U[k]);
   }
 
-  // ── Ring-size-1 (Schnorr) branch ──────────────────────────────────────
-  //
-  // The Triptych polynomial selector degenerates at n=0; with a single
-  // ring member there is no decoy to hide among, so we collapse to three
-  // Schnorr proofs sharing the Fiat-Shamir challenge:
-  //
-  //   T_P = ρ_P·G       , f_P = ρ_P + x_chal·x
-  //   T_M = ρ_M·G       , f_M = ρ_M + x_chal·z
-  //   T_U = ρ_U·Hp(P_0) , f_U = ρ_U + x_chal·x
-  //
-  // ρ_P and ρ_U are independent; the "same x" binding is implicit via
-  // dlog hardness of I in base Hp(P_0).
-  if (ring_size == 1) {
-    sig.I_bits.clear();
-    sig.A.clear();
-    sig.B.clear();
-    sig.z.clear();
-    sig.za.clear();
-    sig.zb.clear();
-    sig.Q_P.resize(1);
-    sig.Q_M.resize(1);
-    sig.Q_U.resize(1);
-
-    EllipticCurveScalar rho_P, rho_M, rho_U;
-    random_scalar(rho_P);
-    random_scalar(rho_M);
-    random_scalar(rho_U);
-
-    ge_p3 T_P, T_M, T_U;
-    ge_scalarmult_base(&T_P, rho_P.data);
-    ge_scalarmult_base(&T_M, rho_M.data);
-    if (!scalarmult_p3(&T_U, rho_U.data, &U[0])) return false;
-
-    EllipticCurveScalar x_chal;
-    compute_challenge(
-      message, ring_size, /*n_bits=*/0, /*n_q=*/1,
-      ring_pubkeys, ring_commits, pseudo_commit, key_image,
-      /*I_bits=*/nullptr, /*A=*/nullptr, /*B=*/nullptr,
-      &T_P, &T_M, &T_U,
-      x_chal);
-
-    // f_P = ρ_P + x_chal·x
-    unsigned char term[32];
-    sc_mul(term, x_chal.data, reinterpret_cast<const unsigned char*>(&spend_privkey));
-    sc_add(sig.f_P.data, rho_P.data, term);
-
-    // f_M = ρ_M + x_chal·z
-    sc_mul(term, x_chal.data, z_witness.data);
-    sc_add(sig.f_M.data, rho_M.data, term);
-
-    // f_U = ρ_U + x_chal·x   (same x as f_P, but distinct ρ_U so f_U != f_P
-    // in general; binding is via dlog hardness on Hp(P_0), not equality)
-    sc_mul(term, x_chal.data, reinterpret_cast<const unsigned char*>(&spend_privkey));
-    sc_add(sig.f_U.data, rho_U.data, term);
-
-    p3_to_bytes(reinterpret_cast<unsigned char*>(&sig.Q_P[0]), &T_P);
-    p3_to_bytes(reinterpret_cast<unsigned char*>(&sig.Q_M[0]), &T_M);
-    p3_to_bytes(reinterpret_cast<unsigned char*>(&sig.Q_U[0]), &T_U);
-
-    sodium_memzero(&rho_P, sizeof(rho_P));
-    sodium_memzero(&rho_M, sizeof(rho_M));
-    sodium_memzero(&rho_U, sizeof(rho_U));
-    sodium_memzero(&z_witness, sizeof(z_witness));
-
-    return true;
-  }
+  // Ring size 1 used to take a "Schnorr branch" here — that's gone. See
+  // triptych_ring_size_supported() above for the rationale; the prover
+  // would have to attach a DLEQ proof binding x in P=xG to x in I=x·Hp(P)
+  // for the key-image to be sound, and Phase B routes coinbase shielding
+  // through v2 KeyInput so ConfidentialInput ring size 1 is unused.
+  // triptych_ring_size_supported() rejects ring_size = 1 above so this
+  // branch is unreachable; left here as a defensive guard.
 
   // ── Step 4: bit-decomposition phase (standard GK) ─────────────────────
   // Allocate sig vectors and fresh randomness for bit commitments.
@@ -1074,53 +1022,10 @@ bool triptych_collect_claims(
       reinterpret_cast<const unsigned char*>(&pedersen_get_H())) != 0)
     return false;
 
-  // Build equation lists.
-  if (ring_size == 1) {
-    // Schnorr branch — 3 equations:
-    //   (a) f_P·G − Q_P[0] − x_chal·P_0 == 0
-    //   (b) f_M·G − Q_M[0] − x_chal·M_0 == 0
-    //   (c) f_U·U_0 − Q_U[0] − x_chal·I == 0
-    claim.equations.assign(3, {});
-    claim.gG.assign(3, EllipticCurveScalar{});
-    claim.gH.assign(3, EllipticCurveScalar{});
-    for (size_t e = 0; e < 3; ++e) {
-      sc_0(claim.gG[e].data);
-      sc_0(claim.gH[e].data);
-    }
-
-    unsigned char neg_one[32];
-    {
-      unsigned char one[32];
-      sc_0(one); one[0] = 1;
-      tx_sc_neg(neg_one, one);
-    }
-    unsigned char neg_x[32];
-    tx_sc_neg(neg_x, x_chal.data);
-
-    // (a)
-    {
-      auto& eq = claim.equations[0];
-      MSMTerm t1;  std::memcpy(t1.scalar.data, neg_one, 32); t1.point = Q_P_p3[0]; eq.push_back(t1);
-      MSMTerm t2;  std::memcpy(t2.scalar.data, neg_x,   32); t2.point = P[0];      eq.push_back(t2);
-      std::memcpy(claim.gG[0].data, sig.f_P.data, 32);
-    }
-    // (b)
-    {
-      auto& eq = claim.equations[1];
-      MSMTerm t1;  std::memcpy(t1.scalar.data, neg_one, 32); t1.point = Q_M_p3[0]; eq.push_back(t1);
-      MSMTerm t2;  std::memcpy(t2.scalar.data, neg_x,   32); t2.point = M[0];      eq.push_back(t2);
-      std::memcpy(claim.gG[1].data, sig.f_M.data, 32);
-    }
-    // (c)  base is U_0 (Hp(P_0)), not G — so f_U goes in the term list.
-    {
-      auto& eq = claim.equations[2];
-      MSMTerm t0;  std::memcpy(t0.scalar.data, sig.f_U.data, 32); t0.point = U[0];      eq.push_back(t0);
-      MSMTerm t1;  std::memcpy(t1.scalar.data, neg_one,      32); t1.point = Q_U_p3[0]; eq.push_back(t1);
-      MSMTerm t2;  std::memcpy(t2.scalar.data, neg_x,        32); t2.point = I_p3;      eq.push_back(t2);
-    }
-
-    return true;
-  }
+  // Build equation lists. Ring size 1 is rejected by
+  // triptych_ring_size_supported() at the top of the function — its
+  // former Schnorr branch did not bind the same x in P = xG and
+  // I = x·Hp(P), see commit history for the audit finding.
 
   // Full Triptych branch (n ≥ 2, ring_size ∈ {4, 8, 16}).
   const size_t n_eq = 2 * n + 3;
@@ -1267,13 +1172,38 @@ bool triptych_verify_batch(
     }
   }
 
-  // Sample fresh random α per equation per proof. Soundness: with α
-  // unpredictable to the prover, a single broken equation flips the
-  // combined sum to non-identity with overwhelming probability.
+  // Derive α per equation deterministically from a Fiat-Shamir transcript
+  // bound to the tx-prefix-binding `message` plus the proof / equation
+  // indices and a domain-separation tag. Soundness still holds under the
+  // standard batched-MSM argument because the prover commits to every
+  // sig (and hence every claim equation) before α is derivable; the
+  // prover cannot regrind α to match a broken equation. Using a
+  // deterministic derivation instead of random_scalar keeps consensus
+  // verification reproducible across nodes — two nodes never see
+  // different α-coefficient draws for the same tx.
   size_t total_eqs = 0;
   for (const auto& c : claims) total_eqs += c.equations.size();
   std::vector<EllipticCurveScalar> alpha(total_eqs);
-  for (auto& a : alpha) random_scalar(a);
+  {
+    size_t idx = 0;
+    static constexpr char kBatchDomain[16] = "TriptychBatchV1";
+    for (size_t i = 0; i < count; ++i) {
+      for (size_t e = 0; e < claims[i].equations.size(); ++e) {
+        unsigned char buf[32 + 8 + 8 + sizeof(kBatchDomain)];
+        std::memcpy(buf, message.data, 32);
+        uint64_t pidx = static_cast<uint64_t>(i);
+        uint64_t eidx = static_cast<uint64_t>(e);
+        std::memcpy(buf + 32, &pidx, 8);
+        std::memcpy(buf + 40, &eidx, 8);
+        std::memcpy(buf + 48, kBatchDomain, sizeof(kBatchDomain));
+        Hash h;
+        cn_fast_hash(buf, sizeof(buf), h);
+        std::memcpy(alpha[idx].data, h.data, 32);
+        sc_reduce32(alpha[idx].data);
+        ++idx;
+      }
+    }
+  }
 
   // Build the combined MSM input. Scale every non-G/H term by its α;
   // accumulate α-scaled G and H scalars across all (proof, equation)

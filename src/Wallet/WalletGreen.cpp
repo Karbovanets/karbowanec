@@ -1798,8 +1798,10 @@ std::vector<uint64_t> WalletGreen::chooseInputMixins(
 
   for (size_t i = 0; i < selectedTransfers.size(); ++i) {
     if (isCoinbaseOutput(selectedTransfers[i])) {
-      // Schnorr-branch carve-out: a v5+ coinbase output is publicly mined
-      // and carries no privacy expectation, so we keep it at ring size 1.
+      // Coinbase outputs route through v2 KeyInput (Phase B) at ring size
+      // 1 — the legacy single-member ring signature is a sound DLEQ proof.
+      // Triptych ring 1 is no longer supported (the Schnorr branch didn't
+      // bind the same x in P=xG and I=x·Hp(P)).
       inputMixins[i] = 0;
     } else {
       inputMixins[i] = roundedMixin;

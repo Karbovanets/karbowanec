@@ -26,6 +26,7 @@
 #include <cstring>
 #include <filesystem>
 #include <unordered_map>
+#include <unordered_set>
 #include <boost/foreach.hpp>
 #include "Common/Math.h"
 #include "Common/int-util.h"
@@ -2466,14 +2467,16 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
       logger(ERROR) << "CT validation: input " << i << " has empty ring in tx " << txHash;
       return false;
     }
-    // Triptych supports ring sizes 1 (Schnorr branch) and 4 / 8 / 16
-    // (full one-out-of-many). Ring size 1 is restricted further below
-    // (after ring-member resolution) to the V5+ coinbase carve-out: a
-    // mining-tx output has no privacy expectation, so spending it does
-    // not require decoys.
+    // Triptych supports ring sizes 4, 8, 16. Ring size 1 used to be allowed
+    // as a Schnorr-branch carve-out for v5+ coinbase, but the simpler
+    // "two independent Schnorr proofs" shape did not bind the same x in
+    // P = xG and I = x·Hp(P) — a holder could forge fresh key images for
+    // the same spend. Phase B routes transparent shielding (coinbase
+    // included) through v2 KeyInput with a legacy ring signature, so
+    // ConfidentialInput never needs ring size 1 in practice.
     if (!Crypto::triptych_ring_size_supported(ringSize)) {
       logger(ERROR) << "CT validation: input " << i << " ring size " << ringSize
-                    << " is not a supported Triptych shape (1, 4, 8, or 16)"
+                    << " is not a supported Triptych shape (4, 8, or 16)"
                     << " in tx " << txHash;
       return false;
     }
@@ -2521,6 +2524,15 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
     // Cache per-bucket output counts so we don't hit LMDB once per ring
     // member of the same amount.
     std::unordered_map<uint64_t, uint32_t> bucketOutputCount;
+
+    // Defense-in-depth: even with the (amount, outputIndex) strict-ascending
+    // check above guaranteeing distinct ring slots, two different slots could
+    // in principle resolve to outputs that share the same one-time stealth
+    // pubkey (e.g. a malformed earlier tx). Reject pubkey duplicates per ring
+    // so a claimed ring-size-N can never effectively shrink to fewer than N
+    // distinct decoys.
+    std::unordered_set<Crypto::PublicKey> seenRingPubkeys;
+    seenRingPubkeys.reserve(ringSize);
 
     for (size_t k = 0; k < ringSize; ++k) {
       const uint64_t memberAmount = cin.ringMembers[k].amount;
@@ -2600,22 +2612,9 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
         }
       }
 
-      // Ring-size-1 carve-out: only valid when the single ring member
-      // points at a v5+ coinbase KeyOutput (txSlot 0 of the base tx in
-      // a block with majorVersion ≥ 5). Such outputs are publicly
-      // mined and carry no privacy expectation, so requiring decoys for
-      // them would only waste wallet bandwidth.
-      if (ringSize == 1) {
-        DbBlockMeta ringBlockMeta{};
-        m_db.getBlockMeta(block, ringBlockMeta);
-        if (!ringMemberIsKey || txSlot != 0 ||
-            ringBlockMeta.majorVersion < CryptoNote::BLOCK_MAJOR_VERSION_5) {
-          logger(ERROR) << "CT validation: input " << i
-                        << " uses ring size 1 but does not reference a v5+ coinbase KeyOutput in tx "
-                        << txHash;
-          return false;
-        }
-      }
+      // Ring-size-1 ConfidentialInput is no longer accepted; see
+      // triptych_ring_size_supported() above. Transparent shielding
+      // (coinbase included) goes through v2 KeyInput now.
 
       Crypto::PublicKey referencedPubkey;
       Crypto::EllipticCurvePoint expectedCommitment;
@@ -2653,6 +2652,11 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
         return false;
       }
 
+      if (!seenRingPubkeys.insert(referencedPubkey).second) {
+        logger(ERROR) << "CT validation: input " << i << " ring member " << k
+                      << " has duplicate one-time pubkey in tx " << txHash;
+        return false;
+      }
       boundPubkeys.push_back(referencedPubkey);
       boundCommitments.push_back(expectedCommitment);
 
@@ -2682,12 +2686,17 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
   std::vector<size_t>                             batch_ring_sizes;
   std::vector<Crypto::KeyImage>                   batch_key_images;
   std::vector<Crypto::TriptychSignature>          batch_proofs;
+  // Map each entry in the batch vectors back to the original tx.inputs
+  // index it came from, so the per-input fallback log below reports the
+  // real position (mixed v2 txs skip KeyInput slots when batching).
+  std::vector<size_t>                             batch_input_indices;
   batch_ring_pubkeys.reserve(tx.inputs.size());
   batch_ring_commits.reserve(tx.inputs.size());
   batch_pseudo_commits.reserve(tx.inputs.size());
   batch_ring_sizes.reserve(tx.inputs.size());
   batch_key_images.reserve(tx.inputs.size());
   batch_proofs.reserve(tx.inputs.size());
+  batch_input_indices.reserve(tx.inputs.size());
 
   for (size_t i = 0; i < tx.inputs.size(); ++i) {
     if (tx.inputs[i].type() == typeid(KeyInput)) {
@@ -2707,14 +2716,12 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
       return false;
     }
     // Vector-length expectations:
-    //   ring_size = 1  → bits = 0, q_len = 1 (Schnorr branch)
     //   ring_size = 4  → bits = 2, q_len = 2
     //   ring_size = 8  → bits = 3, q_len = 3
     //   ring_size = 16 → bits = 4, q_len = 4
-    const size_t expected_bits = (ringSize == 1) ? 0 :
-                                 (ringSize == 4) ? 2 :
+    const size_t expected_bits = (ringSize == 4) ? 2 :
                                  (ringSize == 8) ? 3 : 4;
-    const size_t expected_q    = (ringSize == 1) ? 1 : expected_bits;
+    const size_t expected_q    = expected_bits;
     if (sig.I_bits.size() != expected_bits ||
         sig.A.size()      != expected_bits || sig.B.size()      != expected_bits ||
         sig.Q_P.size()    != expected_q    || sig.Q_M.size()    != expected_q    ||
@@ -2748,6 +2755,7 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
     batch_ring_sizes.push_back(ringSize);
     batch_key_images.push_back(cin.keyImage);
     batch_proofs.push_back(std::move(proof));
+    batch_input_indices.push_back(i);
   }
 
   if (!batch_proofs.empty() &&
@@ -2762,16 +2770,19 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
           batch_proofs.size())) {
     // Slow diagnostic path: identify the first offending input so the
     // log doesn't just say "the batch failed". Only runs on rejection.
-    for (size_t i = 0; i < batch_proofs.size(); ++i) {
+    // Report the original tx.inputs index (mixed v2 txs skip KeyInput
+    // slots when batching, so the batch index can drift from the input
+    // index).
+    for (size_t j = 0; j < batch_proofs.size(); ++j) {
       if (!Crypto::triptych_verify(
               ct_signing_hash,
-              batch_ring_pubkeys[i],
-              batch_ring_commits[i],
-              batch_pseudo_commits[i],
-              batch_ring_sizes[i],
-              batch_key_images[i],
-              batch_proofs[i])) {
-        logger(ERROR) << "CT validation: input " << i
+              batch_ring_pubkeys[j],
+              batch_ring_commits[j],
+              batch_pseudo_commits[j],
+              batch_ring_sizes[j],
+              batch_key_images[j],
+              batch_proofs[j])) {
+        logger(ERROR) << "CT validation: input " << batch_input_indices[j]
                       << " Triptych proof failed in tx " << txHash;
         return false;
       }

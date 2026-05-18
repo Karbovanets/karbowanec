@@ -518,12 +518,6 @@ void serialize(CTInputSignature& sig, ISerializer& serializer) {
   //     All vectors empty, no body bytes after the header.
   //     wire: 1 byte
   //
-  //   n = 0  (ring_size = 1, Schnorr branch — v5+ coinbase carve-out)
-  //     I_bits / A / B / z / za / zb : empty
-  //     Q_P / Q_M / Q_U              : 1 entry each (Schnorr nonce commits)
-  //     f_P, f_M, f_U                : 3 scalars
-  //     wire: 1 + 3×32 + 3×32 = 193 bytes
-  //
   //   n ∈ {2, 3, 4}  (ring_size ∈ {4, 8, 16}, full Triptych)
   //     I_bits / A / B               : n entries each
   //     Q_P / Q_M / Q_U              : n entries each
@@ -531,11 +525,13 @@ void serialize(CTInputSignature& sig, ISerializer& serializer) {
   //     f_P, f_M, f_U                : 3 scalars
   //     wire: 1 + 6n×32 + (3n+3)×32 bytes
   //
-  // n = 1 is intentionally reserved as invalid: a 2-member ring would
-  // pin the spend to one of two candidates with one decoy, which is
-  // weaker than either the Schnorr branch (no privacy claim) or the
-  // full Triptych floor at n=2 (3 decoys). Pinning n away from 1 keeps
-  // wallet behavior consistent with consensus.
+  // n = 0 / n = 1 are reserved as invalid. n=0 used to be the Schnorr
+  // branch for ring size 1 (v5+ coinbase carve-out); it was removed
+  // because the "two independent Schnorr proofs" shape it implemented
+  // did not bind the same x in P=xG and I=x·Hp(P), so a holder could
+  // forge fresh key images for the same spend. Phase B routes
+  // transparent shielding through v2 KeyInput so ring size 1 is no
+  // longer needed for the ConfidentialInput path.
   //
   // Cross-validation that n matches the matching ConfidentialInput's
   // ring_size, and that empty (n=0xFF) slots align with KeyInputs,
@@ -544,26 +540,17 @@ void serialize(CTInputSignature& sig, ISerializer& serializer) {
 
   constexpr uint8_t kEmptySlot = 0xFF;
 
-  auto n_bits_for = [](uint8_t n) -> size_t {
-    // I_bits/A/B/z/za/zb length for a given header byte.
-    return (n == 0) ? 0 : static_cast<size_t>(n);
-  };
-  auto n_q_for = [](uint8_t n) -> size_t {
-    // Q_P/Q_M/Q_U length.
-    return (n == 0) ? 1 : static_cast<size_t>(n);
-  };
+  auto n_bits_for = [](uint8_t n) -> size_t { return static_cast<size_t>(n); };
+  auto n_q_for    = [](uint8_t n) -> size_t { return static_cast<size_t>(n); };
 
   if (dynamic_cast<JsonOutputStreamSerializer*>(&serializer) != nullptr) {
     // JSON: emit n explicitly, named arrays for the rest. The decoder
     // path uses the binary one; JSON is read-only by explorer / RPC.
     //   n = 0xFF → empty slot (matching tx.inputs[i] is a v2 KeyInput)
-    //   n = 0    → Schnorr branch (ring size 1, q_len=1, bits_len=0)
     //   n ∈ {2,3,4} → full Triptych (ring size 4/8/16)
     uint8_t n_json;
     if (sig.I_bits.empty() && sig.Q_P.empty()) {
       n_json = kEmptySlot;
-    } else if (sig.I_bits.empty()) {
-      n_json = 0;
     } else {
       n_json = static_cast<uint8_t>(sig.I_bits.size());
     }
@@ -611,8 +598,6 @@ void serialize(CTInputSignature& sig, ISerializer& serializer) {
         sig.Q_M.empty() && sig.Q_U.empty() &&
         sig.z.empty()  && sig.za.empty() && sig.zb.empty()) {
       n = kEmptySlot;
-    } else if (bits_len == 0 && q_len == 1) {
-      n = 0;
     } else if ((bits_len == 2 || bits_len == 3 || bits_len == 4) && q_len == bits_len) {
       n = static_cast<uint8_t>(bits_len);
     } else {
@@ -640,7 +625,7 @@ void serialize(CTInputSignature& sig, ISerializer& serializer) {
       std::memset(&sig.f_U, 0, sizeof(sig.f_U));
       return;
     }
-    if (n != 0 && n != 2 && n != 3 && n != 4) {
+    if (n != 2 && n != 3 && n != 4) {
       throw std::runtime_error("CTInputSignature: unsupported proof size on deserialize");
     }
     const size_t bits_len = n_bits_for(n);

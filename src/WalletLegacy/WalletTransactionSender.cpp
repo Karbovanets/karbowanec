@@ -166,10 +166,12 @@ std::vector<uint64_t> WalletTransactionSender::chooseInputMixins(
     return inputMixins;
   }
 
-  // Triptych supports ring sizes {1, 4, 8, 16}. Round the requested mixin
-  // up to the next supported ring size; coinbase outputs go through the
-  // Schnorr branch (ring size 1) — see WalletGreen::chooseInputMixins for
-  // the same logic on the modern wallet path.
+  // Triptych supports ring sizes {4, 8, 16}. Round the requested mixin up
+  // to the next supported ring size. Coinbase outputs use mixin 0 (ring
+  // size 1) — under Phase B those route through v2 KeyInput with a legacy
+  // ring signature (single-member DLEQ, sound). ConfidentialInput slots
+  // never see mixin 0 because their real spend is a ConfidentialOutput,
+  // not a coinbase.
   const uint64_t minCtMixin = CryptoNote::parameters::CT_MIN_RING_SIZE - 1;
   const uint64_t maxCtMixin = CryptoNote::parameters::CT_MAX_RING_SIZE - 1;
   const uint64_t normalMixin = std::max<uint64_t>(requestedMixin, minCtMixin);
