@@ -2050,7 +2050,7 @@ void simple_wallet::synchronizationCompleted(std::error_code result) {
         }
       }
       if (dustCount > 0) {
-        logger(INFO, BRIGHT_YELLOW)
+        logger(DEBUGGING, BRIGHT_YELLOW)
           << "\nNote: " << dustCount << " dust output(s) totaling "
           << m_currency.formatAmount(dustTotal) << " KRB (below 0.01 KRB each).\n"
           << "These are spendable but will be absorbed into transaction fees rather than"
