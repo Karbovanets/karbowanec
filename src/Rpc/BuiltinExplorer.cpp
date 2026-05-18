@@ -833,7 +833,7 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
         if (useTriptych) {
           const auto& signature = ctSigs[i];
           const size_t n = signature.I_bits.size();
-          const size_t ring_size = (n == 0) ? 1 : (static_cast<size_t>(1) << n);
+          const size_t ring_size = static_cast<size_t>(1) << n;
           body += "      <summary>Input " + std::to_string(i) +
                   " &mdash; Triptych spend proof"
                   " (n=" + std::to_string(n) +
