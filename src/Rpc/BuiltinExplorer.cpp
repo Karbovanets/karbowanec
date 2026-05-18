@@ -176,9 +176,9 @@ bool BuiltinExplorer::on_get_explorer(const COMMAND_EXPLORER::request& req, COMM
     " &bull; " + "Transactions: <b>" + std::to_string(m_core.getBlockchainTotalTransactions() - top_block_index + 1) + "</b>" +
     " &bull; " + "Account numbers: <b>" + std::to_string(accountRegistrationsCount) + "</b>" +
     "</p>\n<p>" +
-    "Emission: <b>" + m_core.currency().formatAmount(m_core.getTotalGeneratedAmount()) + "</b>" +
-    " &bull; " + "Next reward: <b>" + m_core.currency().formatAmount(m_core.currency().calculateReward(m_core.getTotalGeneratedAmount(), m_core.getCurrentBlockchainHeight())) + "</b>" +
+    "Total supply: <b>" + m_core.currency().formatAmount(m_core.getTotalGeneratedAmount()) + "</b>" +
     " &bull; " + "Confidential supply: <b>" + m_core.currency().formatAmount(m_core.getConfidentialSupply()) + "</b>" +
+    " &bull; " + "Next reward: <b>" + m_core.currency().formatAmount(m_core.currency().calculateReward(m_core.getTotalGeneratedAmount(), m_core.getCurrentBlockchainHeight())) + "</b>" +
     "</p>\n";
 
   const uint32_t print_blocks_count = 10;
