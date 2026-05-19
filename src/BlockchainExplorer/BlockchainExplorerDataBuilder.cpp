@@ -314,15 +314,8 @@ bool BlockchainExplorerDataBuilder::fillTransactionDetails(const Transaction& tr
     transactionDetails.hasPaymentId = false;
   }
   fillTxExtra(transaction.extra, transactionDetails.extra);
-  transactionDetails.signatures.reserve(transaction.signatures.size());
-  for (const std::vector<Crypto::Signature>& signatures : transaction.signatures) {
-    std::vector<Crypto::Signature> signaturesDetails;
-    signaturesDetails.reserve(signatures.size());
-    for (const Crypto::Signature& signature : signatures) {
-      signaturesDetails.push_back(std::move(signature));
-    }
-    transactionDetails.signatures.push_back(std::move(signaturesDetails));
-  }
+  // Per-input variant: copy through unchanged (parallel to inputs).
+  transactionDetails.signatures = transaction.signatures;
 
   transactionDetails.inputs.reserve(transaction.inputs.size());
   for (const TransactionInput& txIn : transaction.inputs) {
@@ -399,9 +392,11 @@ bool BlockchainExplorerDataBuilder::fillTransactionDetails(const Transaction& tr
   }
 
   // CT v4 proof body — copy through for full inspection (web wallets use raw-tx
-  // RPC, so this is for explorers / debugging / human inspection).
+  // RPC, so this is for explorers / debugging / human inspection). The per-
+  // input Triptych proofs are carried inside transactionDetails.signatures via
+  // the InputSignatures variant; here we forward only the output proofs and
+  // balance kernel.
   if (transaction.version == TRANSACTION_VERSION_CT) {
-    transactionDetails.ctSignatures = transaction.ctSignatures;
     transactionDetails.ctProofs     = transaction.ctProofs;
     transactionDetails.kernel       = transaction.kernel;
   }

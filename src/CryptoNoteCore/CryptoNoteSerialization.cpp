@@ -279,74 +279,59 @@ void serialize(TransactionPrefix& txP, ISerializer& serializer) {
 void serialize(Transaction& tx, ISerializer& serializer) {
   serialize(static_cast<TransactionPrefix&>(tx), serializer);
 
-  // Per-input ring signatures (transparent KeyInput slots only). v2 mixed
-  // CT txs use this section for KeyInput shielding signatures alongside
-  // ConfidentialInput Triptych proofs in ct_signatures. ConfidentialInput
-  // slots write zero bytes here (getSignaturesCount returns 0), so the
-  // on-wire byte stream for a pure-CT v2 tx (all ConfidentialInputs) is
-  // identical with or without this section running.
+  // Per-input authorization, parallel to tx.inputs:
+  //   BaseInput          → no bytes (variant alt: boost::blank)
+  //   KeyInput           → ring sig: outputIndexes.size() × Crypto::Signature
+  //   ConfidentialInput  → Triptych spend proof
+  // The variant alternative is selected by inputs[i].type() — no per-slot
+  // tag on the wire — so a pure-coinbase tx emits zero authorization
+  // bytes and a mixed v2 tx emits each slot's body in input order.
   {
-    size_t sigSize = tx.inputs.size();
+    const size_t inCount = tx.inputs.size();
+    const bool coinbaseOnly =
+        inCount == 1 && tx.inputs[0].type() == typeid(BaseInput);
 
-    // ignore base transaction
-    if (serializer.type() == ISerializer::INPUT && !(sigSize == 1 && tx.inputs[0].type() == typeid(BaseInput))) {
-      tx.signatures.resize(sigSize);
+    if (serializer.type() == ISerializer::INPUT) {
+      tx.signatures.assign(coinbaseOnly ? 0 : inCount, InputSignatures{});
+    } else if (!coinbaseOnly && tx.signatures.size() != inCount) {
+      throw std::runtime_error("Serialization error: signatures size != inputs size");
     }
 
-    bool signaturesNotExpected = tx.signatures.empty();
-    if (!signaturesNotExpected && tx.inputs.size() != tx.signatures.size()) {
-      throw std::runtime_error("Serialization error: unexpected signatures size");
-    }
-
-    for (size_t i = 0; i < tx.inputs.size(); ++i) {
-      size_t signatureSize = getSignaturesCount(tx.inputs[i]);
-      if (signaturesNotExpected) {
-        if (signatureSize == 0) {
-          continue;
-        } else {
-          throw std::runtime_error("Serialization error: signatures are not expected");
-        }
+    for (size_t i = 0; i < inCount; ++i) {
+      if (tx.inputs[i].type() == typeid(BaseInput)) {
+        continue;
       }
-
-      if (serializer.type() == ISerializer::OUTPUT) {
-        if (signatureSize != tx.signatures[i].size()) {
-          throw std::runtime_error("Serialization error: unexpected signatures size");
+      if (tx.inputs[i].type() == typeid(KeyInput)) {
+        const size_t ringSize = boost::get<KeyInput>(tx.inputs[i]).outputIndexes.size();
+        if (serializer.type() == ISerializer::OUTPUT) {
+          const auto& sigs = boost::get<std::vector<Crypto::Signature>>(tx.signatures[i]);
+          if (sigs.size() != ringSize) {
+            throw std::runtime_error("Serialization error: ring-sig length mismatch");
+          }
+          for (auto& sig : const_cast<std::vector<Crypto::Signature>&>(sigs)) {
+            serializePod(sig, "", serializer);
+          }
+        } else {
+          std::vector<Crypto::Signature> sigs(ringSize);
+          for (auto& sig : sigs) {
+            serializePod(sig, "", serializer);
+          }
+          tx.signatures[i] = std::move(sigs);
         }
-
-        for (Crypto::Signature& sig : tx.signatures[i]) {
-          serializePod(sig, "", serializer);
+      } else if (tx.inputs[i].type() == typeid(ConfidentialInput)) {
+        if (serializer.type() == ISerializer::INPUT) {
+          tx.signatures[i] = CTInputSignature{};
         }
-
+        CTInputSignature& proof =
+            boost::get<CTInputSignature>(tx.signatures[i]);
+        serialize(proof, serializer);
       } else {
-        std::vector<Crypto::Signature> signatures(signatureSize);
-        for (Crypto::Signature& sig : signatures) {
-          serializePod(sig, "", serializer);
-        }
-
-        tx.signatures[i] = std::move(signatures);
+        throw std::runtime_error("Serialization error: unsupported input type");
       }
     }
   }
 
   if (tx.version == TRANSACTION_VERSION_CT) {
-    // Version 2 (CT): proof body — Triptych spend proofs, GK denomination proofs, kernel.
-    // These are in Transaction body (not prefix) so getTransactionPrefixHash() excludes them.
-
-    // Per-input Triptych spend proofs
-    size_t sigCount = tx.ctSignatures.size();
-    if (serializer.type() == ISerializer::OUTPUT) {
-      throwIfArrayTooLarge(sigCount, CryptoNote::parameters::CT_MAX_INPUTS, "ct_signatures");
-    }
-    serializer.beginArray(sigCount, "ct_signatures");
-    if (serializer.type() == ISerializer::INPUT) {
-      throwIfArrayTooLarge(sigCount, CryptoNote::parameters::CT_MAX_INPUTS, "ct_signatures");
-      tx.ctSignatures.resize(sigCount);
-    }
-    for (size_t i = 0; i < sigCount; ++i) {
-      serialize(tx.ctSignatures[i], serializer);
-    }
-    serializer.endArray();
-
     // Per-output GK denomination proofs
     size_t proofCount = tx.ctProofs.size();
     if (serializer.type() == ISerializer::OUTPUT) {
@@ -511,49 +496,19 @@ void serialize(ConfidentialOutput& output, ISerializer& serializer) {
 }
 
 void serialize(CTInputSignature& sig, ISerializer& serializer) {
-  // Triptych signature shape, controlled by a single header byte n:
-  //
-  //   n = 0xFF (empty slot — matching tx.inputs[i] is a v2 KeyInput, whose
-  //            authorization lives in tx.signatures[i] as a legacy ring sig).
-  //     All vectors empty, no body bytes after the header.
-  //     wire: 1 byte
-  //
-  //   n ∈ {2, 3, 4}  (ring_size ∈ {4, 8, 16}, full Triptych)
-  //     I_bits / A / B               : n entries each
-  //     Q_P / Q_M / Q_U              : n entries each
-  //     z / za / zb                  : n entries each
-  //     f_P, f_M, f_U                : 3 scalars
+  // Triptych proof body, controlled by a single header byte n:
+  //   n ∈ {2, 3, 4}  (ring_size ∈ {4, 8, 16})
+  //     I_bits / A / B / Q_P / Q_M / Q_U / z / za / zb : n entries each
+  //     f_P, f_M, f_U                                  : 3 scalars
   //     wire: 1 + 6n×32 + (3n+3)×32 bytes
   //
-  // n = 0 / n = 1 are reserved as invalid. n=0 used to be the Schnorr
-  // branch for ring size 1 (v5+ coinbase carve-out); it was removed
-  // because the "two independent Schnorr proofs" shape it implemented
-  // did not bind the same x in P=xG and I=x·Hp(P), so a holder could
-  // forge fresh key images for the same spend. Phase B routes
-  // transparent shielding through v2 KeyInput so ring size 1 is no
-  // longer needed for the ConfidentialInput path.
-  //
-  // Cross-validation that n matches the matching ConfidentialInput's
-  // ring_size, and that empty (n=0xFF) slots align with KeyInputs,
-  // lives in Blockchain::checkConfidentialTransaction and the semantic
-  // check in Core.cpp; this serializer enforces only the on-wire shape.
-
-  constexpr uint8_t kEmptySlot = 0xFF;
-
-  auto n_bits_for = [](uint8_t n) -> size_t { return static_cast<size_t>(n); };
-  auto n_q_for    = [](uint8_t n) -> size_t { return static_cast<size_t>(n); };
+  // n ∈ {0, 1, 0xFF} are reserved as invalid. Empty-slot signaling (for
+  // KeyInput slots in a mixed v2 tx) is now done at the Transaction
+  // level via the InputSignatures variant — this serializer only ever
+  // runs on a ConfidentialInput slot, so it always carries a real proof.
 
   if (dynamic_cast<JsonOutputStreamSerializer*>(&serializer) != nullptr) {
-    // JSON: emit n explicitly, named arrays for the rest. The decoder
-    // path uses the binary one; JSON is read-only by explorer / RPC.
-    //   n = 0xFF → empty slot (matching tx.inputs[i] is a v2 KeyInput)
-    //   n ∈ {2,3,4} → full Triptych (ring size 4/8/16)
-    uint8_t n_json;
-    if (sig.I_bits.empty() && sig.Q_P.empty()) {
-      n_json = kEmptySlot;
-    } else {
-      n_json = static_cast<uint8_t>(sig.I_bits.size());
-    }
+    uint8_t n_json = static_cast<uint8_t>(sig.I_bits.size());
     serializer(n_json, "n");
 
     auto emitPointArray = [&](std::vector<Crypto::EllipticCurvePoint>& arr,
@@ -588,75 +543,46 @@ void serialize(CTInputSignature& sig, ISerializer& serializer) {
 
   uint8_t n = 0;
   if (serializer.type() == ISerializer::OUTPUT) {
-    // Determine n from the proof shape. A fully-empty CTInputSignature means
-    // the matching tx.inputs[i] is a v2 KeyInput; we emit only the sentinel
-    // header (1 byte), no body.
     const size_t bits_len = sig.I_bits.size();
     const size_t q_len    = sig.Q_P.size();
-    if (bits_len == 0 && q_len == 0 &&
-        sig.A.empty()  && sig.B.empty()  &&
-        sig.Q_M.empty() && sig.Q_U.empty() &&
-        sig.z.empty()  && sig.za.empty() && sig.zb.empty()) {
-      n = kEmptySlot;
-    } else if ((bits_len == 2 || bits_len == 3 || bits_len == 4) && q_len == bits_len) {
+    if ((bits_len == 2 || bits_len == 3 || bits_len == 4) && q_len == bits_len) {
       n = static_cast<uint8_t>(bits_len);
     } else {
       throw std::runtime_error("CTInputSignature: invalid shape on serialize");
     }
-    if (n != kEmptySlot) {
-      const size_t expected_bits = n_bits_for(n);
-      const size_t expected_q    = n_q_for(n);
-      if (sig.A.size()   != expected_bits || sig.B.size()   != expected_bits ||
-          sig.Q_P.size() != expected_q    || sig.Q_M.size() != expected_q    || sig.Q_U.size() != expected_q ||
-          sig.z.size()   != expected_bits || sig.za.size()  != expected_bits || sig.zb.size()  != expected_bits) {
-        throw std::runtime_error("CTInputSignature: vector length mismatch on serialize");
-      }
+    if (sig.A.size()   != bits_len || sig.B.size()   != bits_len ||
+        sig.Q_M.size() != bits_len || sig.Q_U.size() != bits_len ||
+        sig.z.size()   != bits_len || sig.za.size()  != bits_len || sig.zb.size() != bits_len) {
+      throw std::runtime_error("CTInputSignature: vector length mismatch on serialize");
     }
   }
   serializer.binary(&n, sizeof(n), "n");
   if (serializer.type() == ISerializer::INPUT) {
-    if (n == kEmptySlot) {
-      sig.I_bits.clear();
-      sig.A.clear(); sig.B.clear();
-      sig.Q_P.clear(); sig.Q_M.clear(); sig.Q_U.clear();
-      sig.z.clear(); sig.za.clear(); sig.zb.clear();
-      std::memset(&sig.f_P, 0, sizeof(sig.f_P));
-      std::memset(&sig.f_M, 0, sizeof(sig.f_M));
-      std::memset(&sig.f_U, 0, sizeof(sig.f_U));
-      return;
-    }
     if (n != 2 && n != 3 && n != 4) {
       throw std::runtime_error("CTInputSignature: unsupported proof size on deserialize");
     }
-    const size_t bits_len = n_bits_for(n);
-    const size_t q_len    = n_q_for(n);
-    sig.I_bits.resize(bits_len);
-    sig.A.resize(bits_len);
-    sig.B.resize(bits_len);
-    sig.Q_P.resize(q_len);
-    sig.Q_M.resize(q_len);
-    sig.Q_U.resize(q_len);
-    sig.z.resize(bits_len);
-    sig.za.resize(bits_len);
-    sig.zb.resize(bits_len);
+    const size_t len = static_cast<size_t>(n);
+    sig.I_bits.resize(len);
+    sig.A.resize(len);
+    sig.B.resize(len);
+    sig.Q_P.resize(len);
+    sig.Q_M.resize(len);
+    sig.Q_U.resize(len);
+    sig.z.resize(len);
+    sig.za.resize(len);
+    sig.zb.resize(len);
   }
 
-  if (n == kEmptySlot) {
-    return; // OUTPUT path for an empty slot: header only, no body bytes.
-  }
-
-  const size_t bits_len = n_bits_for(n);
-  const size_t q_len    = n_q_for(n);
-
-  for (size_t i = 0; i < bits_len; ++i) serializePod(sig.I_bits[i], "", serializer);
-  for (size_t i = 0; i < bits_len; ++i) serializePod(sig.A[i],      "", serializer);
-  for (size_t i = 0; i < bits_len; ++i) serializePod(sig.B[i],      "", serializer);
-  for (size_t i = 0; i < q_len;    ++i) serializePod(sig.Q_P[i],    "", serializer);
-  for (size_t i = 0; i < q_len;    ++i) serializePod(sig.Q_M[i],    "", serializer);
-  for (size_t i = 0; i < q_len;    ++i) serializePod(sig.Q_U[i],    "", serializer);
-  for (size_t i = 0; i < bits_len; ++i) serializePod(sig.z[i],      "", serializer);
-  for (size_t i = 0; i < bits_len; ++i) serializePod(sig.za[i],     "", serializer);
-  for (size_t i = 0; i < bits_len; ++i) serializePod(sig.zb[i],     "", serializer);
+  const size_t len = static_cast<size_t>(n);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.I_bits[i], "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.A[i],      "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.B[i],      "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.Q_P[i],    "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.Q_M[i],    "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.Q_U[i],    "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.z[i],      "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.za[i],     "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.zb[i],     "", serializer);
   serializePod(sig.f_P, "", serializer);
   serializePod(sig.f_M, "", serializer);
   serializePod(sig.f_U, "", serializer);

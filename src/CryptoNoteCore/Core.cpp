@@ -480,31 +480,23 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
     }
 
     // Validate proof body counts match input/output counts. CT v2 supports
-    // mixed inputs: KeyInput slots carry a legacy ring signature in
-    // tx.signatures[i] (parallel to inputs), ConfidentialInput slots carry a
-    // Triptych proof in tx.ctSignatures[i]. Both arrays are sized to inputs;
-    // the unused slot for each input type is left empty.
-    if (tx.ctSignatures.size() != tx.inputs.size()) {
-      logger(ERROR) << "CT tx ctSignatures count mismatch, rejected for tx id= " << Common::podToHex(txHash);
-      return false;
-    }
+    // mixed inputs: per-input authorization is stored as a variant in
+    // tx.signatures[i] (size == inputs.size(), enforced by the deserializer):
+    //   KeyInput          → std::vector<Crypto::Signature>  (legacy ring sig)
+    //   ConfidentialInput → CTInputSignature                (Triptych proof)
+    // The variant alternative is implicit from inputs[i].type() — there is
+    // no "empty Triptych slot" sentinel any more.
     if (tx.ctProofs.size() != tx.outputs.size()) {
       logger(ERROR) << "CT tx ctProofs count mismatch, rejected for tx id= " << Common::podToHex(txHash);
-      return false;
-    }
-    if (!tx.signatures.empty() && tx.signatures.size() != tx.inputs.size()) {
-      logger(ERROR) << "CT tx signatures count mismatch, rejected for tx id= " << Common::podToHex(txHash);
       return false;
     }
 
     // Validate each CT input has consistent sizes. Mixed inputs allowed:
     //   KeyInput        → transparent shielding into the CT pool. Authorized
-    //                     by a legacy ring signature; CT proof slot empty.
+    //                     by a legacy ring signature.
     //   ConfidentialInput → CT-to-CT or transparent-decoy spend. Authorized
-    //                     by a Triptych proof; legacy sig slot empty.
+    //                     by a Triptych proof.
     for (size_t i = 0; i < tx.inputs.size(); ++i) {
-      const auto& s = tx.ctSignatures[i];
-
       if (tx.inputs[i].type() == typeid(KeyInput)) {
         const auto& ki = boost::get<KeyInput>(tx.inputs[i]);
         if (ki.amount == 0) {
@@ -517,19 +509,10 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
                         << Common::podToHex(txHash);
           return false;
         }
-        // The Triptych slot for a KeyInput is unused and must be empty —
-        // otherwise the prover could attach a Triptych body that fools a
-        // verifier into double-checking against the wrong ring.
-        if (!s.I_bits.empty() || !s.A.empty() || !s.B.empty() ||
-            !s.Q_P.empty() || !s.Q_M.empty() || !s.Q_U.empty() ||
-            !s.z.empty() || !s.za.empty() || !s.zb.empty()) {
-          logger(ERROR) << "CT tx KeyInput " << i << " has non-empty Triptych proof, rejected for tx id= "
-                        << Common::podToHex(txHash);
-          return false;
-        }
         // KeyInput requires a legacy ring signature in tx.signatures[i] sized
         // to ki.outputIndexes.size(). The deep check is in check_tx_input.
-        if (tx.signatures.empty() || tx.signatures[i].size() != ki.outputIndexes.size()) {
+        if (!isKeyInputSig(tx.signatures[i]) ||
+            keyInputSig(tx.signatures[i]).size() != ki.outputIndexes.size()) {
           logger(ERROR) << "CT tx KeyInput " << i << " ring sig count mismatch, rejected for tx id= "
                         << Common::podToHex(txHash);
           return false;
@@ -562,12 +545,13 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
           return false;
         }
       }
-      // The legacy-sig slot for a ConfidentialInput must be empty.
-      if (!tx.signatures.empty() && !tx.signatures[i].empty()) {
-        logger(ERROR) << "CT tx ConfidentialInput " << i << " has non-empty legacy ring sig, rejected for tx id= "
+      // ConfidentialInput requires a Triptych proof in tx.signatures[i].
+      if (!isCtInputSig(tx.signatures[i])) {
+        logger(ERROR) << "CT tx ConfidentialInput " << i << " missing Triptych proof, rejected for tx id= "
                       << Common::podToHex(txHash);
         return false;
       }
+      const auto& s = ctInputSig(tx.signatures[i]);
       // Triptych proof shape must match the ring size:
       //   ring_size = 4  → bits = 2, q_len = 2
       //   ring_size = 8  → bits = 3, q_len = 3
@@ -594,7 +578,9 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
       }
     }
   } else {
-    // Legacy transparent transaction semantic checks
+    // Legacy transparent transaction semantic checks.
+    // Per-input variant: BaseInput → boost::blank,
+    // KeyInput → vector<Signature>, ConfidentialInput → not legal in v1.
     if (tx.inputs.size() != tx.signatures.size()) {
       logger(ERROR) << "tx signatures size doesn't match inputs size, rejected for tx id= " << Common::podToHex(txHash);
       return false;
@@ -602,9 +588,17 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
 
     for (size_t i = 0; i < tx.inputs.size(); ++i) {
       if (tx.inputs[i].type() == typeid(KeyInput)) {
-        if (boost::get<KeyInput>(tx.inputs[i]).outputIndexes.size() != tx.signatures[i].size()) {
+        if (!isKeyInputSig(tx.signatures[i]) ||
+            boost::get<KeyInput>(tx.inputs[i]).outputIndexes.size() != keyInputSig(tx.signatures[i]).size()) {
           logger(ERROR) << "tx signatures count doesn't match outputIndexes count for input "
             << i << ", rejected for tx id= " << Common::podToHex(txHash);
+          return false;
+        }
+      } else if (tx.inputs[i].type() == typeid(BaseInput)) {
+        // BaseInput slot must hold boost::blank (no authorization bytes).
+        if (tx.signatures[i].which() != 0) {
+          logger(ERROR) << "tx BaseInput " << i
+            << " has non-empty signature slot, rejected for tx id= " << Common::podToHex(txHash);
           return false;
         }
       }

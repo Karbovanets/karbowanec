@@ -138,12 +138,15 @@ struct TransactionDetails {
   Crypto::Hash blockHash;
   uint32_t blockHeight = 0;
   TransactionExtraDetails2 extra;
-  std::vector<std::vector<Crypto::Signature>> signatures;
+  // Per-input authorization, parallel to inputs:
+  //   BaseInput          → boost::blank
+  //   KeyInput           → std::vector<Crypto::Signature>
+  //   ConfidentialInput  → CTInputSignature  (Triptych spend proof)
+  std::vector<InputSignatures> signatures;
   std::vector<transactionInputDetails2> inputs;
   std::vector<transactionOutputDetails2> outputs;
 
   // CT (v2) proof body. Empty / value-initialized for non-CT transactions.
-  std::vector<CTInputSignature> ctSignatures; // per-input Triptych spend proof
   std::vector<CTOutputProof>    ctProofs;     // per-output GK denomination membership
   TransactionKernel             kernel;       // balance-equation excess + Schnorr
 };

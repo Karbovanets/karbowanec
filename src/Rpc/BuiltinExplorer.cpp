@@ -797,13 +797,12 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
     body += "</table>\n";
 
     // Unified "Input signatures" section. Each input gets one entry whose
-    // body is either the legacy ring signature (v1 tx, or v2 KeyInput
-    // shielding) or the Triptych spend proof (v2 ConfidentialInput).
-    // An empty CTInputSignature slot (all vectors empty) marks a v2
-    // KeyInput; we fall back to tx.signatures[i] for that slot.
-    const auto& sigs   = transactionsDetails.signatures;
-    const auto& ctSigs = transactionsDetails.ctSignatures;
-    const size_t inputCount = std::max(sigs.size(), ctSigs.size());
+    // body is dispatched off the per-input variant:
+    //   vector<Signature> → legacy ring signature (v1 tx, or v2 KeyInput shielding)
+    //   CTInputSignature  → Triptych spend proof (v2 ConfidentialInput)
+    //   boost::blank      → coinbase (BaseInput), no authorization
+    const auto& sigs = transactionsDetails.signatures;
+    const size_t inputCount = sigs.size();
     if (inputCount > 0) {
       body += "<h3>Input signatures</h3>\n";
       body += "<ol>\n";
@@ -826,17 +825,11 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
       };
 
       for (size_t i = 0; i < inputCount; ++i) {
-        const bool hasCt = i < ctSigs.size();
-        const bool ctSlotEmpty = hasCt
-            && ctSigs[i].I_bits.empty() && ctSigs[i].Q_P.empty()
-            && ctSigs[i].A.empty()      && ctSigs[i].B.empty();
-        const bool useTriptych = hasCt && !ctSlotEmpty;
-
         body += "  <li>\n";
         body += "    <details open>\n";
 
-        if (useTriptych) {
-          const auto& signature = ctSigs[i];
+        if (isCtInputSig(sigs[i])) {
+          const auto& signature = ctInputSig(sigs[i]);
           const size_t n = signature.I_bits.size();
           const size_t ring_size = static_cast<size_t>(1) << n;
           body += "      <summary>Input " + std::to_string(i) +
@@ -857,9 +850,9 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
           body += "        <li>f_M: <span class=\"wrap\">" + Common::podToHex(signature.f_M) + "</span></li>\n";
           body += "        <li>f_U: <span class=\"wrap\">" + Common::podToHex(signature.f_U) + "</span></li>\n";
           body += "      </ul>\n";
-        } else {
+        } else if (isKeyInputSig(sigs[i])) {
           // Legacy ring signature: v1 transparent input, or v2 KeyInput
-          // shielding into the CT pool (CT slot is empty, n=0xFF).
+          // shielding into the CT pool.
           const bool isV2KeyInput = (transactionsDetails.version == TRANSACTION_VERSION_CT);
           body += "      <summary>Input " + std::to_string(i) +
                   " &mdash; " +
@@ -867,12 +860,14 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
                                 : "legacy ring signature") +
                   "</summary>\n";
           body += "      <ol>\n";
-          if (i < sigs.size()) {
-            for (const auto& s1 : sigs[i]) {
-              body += "        <li class=\"wrap\">" + Common::podToHex(s1) + "</li>\n";
-            }
+          for (const auto& s1 : keyInputSig(sigs[i])) {
+            body += "        <li class=\"wrap\">" + Common::podToHex(s1) + "</li>\n";
           }
           body += "      </ol>\n";
+        } else {
+          // boost::blank — BaseInput (coinbase) slot.
+          body += "      <summary>Input " + std::to_string(i) +
+                  " &mdash; coinbase (no signature)</summary>\n";
         }
 
         body += "    </details>\n";

@@ -25,6 +25,7 @@
 
 #include "CryptoNoteConfig.h"
 #include "CryptoNoteCore/CryptoNoteSerialization.h"
+#include "CryptoNoteCore/CryptoNoteTools.h"
 
 #include "Serialization/SerializationOverloads.h"
 
@@ -181,40 +182,64 @@ void serialize(TransactionDetails& transaction, ISerializer& serializer) {
   serializer(transaction.inputs, "inputs");
   serializer(transaction.outputs, "outputs");
 
-  //serializer(transaction.signatures, "signatures");
-  if (serializer.type() == ISerializer::OUTPUT) {
-    std::vector<std::pair<size_t, Crypto::Signature>> signaturesForSerialization;
-    signaturesForSerialization.reserve(transaction.signatures.size());
-    size_t ctr = 0;
-    for (const auto& signaturesV : transaction.signatures) {
-      for (auto signature : signaturesV) {
-        signaturesForSerialization.emplace_back(ctr, std::move(signature));
+  // Per-input authorization variant. Emitted as an array of self-describing
+  // objects so the JSON consumer (standalone explorer / RPC clients) can
+  // dispatch without external context:
+  //   { "type": "base" }                            — coinbase slot
+  //   { "type": "key",  "sigs": [<Signature>, …] } — legacy ring signature
+  //   { "type": "ct",   <Triptych fields>         } — Triptych spend proof
+  // On input we read the tag and populate the matching variant alternative.
+  {
+    size_t sigCount = transaction.signatures.size();
+    serializer.beginArray(sigCount, "signatures");
+    if (serializer.type() == ISerializer::INPUT) {
+      transaction.signatures.resize(sigCount);
+    }
+    for (size_t i = 0; i < sigCount; ++i) {
+      serializer.beginObject("");
+      if (serializer.type() == ISerializer::OUTPUT) {
+        if (isCtInputSig(transaction.signatures[i])) {
+          std::string tag = "ct";
+          serializer(tag, "type");
+          serialize(ctInputSig(transaction.signatures[i]), serializer);
+        } else if (isKeyInputSig(transaction.signatures[i])) {
+          std::string tag = "key";
+          serializer(tag, "type");
+          auto& sigs = keyInputSig(transaction.signatures[i]);
+          size_t n = sigs.size();
+          serializer.beginArray(n, "sigs");
+          for (auto& s : sigs) serializePod(s, "", serializer);
+          serializer.endArray();
+        } else {
+          std::string tag = "base";
+          serializer(tag, "type");
+        }
+      } else {
+        std::string tag;
+        serializer(tag, "type");
+        if (tag == "ct") {
+          transaction.signatures[i] = CTInputSignature{};
+          serialize(ctInputSig(transaction.signatures[i]), serializer);
+        } else if (tag == "key") {
+          std::vector<Crypto::Signature> sigs;
+          size_t n = 0;
+          serializer.beginArray(n, "sigs");
+          sigs.resize(n);
+          for (auto& s : sigs) serializePod(s, "", serializer);
+          serializer.endArray();
+          transaction.signatures[i] = std::move(sigs);
+        } else {
+          transaction.signatures[i] = boost::blank{};
+        }
       }
-      ++ctr;
+      serializer.endObject();
     }
-    size_t size = transaction.signatures.size();
-    serializer(size, "signaturesSize");
-    serializer(signaturesForSerialization, "signatures");
-  } else {
-    size_t size = 0;
-    serializer(size, "signaturesSize");
-    transaction.signatures.resize(size);
-
-    std::vector<std::pair<size_t, Crypto::Signature>> signaturesForSerialization;
-    serializer(signaturesForSerialization, "signatures");
-
-    for (const auto& signatureWithIndex : signaturesForSerialization) {
-      transaction.signatures[signatureWithIndex.first].push_back(signatureWithIndex.second);
-    }
+    serializer.endArray();
   }
 
-  // CT (v2) proof body — Triptych spend proofs, GK denomination proofs,
-  // balance kernel. Serialized only when the transaction is CT; the
-  // vectors and kernel are value-initialized to empty/zero for non-CT,
-  // but emitting them unconditionally would clutter every transparent-tx
-  // response and waste bytes.
+  // CT (v2) output proof body — GK denomination proofs, balance kernel.
+  // (Per-input Triptych proofs ride along in the signatures variant above.)
   if (transaction.version == TRANSACTION_VERSION_CT) {
-    serializer(transaction.ctSignatures, "ctSignatures");
     serializer(transaction.ctProofs, "ctProofs");
     serializer(transaction.kernel, "kernel");
   }

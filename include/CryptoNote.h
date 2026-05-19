@@ -170,14 +170,29 @@ struct TransactionPrefix {
   uint64_t fee = 0;
 };
 
-struct Transaction : public TransactionPrefix {
-  // v1: per-input ring signatures
-  std::vector<std::vector<Crypto::Signature>> signatures;
+// Per-input authorization, shape selected by the matching tx.inputs[i]:
+//   BaseInput          -> std::monostate            (coinbase, no sig)
+//   KeyInput           -> std::vector<Signature>    (legacy ring signature)
+//   ConfidentialInput  -> CTInputSignature          (Triptych spend proof)
+// One entry per input, indexed in lockstep with tx.inputs. The variant
+// alternative is implicit from inputs[i].type() — no separate tag on the
+// wire — so a mixed v2 tx (KeyInput shielding + ConfidentialInput spend)
+// reads as a single self-aligned array instead of two parallel arrays
+// with empty-slot sentinels.
+typedef boost::variant<
+    boost::blank,
+    std::vector<Crypto::Signature>,
+    CTInputSignature
+> InputSignatures;
 
-  // v2 (CT): proof body — separate from prefix so getTransactionPrefixHash() excludes them
-  std::vector<CTInputSignature> ctSignatures;  // per-input Triptych spend proofs
-  std::vector<CTOutputProof>    ctProofs;      // per-output GK denomination proofs
-  TransactionKernel             kernel;        // balance proof + Schnorr signature
+struct Transaction : public TransactionPrefix {
+  // Per-input authorization, parallel to inputs.
+  std::vector<InputSignatures> signatures;
+
+  // v2 (CT): output / kernel proof body — separate from prefix so
+  // getTransactionPrefixHash() excludes them.
+  std::vector<CTOutputProof> ctProofs;   // per-output GK denomination proofs
+  TransactionKernel          kernel;     // balance proof + Schnorr signature
 };
 
 struct AccountPublicAddress {

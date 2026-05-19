@@ -76,7 +76,7 @@ struct CTBuildRingMember {
 //           transparent shielding into the CT pool. Ring must be all-KeyOutput
 //           and all members must share the same amount bucket as `amount`.
 //           realBlinding is ignored (always 0 for transparent outputs).
-//   false → emit a ConfidentialInput (Triptych in tx.ctSignatures). Used for
+//   false → emit a ConfidentialInput (Triptych in tx.signatures variant). Used for
 //           CT-to-CT or transparent-decoy spend. Ring may be mixed-bucket.
 //
 // Ring members are NOT required to be sorted on entry — buildConfidentialTransaction

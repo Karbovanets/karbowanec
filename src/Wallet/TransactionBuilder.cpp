@@ -459,11 +459,10 @@ Transaction buildConfidentialTransaction(
   }
 
   // ── Step 6: Per-input signing ──────────────────────────────────────────────
-  // ConfidentialInput slots → Triptych spend proof in tx.ctSignatures[i].
-  // KeyInput slots → legacy ring sig in tx.signatures[i]. Both arrays stay
-  // parallel to tx.inputs (ctSignatures has empty entry for KeyInput slots,
-  // tx.signatures has empty inner vector for ConfidentialInput slots).
-  tx.ctSignatures.resize(inputs.size());
+  // tx.signatures is a per-input variant parallel to tx.inputs:
+  //   KeyInput          → vector<Crypto::Signature>  (legacy ring sig)
+  //   ConfidentialInput → CTInputSignature           (Triptych spend proof)
+  // The variant alternative is implicit from inputs[i].type().
   tx.signatures.resize(inputs.size());
   for (size_t i = 0; i < inputs.size(); ++i) {
     const size_t ringSize = inputs[i].ringMembers.size();
@@ -531,7 +530,8 @@ Transaction buildConfidentialTransaction(
     // Copy Triptych proof into transaction body. The on-wire CTInputSignature
     // struct mirrors Crypto::TriptychSignature field-for-field; we move the
     // vectors over so we don't pay a copy on each n×32-byte payload.
-    auto& s = tx.ctSignatures[i];
+    tx.signatures[i] = CTInputSignature{};
+    auto& s = ctInputSig(tx.signatures[i]);
     s.I_bits = std::move(proof.I_bits);
     s.A      = std::move(proof.A);
     s.B      = std::move(proof.B);

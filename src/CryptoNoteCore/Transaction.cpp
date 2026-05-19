@@ -335,7 +335,7 @@ namespace CryptoNote {
       info.realOutput.transactionIndex,
       signatures.data());
 
-    getSignatures(index) = signatures;
+    getSignatures(index) = std::move(signatures);
     invalidateHash();
   }
 
@@ -349,7 +349,13 @@ namespace CryptoNote {
       throw std::runtime_error("Invalid input index");
     }
 
-    return transaction.signatures[input];
+    // Ensure the variant slot holds a vector<Signature> before returning a
+    // reference. signInputKey only ever calls this for KeyInput slots, so we
+    // initialise the alternative on demand here.
+    if (!isKeyInputSig(transaction.signatures[input])) {
+      transaction.signatures[input] = std::vector<Signature>{};
+    }
+    return keyInputSig(transaction.signatures[input]);
   }
 
   BinaryArray TransactionImpl::getTransactionData() const {
@@ -478,7 +484,12 @@ namespace CryptoNote {
     }
 
     for (size_t i = 0; i < transaction.inputs.size(); ++i) {
-      if (getRequiredSignaturesCount(i) > transaction.signatures[i].size()) {
+      const size_t required = getRequiredSignaturesCount(i);
+      if (required == 0) {
+        continue;  // BaseInput or ConfidentialInput slot — no legacy ring sig needed
+      }
+      if (!isKeyInputSig(transaction.signatures[i]) ||
+          required > keyInputSig(transaction.signatures[i]).size()) {
         return false;
       }
     }

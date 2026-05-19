@@ -27,6 +27,39 @@
 
 namespace CryptoNote {
 
+// --- InputSignatures variant helpers ---------------------------------------
+// Per-input authorization is stored as a variant whose alternative is
+// implicit from the matching tx.inputs[i]:
+//   BaseInput          -> boost::blank
+//   KeyInput           -> std::vector<Crypto::Signature>
+//   ConfidentialInput  -> CTInputSignature
+// These helpers keep call sites concise instead of repeating boost::get
+// dispatches everywhere.
+
+inline bool isKeyInputSig(const InputSignatures& s) {
+  return s.type() == typeid(std::vector<Crypto::Signature>);
+}
+
+inline bool isCtInputSig(const InputSignatures& s) {
+  return s.type() == typeid(CTInputSignature);
+}
+
+inline const std::vector<Crypto::Signature>& keyInputSig(const InputSignatures& s) {
+  return boost::get<std::vector<Crypto::Signature>>(s);
+}
+
+inline std::vector<Crypto::Signature>& keyInputSig(InputSignatures& s) {
+  return boost::get<std::vector<Crypto::Signature>>(s);
+}
+
+inline const CTInputSignature& ctInputSig(const InputSignatures& s) {
+  return boost::get<CTInputSignature>(s);
+}
+
+inline CTInputSignature& ctInputSig(InputSignatures& s) {
+  return boost::get<CTInputSignature>(s);
+}
+
 void getBinaryArrayHash(const BinaryArray& binaryArray, Crypto::Hash& hash);
 Crypto::Hash getBinaryArrayHash(const BinaryArray& binaryArray);
 

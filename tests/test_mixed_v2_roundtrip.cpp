@@ -78,17 +78,20 @@ Transaction buildMixedV2() {
   out.target = cout;
   tx.outputs.push_back(out);
 
-  // Per-input signatures: 3 ring sigs for the KeyInput, empty for the CI.
+  // Per-input authorization, dispatched by inputs[i].type():
+  //   slot 0 (KeyInput)          → vector<Signature> with 3 ring sigs
+  //   slot 1 (ConfidentialInput) → CTInputSignature with a full Triptych proof
   tx.signatures.resize(2);
-  for (size_t i = 0; i < 3; ++i) {
-    tx.signatures[0].push_back(makeSig(0x90 + i));
+  {
+    std::vector<Crypto::Signature> sigs;
+    for (size_t i = 0; i < 3; ++i) {
+      sigs.push_back(makeSig(0x90 + i));
+    }
+    tx.signatures[0] = std::move(sigs);
   }
-  // tx.signatures[1] stays empty.
 
-  // CT signatures: empty slot for KeyInput, full Triptych for CI.
-  tx.ctSignatures.resize(2);
-  // [0] stays default-constructed (all empty vectors) → serialized as n=0xFF.
-  CTInputSignature& cs = tx.ctSignatures[1];
+  tx.signatures[1] = CTInputSignature{};
+  CTInputSignature& cs = ctInputSig(tx.signatures[1]);
   cs.I_bits.resize(2);
   cs.A.resize(2);
   cs.B.resize(2);
@@ -191,31 +194,28 @@ int run() {
   CHECK(memEq(&cin_src.pseudoCommitment, &cin_dst.pseudoCommitment, 32));
   CHECK(memEq(&cin_src.keyImage, &cin_dst.keyImage, 32));
 
-  // Signatures
+  // Per-input authorization variant: slot 0 holds 3 ring sigs, slot 1
+  // holds the Triptych proof.
   CHECK(dst.signatures.size() == src.signatures.size());
-  CHECK(dst.signatures[0].size() == 3);
-  CHECK(dst.signatures[1].size() == 0);
+  CHECK(isKeyInputSig(dst.signatures[0]));
+  CHECK(isCtInputSig(dst.signatures[1]));
+  const auto& dst_ring = keyInputSig(dst.signatures[0]);
+  const auto& src_ring = keyInputSig(src.signatures[0]);
+  CHECK(dst_ring.size() == 3);
   for (size_t i = 0; i < 3; ++i) {
-    CHECK(memEq(&dst.signatures[0][i], &src.signatures[0][i],
-                sizeof(Crypto::Signature)));
+    CHECK(memEq(&dst_ring[i], &src_ring[i], sizeof(Crypto::Signature)));
   }
 
-  // CT signatures: empty slot + full Triptych
-  CHECK(dst.ctSignatures.size() == 2);
-  CHECK(dst.ctSignatures[0].I_bits.empty());
-  CHECK(dst.ctSignatures[0].A.empty());
-  CHECK(dst.ctSignatures[0].Q_P.empty());
-  CHECK(dst.ctSignatures[1].I_bits.size() == 2);
-  CHECK(dst.ctSignatures[1].Q_P.size() == 2);
+  const auto& dst_cs = ctInputSig(dst.signatures[1]);
+  const auto& src_cs = ctInputSig(src.signatures[1]);
+  CHECK(dst_cs.I_bits.size() == 2);
+  CHECK(dst_cs.Q_P.size() == 2);
   for (size_t j = 0; j < 2; ++j) {
-    CHECK(memEq(&dst.ctSignatures[1].I_bits[j],
-                &src.ctSignatures[1].I_bits[j], 32));
-    CHECK(memEq(&dst.ctSignatures[1].Q_P[j],
-                &src.ctSignatures[1].Q_P[j], 32));
-    CHECK(memEq(&dst.ctSignatures[1].z[j],
-                &src.ctSignatures[1].z[j], 32));
+    CHECK(memEq(&dst_cs.I_bits[j], &src_cs.I_bits[j], 32));
+    CHECK(memEq(&dst_cs.Q_P[j],    &src_cs.Q_P[j],    32));
+    CHECK(memEq(&dst_cs.z[j],      &src_cs.z[j],      32));
   }
-  CHECK(memEq(&dst.ctSignatures[1].f_P, &src.ctSignatures[1].f_P, 32));
+  CHECK(memEq(&dst_cs.f_P, &src_cs.f_P, 32));
 
   // Kernel
   CHECK(memEq(&dst.kernel.excessCommitment, &src.kernel.excessCommitment, 32));

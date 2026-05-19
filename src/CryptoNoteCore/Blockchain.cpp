@@ -2168,7 +2168,7 @@ bool Blockchain::checkTransactionInputs(const Transaction& tx, const Crypto::Has
         return false;
       }
       if (!isInCheckpointZone(getCurrentBlockchainHeight())) {
-        if (!check_tx_input(in_to_key, tx_prefix_hash, tx.signatures[inputIndex], pmax_used_block_height)) {
+        if (!check_tx_input(in_to_key, tx_prefix_hash, keyInputSig(tx.signatures[inputIndex]), pmax_used_block_height)) {
           logger(INFO, BRIGHT_WHITE) << "Failed to check input in transaction " << transactionHash;
           return false;
         }
@@ -2341,11 +2341,7 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
                   << " != outputs count " << tx.outputs.size() << " in tx " << txHash;
     return false;
   }
-  if (tx.ctSignatures.size() != tx.inputs.size()) {
-    logger(ERROR) << "CT validation: ctSignatures count " << tx.ctSignatures.size()
-                  << " != inputs count " << tx.inputs.size() << " in tx " << txHash;
-    return false;
-  }
+  // tx.signatures.size() == tx.inputs.size() is enforced by the deserializer.
 
   // Step 3: For all outputs: verify GK denomination membership proofs in
   // one batched call. Reconstruct each on-wire CTOutputProof into a
@@ -2438,7 +2434,8 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
         return false;
       }
       if (tx.signatures.size() != tx.inputs.size() ||
-          tx.signatures[i].size() != ki.outputIndexes.size()) {
+          !isKeyInputSig(tx.signatures[i]) ||
+          keyInputSig(tx.signatures[i]).size() != ki.outputIndexes.size()) {
         logger(ERROR) << "CT validation: KeyInput " << i << " ring sig count mismatch in tx " << txHash;
         return false;
       }
@@ -2449,7 +2446,7 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
         logger(DEBUGGING) << "CT validation: KeyInput " << i << " key image already spent in tx " << txHash;
         return false;
       }
-      if (!check_tx_input(ki, ct_signing_hash, tx.signatures[i], pmax_used_block_height)) {
+      if (!check_tx_input(ki, ct_signing_hash, keyInputSig(tx.signatures[i]), pmax_used_block_height)) {
         logger(ERROR) << "CT validation: KeyInput " << i << " ring sig check failed in tx " << txHash;
         return false;
       }
@@ -2707,7 +2704,11 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
       continue;
     }
     const auto& cin = boost::get<ConfidentialInput>(tx.inputs[i]);
-    const auto& sig = tx.ctSignatures[i];
+    if (!isCtInputSig(tx.signatures[i])) {
+      logger(ERROR) << "CT validation: input " << i << " missing Triptych proof slot in tx " << txHash;
+      return false;
+    }
+    const auto& sig = ctInputSig(tx.signatures[i]);
 
     const size_t ringSize = verifiedRingPubkeys[i].size();
     if (!Crypto::triptych_ring_size_supported(ringSize)) {
@@ -2939,11 +2940,7 @@ bool Blockchain::checkConfidentialTransactionStructure(const Transaction& tx,
                   << " != outputs count " << tx.outputs.size() << " in tx " << txHash;
     return false;
   }
-  if (tx.ctSignatures.size() != tx.inputs.size()) {
-    logger(ERROR) << "CT structural validation: ctSignatures count " << tx.ctSignatures.size()
-                  << " != inputs count " << tx.inputs.size() << " in tx " << txHash;
-    return false;
-  }
+  // tx.signatures.size() == tx.inputs.size() is enforced by the deserializer.
 
   for (size_t i = 0; i < tx.outputs.size(); ++i) {
     if (tx.outputs[i].target.type() != typeid(ConfidentialOutput)) {
