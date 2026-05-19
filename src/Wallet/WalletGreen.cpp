@@ -2882,6 +2882,13 @@ uint64_t WalletGreen::selectTransfers(
   std::vector<size_t> nonCanonicalOutputs;
   for (auto walletIt = wallets.begin(); walletIt != wallets.end(); ++walletIt) {
     for (auto outIt = walletIt->outs.begin(); outIt != walletIt->outs.end(); ++outIt) {
+      // Legacy v1 path can't spend ConfidentialOutputs — consensus rejects a
+      // KeyInput whose ring resolves to a ConfidentialOutput. Skip them so
+      // legacy-tx sends don't trip on shielded inputs spendable only via v2.
+      if (!includeNonCanonical && outIt->type == TransactionTypes::OutputType::Confidential) {
+        continue;
+      }
+
       uint64_t spendAmount = outIt->amount;
 
       OutputData data;

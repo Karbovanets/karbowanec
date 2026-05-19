@@ -911,25 +911,34 @@ uint64_t WalletTransactionSender::selectTransfersToSend(
 
   for (size_t i = 0; i < outputs.size(); ++i) {
     const auto& out = outputs[i];
-    if (!m_transactionsCache.isUsed(out)) {
-      const uint64_t spendableAmount = resolveSpendableAmount(out);
-      spendableAmounts[i] = spendableAmount;
-      if (isTransparentNonCanonicalCtAmount(out)) {
-        nonCanonicalOutputs.push_back(i);
-        if (includeNonCanonical) {
-          continue;
-        }
-      }
+    if (m_transactionsCache.isUsed(out)) continue;
 
-      if (out.type == TransactionTypes::OutputType::Confidential || is_valid_decomposed_amount(out.amount)) {
-        if (dust < spendableAmount) {
-          unusedTransfers.push_back(i);
-        } else {
-          unusedDust.push_back(i);
-        }
-      } else {
-        unusedUnmixable.push_back(i);
+    // Legacy v1 path (useCT==false → includeNonCanonical==false) cannot spend
+    // ConfidentialOutputs — consensus rejects a v1 KeyInput whose ring members
+    // resolve to a ConfidentialOutput, and the v1 fee derivation has no way
+    // to declare the hidden value. Skip them so --legacy-tx sends don't trip
+    // on shielded inputs that are spendable only via v2.
+    if (!includeNonCanonical && out.type == TransactionTypes::OutputType::Confidential) {
+      continue;
+    }
+
+    const uint64_t spendableAmount = resolveSpendableAmount(out);
+    spendableAmounts[i] = spendableAmount;
+    if (isTransparentNonCanonicalCtAmount(out)) {
+      nonCanonicalOutputs.push_back(i);
+      if (includeNonCanonical) {
+        continue;
       }
+    }
+
+    if (out.type == TransactionTypes::OutputType::Confidential || is_valid_decomposed_amount(out.amount)) {
+      if (dust < spendableAmount) {
+        unusedTransfers.push_back(i);
+      } else {
+        unusedDust.push_back(i);
+      }
+    } else {
+      unusedUnmixable.push_back(i);
     }
   }
 
