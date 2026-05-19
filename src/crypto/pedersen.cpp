@@ -123,23 +123,21 @@ bool pedersen_commit(const EllipticCurveScalar& v,
   const unsigned char* r_bytes =
     reinterpret_cast<const unsigned char*>(&r);
 
-  // Decode H into ge_p3 for ge_scalarmult
+  // ge_double_scalarmult_base_vartime would be ideal but ref10 only
+  // exposes a precomputed base for G. We compute v·H and r·G separately
+  // and add. ge_scalarmult returns ge_p2, so we have to promote to
+  // ge_p3 for ge_add — ref10 has no direct ge_p2_to_p3, so we go
+  // through compressed bytes. The round-trip is one ge_tobytes plus one
+  // ge_frombytes_vartime; cheap relative to the scalarmult itself.
   ge_p3 H_p3;
   if (ge_frombytes_vartime(&H_p3,
       reinterpret_cast<const unsigned char*>(&H_point)) != 0) {
     return false;
   }
 
-  // v*H → ge_p2
   ge_p2 vH_p2;
   ge_scalarmult(&vH_p2, v_bytes, &H_p3);
 
-  // r*G → ge_p3
-  ge_p3 rG_p3;
-  ge_scalarmult_base(&rG_p3, r_bytes);
-
-  // Add: vH + rG
-  // Convert vH from ge_p2 to ge_p3 (via tobytes + frombytes round-trip)
   unsigned char vH_bytes[32];
   ge_tobytes(vH_bytes, &vH_p2);
   ge_p3 vH_p3;
@@ -147,19 +145,20 @@ bool pedersen_commit(const EllipticCurveScalar& v,
     return false;
   }
 
+  ge_p3 rG_p3;
+  ge_scalarmult_base(&rG_p3, r_bytes);
+
   ge_cached rG_cached;
   ge_p3_to_cached(&rG_cached, &rG_p3);
-
   ge_p1p1 sum_p1p1;
   ge_add(&sum_p1p1, &vH_p3, &rG_cached);
-
   ge_p2 sum_p2;
   ge_p1p1_to_p2(&sum_p2, &sum_p1p1);
 
   unsigned char* C_bytes = reinterpret_cast<unsigned char*>(&C);
   ge_tobytes(C_bytes, &sum_p2);
 
-  // Subgroup validation on the result
+  // Subgroup validation on the result.
   if (!point_valid_for_pedersen(C)) {
     return false;
   }

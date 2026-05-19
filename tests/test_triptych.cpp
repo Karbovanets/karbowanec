@@ -524,11 +524,12 @@ static void test_ring_swap_rejected() {
 
 // ── Batched verifier ───────────────────────────────────────────────────
 //
-// triptych_verify_batch random-α-scales every per-input verifier equation
-// and folds them into one Pippenger MSM. These tests cover:
+// triptych_verify_batch derives α from a Fiat-Shamir transcript that
+// commits to every proof in the batch (so α is unpredictable to the
+// prover at sign time) and folds the resulting α-scaled per-input
+// equations into one Pippenger MSM. These tests cover:
 //   - degenerate batch sizes (n=0, n=1)
-//   - mixed ring sizes in one batch (1, 4, 8, 16) — exercises both the
-//     Schnorr and full-Triptych branches simultaneously
+//   - mixed ring sizes in one batch (4, 8, 16)
 //   - cross-check that legit batches verify
 //   - that ANY tampered input flips the batched check to false
 //   - empty batch is trivially true

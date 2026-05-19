@@ -19,82 +19,98 @@
 
 #pragma once
 
+#include <array>
+#include <cstdint>
+#include <cstddef>
+#include <limits>
 #include <random>
+#include <vector>
+
+#include "crypto-util.h"
+
+// Random number primitives used across the crypto / wallet stack.
+//
+// All byte-level randomness (signing nonces, blinding factors, ephemeral
+// keys, shuffle seeds) is drawn from the OS CSPRNG via secure_random_bytes
+// in crypto-util.c (BCryptGenRandom on Windows, getrandom/urandom on
+// Linux, arc4random_buf on *BSD/Mac). The previous implementation seeded
+// a per-thread std::mt19937 from std::random_device — that yields at most
+// 2³² distinct PRNG states (Mersenne Twister's single-uint32 seed
+// constructor), well within reach of an offline brute force given any
+// observed proof. Routing through the platform CSPRNG removes that
+// failure mode.
+//
+// `generator()` still returns an std::mt19937, kept around solely for
+// non-cryptographic uses (e.g. std::shuffle of output decoy order). It
+// is seeded by drawing the full 624-word state from secure_random_bytes
+// so the shuffle remains unpredictable to outside observers.
 
 namespace Random
 {
-    /* Used to obtain a random seed */
-    static thread_local std::random_device device;
-
-    /* Generator, seeded with the random device */
-    static thread_local std::mt19937 gen(device());
-
-    /* The distribution to get numbers for - in this case, uint8_t */
-    static std::uniform_int_distribution<int> distribution{0, std::numeric_limits<uint8_t>::max()};
-
-    /**
-     * Generate n random bytes (uint8_t), and place them in *result. Result should be large
-     * enough to contain the bytes.
-     */
     inline void randomBytes(size_t n, uint8_t *result)
     {
-        for (size_t i = 0; i < n; i++)
-        {
-            result[i] = distribution(gen);
-        }
+        secure_random_bytes(result, n);
     }
 
-    /**
-     * Generate n random bytes (uint8_t), and return them in a vector.
-     */
     inline std::vector<uint8_t> randomBytes(size_t n)
     {
-        std::vector<uint8_t> result;
-
-        result.reserve(n);
-
-        for (size_t i = 0; i < n; i++)
-        {
-            result.push_back(distribution(gen));
+        std::vector<uint8_t> result(n);
+        if (n > 0) {
+            secure_random_bytes(result.data(), n);
         }
-
         return result;
     }
 
     /**
      * Generate a random value of the type specified, in the full range of the
-     * type
+     * type. Uses the OS CSPRNG.
      */
     template <typename T>
     T randomValue()
     {
-        std::uniform_int_distribution<T> distribution{
-            std::numeric_limits<T>::min(), std::numeric_limits<T>::max()
-        };
-
-        return distribution(gen);
+        static_assert(std::is_trivially_copyable<T>::value,
+                      "randomValue<T>(): T must be trivially copyable");
+        T value;
+        secure_random_bytes(&value, sizeof(T));
+        return value;
     }
 
     /**
      * Generate a random value of the type specified, in the range [min, max]
-     * Note that both min, and max, are included in the results. Therefore,
-     * randomValue(0, 100), will generate numbers between 0 and 100.
+     * (inclusive). Backed by the CSPRNG-seeded MT19937 — uniform_int_distribution
+     * needs a UniformRandomBitGenerator, and seeding MT from the OS CSPRNG
+     * each call would be wasteful. Callers must not rely on this routine
+     * for cryptographic secrets; use randomBytes / randomValue<T>() for that.
      *
      * Note that min must be <= max, or undefined behaviour will occur.
      */
     template <typename T>
     T randomValue(T min, T max)
     {
+        static thread_local std::mt19937 gen = []() {
+            std::array<uint32_t, std::mt19937::state_size> state{};
+            secure_random_bytes(state.data(), state.size() * sizeof(uint32_t));
+            std::seed_seq seq(state.begin(), state.end());
+            return std::mt19937(seq);
+        }();
         std::uniform_int_distribution<T> distribution{min, max};
         return distribution(gen);
     }
 
     /**
      * Obtain the generator used internally. Helpful for passing to functions
-     * like std::shuffle.
+     * like std::shuffle. The generator is seeded once per thread by drawing
+     * its entire internal state from the OS CSPRNG, so the resulting shuffle
+     * sequence cannot be predicted by an outside observer.
      */
     inline std::mt19937 generator()
     {
+        static thread_local std::mt19937 gen = []() {
+            std::array<uint32_t, std::mt19937::state_size> state{};
+            secure_random_bytes(state.data(), state.size() * sizeof(uint32_t));
+            std::seed_seq seq(state.begin(), state.end());
+            return std::mt19937(seq);
+        }();
         return gen;
     }
 }

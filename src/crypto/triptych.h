@@ -96,33 +96,17 @@ namespace Crypto {
 
 // Per-input Triptych signature. Vector lengths follow this rule:
 //
-//   ring_size = 1  (n_bits = 0, Schnorr branch — see below)
-//     I_bits, A, B, z, za, zb : empty
-//     Q_P, Q_M, Q_U           : exactly 1 entry each (Schnorr nonce commits)
-//
-//   ring_size ∈ {4, 8, 16}  (n_bits = log2(ring_size); full Triptych)
+//   ring_size ∈ {4, 8, 16}  (n_bits = log2(ring_size))
 //     I_bits, A, B, z, za, zb : exactly n_bits entries
 //     Q_P, Q_M, Q_U           : exactly n_bits entries
 //
 // f_P, f_M, f_U are always present (three response scalars).
 //
-// Ring-size-1 (Schnorr) branch:
-//   The polynomial selector degenerates at n=0, so we cannot use the
-//   one-out-of-many algebra. Instead the proof reduces to three
-//   independent Schnorr proofs (one per relation) sharing the same
-//   Fiat-Shamir challenge:
-//     P_0 = x·G        — Schnorr over G              ↔  f_P, Q_P[0]
-//     M_0 = z·G        — Schnorr over G              ↔  f_M, Q_M[0]
-//     I   = x·Hp(P_0)  — Schnorr over Hp(P_0)        ↔  f_U, Q_U[0]
-//   The "same x" binding for equations 1 and 3 is implicit: a prover who
-//   could pass both with different x's would solve dlog of I in base
-//   Hp(P_0). The carve-out exists so v5+ coinbase outputs (which have no
-//   privacy expectation since they're publicly mined) can be spent
-//   without forcing the wallet to request decoys.
-//
-// Full Triptych branch:
-//   Standard logarithmic linkable one-out-of-many proof; see the
-//   protocol comment at the top of this file.
+// No ring-size-1 branch: a Schnorr-only shape at ring size 1 would not
+// bind the same witness x in P = x·G and I = x·Hp(P), so a holder could
+// emit fresh key images for the same spend. Transparent shielding
+// (coinbase included) goes through v2 KeyInput with a legacy ring
+// signature, so a ConfidentialInput with ring size 1 is never needed.
 struct TriptychSignature {
   std::vector<EllipticCurvePoint>  I_bits;   // commitments to secret index bits l_j
   std::vector<EllipticCurvePoint>  A;        // bitness aux commitments
@@ -144,9 +128,7 @@ struct TriptychSignature {
 // ring_pubkeys:    one-time public keys P_k of ring members (size = ring_size)
 // ring_commits:    Pedersen commitments C_k of ring members (size = ring_size)
 // pseudo_commit:   pseudo-output commitment C' = v·H + r'·G
-// ring_size:       number of ring members; MUST be in {1, 4, 8, 16}.
-//                  ring_size = 1 reduces to a Schnorr-style proof (used for
-//                  v5+ coinbase carve-out — see TriptychSignature comment).
+// ring_size:       number of ring members; MUST be in {4, 8, 16}.
 // true_index:      index l of the real input within the ring
 // spend_privkey:   secret spend key x such that P_l = x·G
 // real_blinding:   blinding factor r of the real input's commitment C_l
@@ -188,10 +170,10 @@ bool triptych_verify(
   const KeyImage& key_image,
   const TriptychSignature& sig);
 
-// Returns true iff ring_size is supported: 1 (Schnorr branch — see the
-// TriptychSignature comment) or 4 / 8 / 16 (full Triptych).
-// Exposed so callers (TransactionBuilder, validation) can reject early
-// without ever entering the proof path on a malformed shape.
+// Returns true iff ring_size is one of the supported full-Triptych
+// shapes (4, 8, or 16). Exposed so callers (TransactionBuilder,
+// validation) can reject early without ever entering the proof path
+// on a malformed shape.
 bool triptych_ring_size_supported(size_t ring_size);
 
 // Batched verification of `count` Triptych spend proofs that all share a
@@ -200,14 +182,17 @@ bool triptych_ring_size_supported(size_t ring_size);
 //   ring_pubkeys[i]   — pointer to the ring of size ring_sizes[i]
 //   ring_commits[i]   — parallel ring of commitment points
 //   pseudo_commits[i] — pseudo-output commitment for input i
-//   ring_sizes[i]     — must be 1, 4, 8, or 16
+//   ring_sizes[i]     — must be 4, 8, or 16
 //   key_images[i]     — linking tag for input i
 //   sigs[i]           — Triptych proof struct
 //
-// Soundness: per-equation random α coefficients are sampled fresh on
-// every call (one per equation per proof), so a prover cannot pre-bias
-// the combined point sum. Any single broken equation flips the combined
-// sum to non-identity with overwhelming probability (~2⁻²⁵²).
+// Soundness: α is derived from a Fiat-Shamir transcript that commits to
+// every proof in the batch (key images, pseudo commits, ring contents,
+// and every byte of every TriptychSignature). The prover cannot
+// pre-compute α before constructing the proofs, so any single broken
+// equation flips the combined sum to non-identity with overwhelming
+// probability (~2⁻²⁵²). The derivation is fully deterministic across
+// nodes — consensus verification is reproducible.
 //
 // Returns true iff every proof verifies. On false, the caller is
 // expected to fall back to per-input triptych_verify() to pinpoint

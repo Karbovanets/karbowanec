@@ -2666,17 +2666,17 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
   // Step 5: Verify all CT input Triptych spend proofs in one batched MSM.
   //
   // Ring size for each input is constrained to a Triptych-supported shape
-  // (1 / 4 / 8 / 16) by triptych_ring_size_supported above. The serializer
-  // pins n on each proof body to {0, 2, 3, 4}; here we additionally
-  // enforce the proof's shape matches its input's ring size — a prover
-  // can't swap a Schnorr-shape body against a ring-size-4 input or vice
-  // versa.
+  // (4, 8, or 16) by triptych_ring_size_supported above. The serializer
+  // pins n on each proof body to {2, 3, 4}; here we additionally enforce
+  // that the proof's shape matches its input's ring size — a prover
+  // can't swap a ring-size-8 body against a ring-size-4 input.
   //
-  // Batched path: triptych_verify_batch random-α-scales every verifier
-  // equation across every input and folds the lot into one Pippenger MSM.
-  // ~3-5× faster than per-input verify at txs with several inputs. On
-  // failure we fall back to per-input triptych_verify to identify which
-  // input is malformed.
+  // Batched path: triptych_verify_batch derives α from a Fiat-Shamir
+  // transcript that hashes every proof byte (so α is unpredictable to
+  // the prover at sign time) and folds every α-scaled per-input
+  // equation into one Pippenger MSM. ~3-5× faster than per-input verify
+  // at txs with several inputs. On failure we fall back to per-input
+  // triptych_verify to identify which input is malformed.
   std::vector<const Crypto::PublicKey*>           batch_ring_pubkeys;
   std::vector<const Crypto::EllipticCurvePoint*>  batch_ring_commits;
   std::vector<Crypto::EllipticCurvePoint>         batch_pseudo_commits;
@@ -3000,7 +3000,7 @@ bool Blockchain::checkConfidentialTransactionStructure(const Transaction& tx,
     }
     if (!Crypto::triptych_ring_size_supported(ringSize)) {
       logger(ERROR) << "CT structural validation: input " << i << " ring size " << ringSize
-                    << " is not a supported Triptych shape (1, 4, 8, or 16)"
+                    << " is not a supported Triptych shape (4, 8, or 16)"
                     << " in tx " << txHash;
       return false;
     }

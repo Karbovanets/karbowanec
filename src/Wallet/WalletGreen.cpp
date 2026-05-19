@@ -1776,7 +1776,7 @@ std::vector<uint64_t> WalletGreen::chooseInputMixins(
     return inputMixins;
   }
 
-  // Triptych supports ring sizes {1, 4, 8, 16}. A wallet that asks for a
+  // Triptych supports ring sizes {4, 8, 16}. A wallet that asks for a
   // mixin landing on any other ring size (e.g. mixin=4 ⇒ ring 5) would
   // build a transaction consensus rejects. We round the requested mixin
   // up to the next supported Triptych shape so the wallet UX matches the

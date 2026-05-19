@@ -224,6 +224,16 @@ bool transparent_amount_to_commitment(
   ge_scalarmult(&result_p2, amount_scalar, &H_p3);
   ge_tobytes(reinterpret_cast<unsigned char*>(&commitment), &result_p2);
 
+  // Defense-in-depth subgroup check. Today H is in the prime-order
+  // subgroup (cofactor-cleared in pedersen_get_H()) and `amount` is
+  // non-zero modulo L, so amount*H stays in the subgroup and is
+  // non-identity. The check is cheap and prevents a future refactor of
+  // the H derivation from silently producing torsion-tainted
+  // commitments here.
+  if (!point_valid_for_pedersen(commitment)) {
+    return false;
+  }
+
   return true;
 }
 

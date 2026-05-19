@@ -16,6 +16,7 @@
 #include "pedersen.h"
 #include "random.h"
 #include "crypto-util.h"
+#include "CryptoNoteConfig.h"
 
 #include <array>
 #include <cassert>
@@ -46,15 +47,18 @@ inline size_t log2_ring(size_t ring_size) {
 
 } // anonymous namespace
 
-// Triptych supports power-of-two ring sizes 4, 8, 16. Ring size 1 was
-// considered as a Schnorr-branch carve-out for v5+ coinbase, but a sound
-// Schnorr shape for ring size 1 needs a DLEQ proof binding P = xG to
-// I = x·Hp(P) (same x). The simpler "two independent Schnorr proofs"
-// shape does NOT bind both witnesses to the same x and would allow a
-// holder to forge fresh key images for the same spend. Phase B routes
-// transparent shielding (coinbase included) through v2 KeyInput with a
-// legacy ring signature, so a ConfidentialInput never needs ring size 1
-// in practice. Consensus rejects ring size 1 outright here.
+// Triptych supports power-of-two ring sizes 4, 8, 16. A ring-size-1
+// Schnorr carve-out was considered for v5+ coinbase but rejected as
+// unsound: the simpler "two independent Schnorr proofs" shape would not
+// bind the same x to both P = xG and I = x·Hp(P), letting a holder
+// forge fresh key images. Transparent shielding (coinbase included)
+// goes through v2 KeyInput with a legacy ring signature, so a
+// ConfidentialInput never needs ring size 1.
+//
+// CT_MAX_RING_SIZE in CryptoNoteConfig.h must stay ≤ 255 so a single
+// byte is enough to fit ring_size in the Fiat-Shamir transcript.
+static_assert(CryptoNote::parameters::CT_MAX_RING_SIZE <= 255,
+              "Triptych transcript writes ring_size as one byte");
 bool triptych_ring_size_supported(size_t ring_size) {
   return ring_size == 4 || ring_size == 8 || ring_size == 16;
 }
@@ -188,11 +192,10 @@ void sc_invert(unsigned char out[32], const unsigned char in[32]) {
 
 namespace {
 
-// n_bits = length of I_bits / A / B  (= log2(ring_size) for full Triptych,
-//          0 for the ring_size=1 Schnorr branch).
-// n_q    = length of Q_P / Q_M / Q_U (= n_bits for full Triptych, but
-//          1 for the Schnorr branch — the Q vectors carry the three
-//          Schnorr nonce commitments in that case).
+// n_bits = length of I_bits / A / B = log2(ring_size).
+// n_q    = length of Q_P / Q_M / Q_U. Equals n_bits today (ring_size-1
+//          carve-out was removed); kept as a separate parameter so the
+//          serialization width is explicit in every transcript line.
 void compute_challenge(
   const Hash& message,
   size_t ring_size,
@@ -422,14 +425,6 @@ bool triptych_sign(
     hash_to_ec(ring_pubkeys[k], U[k]);
   }
 
-  // Ring size 1 used to take a "Schnorr branch" here — that's gone. See
-  // triptych_ring_size_supported() above for the rationale; the prover
-  // would have to attach a DLEQ proof binding x in P=xG to x in I=x·Hp(P)
-  // for the key-image to be sound, and Phase B routes coinbase shielding
-  // through v2 KeyInput so ConfidentialInput ring size 1 is unused.
-  // triptych_ring_size_supported() rejects ring_size = 1 above so this
-  // branch is unreachable; left here as a defensive guard.
-
   // ── Step 4: bit-decomposition phase (standard GK) ─────────────────────
   // Allocate sig vectors and fresh randomness for bit commitments.
   sig.I_bits.resize(n);
@@ -618,18 +613,18 @@ bool triptych_verify(
   const TriptychSignature& sig)
 {
   if (!triptych_ring_size_supported(ring_size)) return false;
-  const size_t n   = log2_ring(ring_size);
-  // n_q = vector length of Q_P/Q_M/Q_U. For ring_size=1 the Q vectors
-  // carry three Schnorr nonce commitments (length 1) even though n=0.
-  const size_t n_q = (ring_size == 1) ? 1 : n;
+  const size_t n = log2_ring(ring_size);
+  // triptych_ring_size_supported() guarantees ring_size ∈ {4, 8, 16};
+  // every proof vector has exactly n entries. No Schnorr carve-out:
+  // ring-size-1 ConfidentialInputs are not a valid shape on the wire.
 
   // Shape check.
   if (sig.I_bits.size() != n) return false;
   if (sig.A.size()      != n) return false;
   if (sig.B.size()      != n) return false;
-  if (sig.Q_P.size()    != n_q) return false;
-  if (sig.Q_M.size()    != n_q) return false;
-  if (sig.Q_U.size()    != n_q) return false;
+  if (sig.Q_P.size()    != n) return false;
+  if (sig.Q_M.size()    != n) return false;
+  if (sig.Q_U.size()    != n) return false;
   if (sig.z.size()      != n) return false;
   if (sig.za.size()     != n) return false;
   if (sig.zb.size()     != n) return false;
@@ -659,7 +654,7 @@ bool triptych_verify(
   // Decode all proof points; each must be subgroup-valid (rejects torsion
   // attacks that could otherwise sneak forged components past identity).
   std::vector<ge_p3> I_bits_p3(n), A_p3(n), B_p3(n);
-  std::vector<ge_p3> Q_P_p3(n_q), Q_M_p3(n_q), Q_U_p3(n_q);
+  std::vector<ge_p3> Q_P_p3(n), Q_M_p3(n), Q_U_p3(n);
   for (size_t j = 0; j < n; ++j) {
     if (ge_frombytes_vartime(&I_bits_p3[j], reinterpret_cast<const unsigned char*>(&sig.I_bits[j])) != 0) return false;
     if (ge_frombytes_vartime(&A_p3[j],      reinterpret_cast<const unsigned char*>(&sig.A[j]))      != 0) return false;
@@ -669,7 +664,7 @@ bool triptych_verify(
     if (!subgroup_check_p3(A_p3[j]))      return false;
     if (!subgroup_check_p3(B_p3[j]))      return false;
   }
-  for (size_t m = 0; m < n_q; ++m) {
+  for (size_t m = 0; m < n; ++m) {
     if (ge_frombytes_vartime(&Q_P_p3[m], reinterpret_cast<const unsigned char*>(&sig.Q_P[m])) != 0) return false;
     if (ge_frombytes_vartime(&Q_M_p3[m], reinterpret_cast<const unsigned char*>(&sig.Q_M[m])) != 0) return false;
     if (ge_frombytes_vartime(&Q_U_p3[m], reinterpret_cast<const unsigned char*>(&sig.Q_U[m])) != 0) return false;
@@ -702,54 +697,6 @@ bool triptych_verify(
     ge_p1p1_to_p3(&M[k], &diff);
 
     hash_to_ec(ring_pubkeys[k], U[k]);
-  }
-
-  // ── Ring-size-1 (Schnorr) verifier branch ─────────────────────────────
-  //
-  //   (a)  f_P · G        =?= Q_P[0] + x_chal · P_0
-  //   (b)  f_M · G        =?= Q_M[0] + x_chal · M_0
-  //   (c)  f_U · Hp(P_0)  =?= Q_U[0] + x_chal · I
-  //
-  // Each equation is an independent Schnorr verification sharing one FS
-  // challenge. The "same x" binding for (a) and (c) is implicit via dlog
-  // hardness of I in base Hp(P_0).
-  if (ring_size == 1) {
-    EllipticCurveScalar x_chal;
-    compute_challenge(
-      message, ring_size, /*n_bits=*/0, /*n_q=*/1,
-      ring_pubkeys, ring_commits, pseudo_commit, key_image,
-      /*I_bits=*/nullptr, /*A=*/nullptr, /*B=*/nullptr,
-      Q_P_p3.data(), Q_M_p3.data(), Q_U_p3.data(),
-      x_chal);
-
-    // (a) f_P · G =?= Q_P[0] + x_chal · P_0
-    {
-      ge_p3 lhs, rhs, term;
-      ge_scalarmult_base(&lhs, sig.f_P.data);
-      if (!scalarmult_p3(&term, x_chal.data, &P[0])) return false;
-      point_add(&rhs, &Q_P_p3[0], &term);
-      if (!point_equal(lhs, rhs)) return false;
-    }
-
-    // (b) f_M · G =?= Q_M[0] + x_chal · M_0
-    {
-      ge_p3 lhs, rhs, term;
-      ge_scalarmult_base(&lhs, sig.f_M.data);
-      if (!scalarmult_p3(&term, x_chal.data, &M[0])) return false;
-      point_add(&rhs, &Q_M_p3[0], &term);
-      if (!point_equal(lhs, rhs)) return false;
-    }
-
-    // (c) f_U · Hp(P_0) =?= Q_U[0] + x_chal · I
-    {
-      ge_p3 lhs, rhs, term;
-      if (!scalarmult_p3(&lhs, sig.f_U.data, &U[0])) return false;
-      if (!scalarmult_p3(&term, x_chal.data, &I_p3)) return false;
-      point_add(&rhs, &Q_U_p3[0], &term);
-      if (!point_equal(lhs, rhs)) return false;
-    }
-
-    return true;
   }
 
   // Recompute the Fiat-Shamir challenge from the same canonical buffer
@@ -904,9 +851,9 @@ void tx_sc_addmul(unsigned char dst[32],
 // equation G and H coefficients (consolidated separately so the batched
 // dispatch can collapse them across the whole batch).
 //
-// Equation count:
-//   ring_size = 1 (Schnorr branch)        : 3 equations
-//   ring_size = N ∈ {4, 8, 16}, n=log2(N) : 2n + 3 equations
+// Equation count: for ring_size = N ∈ {4, 8, 16} with n = log2(N),
+// each proof asserts 2n bit-commitment equations plus 3 ring equations
+// (P, M, U), so 2n + 3 total.
 struct TriptychClaim {
   std::vector<std::vector<MSMTerm>>  equations;
   std::vector<EllipticCurveScalar>   gG;
@@ -932,19 +879,18 @@ bool triptych_collect_claims(
   ge_p3& H_p3_out)
 {
   if (!triptych_ring_size_supported(ring_size)) return false;
-  const size_t n   = log2_ring(ring_size);
-  const size_t n_q = (ring_size == 1) ? 1 : n;
+  const size_t n = log2_ring(ring_size);
 
   // Shape and scalar-range checks (same as triptych_verify).
-  if (sig.I_bits.size() != n)   return false;
-  if (sig.A.size()      != n)   return false;
-  if (sig.B.size()      != n)   return false;
-  if (sig.Q_P.size()    != n_q) return false;
-  if (sig.Q_M.size()    != n_q) return false;
-  if (sig.Q_U.size()    != n_q) return false;
-  if (sig.z.size()      != n)   return false;
-  if (sig.za.size()     != n)   return false;
-  if (sig.zb.size()     != n)   return false;
+  if (sig.I_bits.size() != n) return false;
+  if (sig.A.size()      != n) return false;
+  if (sig.B.size()      != n) return false;
+  if (sig.Q_P.size()    != n) return false;
+  if (sig.Q_M.size()    != n) return false;
+  if (sig.Q_U.size()    != n) return false;
+  if (sig.z.size()      != n) return false;
+  if (sig.za.size()     != n) return false;
+  if (sig.zb.size()     != n) return false;
 
   if (sc_check(sig.f_P.data) != 0) return false;
   if (sc_check(sig.f_M.data) != 0) return false;
@@ -967,7 +913,7 @@ bool triptych_collect_claims(
 
   // Decode all proof points; subgroup-check each.
   std::vector<ge_p3> I_bits_p3(n), A_p3(n), B_p3(n);
-  std::vector<ge_p3> Q_P_p3(n_q), Q_M_p3(n_q), Q_U_p3(n_q);
+  std::vector<ge_p3> Q_P_p3(n), Q_M_p3(n), Q_U_p3(n);
   for (size_t j = 0; j < n; ++j) {
     if (ge_frombytes_vartime(&I_bits_p3[j], reinterpret_cast<const unsigned char*>(&sig.I_bits[j])) != 0) return false;
     if (ge_frombytes_vartime(&A_p3[j],      reinterpret_cast<const unsigned char*>(&sig.A[j]))      != 0) return false;
@@ -976,7 +922,7 @@ bool triptych_collect_claims(
     if (!subgroup_check_p3(A_p3[j]))      return false;
     if (!subgroup_check_p3(B_p3[j]))      return false;
   }
-  for (size_t m = 0; m < n_q; ++m) {
+  for (size_t m = 0; m < n; ++m) {
     if (ge_frombytes_vartime(&Q_P_p3[m], reinterpret_cast<const unsigned char*>(&sig.Q_P[m])) != 0) return false;
     if (ge_frombytes_vartime(&Q_M_p3[m], reinterpret_cast<const unsigned char*>(&sig.Q_M[m])) != 0) return false;
     if (ge_frombytes_vartime(&Q_U_p3[m], reinterpret_cast<const unsigned char*>(&sig.Q_U[m])) != 0) return false;
@@ -1011,7 +957,7 @@ bool triptych_collect_claims(
   // Recompute the Fiat-Shamir challenge.
   EllipticCurveScalar x_chal;
   compute_challenge(
-    message, ring_size, /*n_bits=*/n, /*n_q=*/n_q,
+    message, ring_size, /*n_bits=*/n, /*n_q=*/n,
     ring_pubkeys, ring_commits, pseudo_commit, key_image,
     I_bits_p3.data(), A_p3.data(), B_p3.data(),
     Q_P_p3.data(), Q_M_p3.data(), Q_U_p3.data(),
@@ -1022,12 +968,9 @@ bool triptych_collect_claims(
       reinterpret_cast<const unsigned char*>(&pedersen_get_H())) != 0)
     return false;
 
-  // Build equation lists. Ring size 1 is rejected by
-  // triptych_ring_size_supported() at the top of the function — its
-  // former Schnorr branch did not bind the same x in P = xG and
-  // I = x·Hp(P), see commit history for the audit finding.
-
-  // Full Triptych branch (n ≥ 2, ring_size ∈ {4, 8, 16}).
+  // Build equation lists. ring_size ∈ {4, 8, 16}; the prior ring-size-1
+  // Schnorr carve-out was unsound (did not bind the same x in P = xG and
+  // I = x·Hp(P)) and has been removed.
   const size_t n_eq = 2 * n + 3;
   claim.equations.assign(n_eq, {});
   claim.gG.assign(n_eq, EllipticCurveScalar{});
@@ -1172,30 +1115,94 @@ bool triptych_verify_batch(
     }
   }
 
-  // Derive α per equation deterministically from a Fiat-Shamir transcript
-  // bound to the tx-prefix-binding `message` plus the proof / equation
-  // indices and a domain-separation tag. Soundness still holds under the
-  // standard batched-MSM argument because the prover commits to every
-  // sig (and hence every claim equation) before α is derivable; the
-  // prover cannot regrind α to match a broken equation. Using a
-  // deterministic derivation instead of random_scalar keeps consensus
-  // verification reproducible across nodes — two nodes never see
-  // different α-coefficient draws for the same tx.
+  // Derive α per equation from a Fiat-Shamir transcript that commits to
+  // EVERY proof in the batch (key images, pseudo commitments, ring
+  // contents, and every byte of every TriptychSignature) — not just the
+  // tx prefix hash. The α must be unpredictable to the prover at the
+  // time the proofs are constructed; if α depended only on `message`
+  // (which is the tx prefix hash, fixed BEFORE the proofs are written),
+  // a prover could pre-compute α and then craft proofs whose individual
+  // equations cancel out under the known α-weighting, passing batched
+  // verification while failing per-input verification. Hashing every
+  // proof byte into the transcript closes that gap: each α now depends
+  // on the proofs themselves, so any change in a single proof flips
+  // every α and forces all 2n+3 per-proof equations to hold
+  // independently (Schwartz-Zippel false-accept ≤ 1/L ≈ 2⁻²⁵²).
+  //
+  // Determinism is preserved (consensus nodes derive the same α for the
+  // same tx) because the input bytes are fully fixed once the
+  // transaction body is on the wire. Indices are written big-endian so
+  // the derivation is portable across host endianness.
+  Hash batch_transcript;
+  {
+    static constexpr char kTranscriptDomain[] = "TriptychBatchTranscriptV2";
+    constexpr size_t kTranscriptDomainLen = sizeof(kTranscriptDomain) - 1;
+
+    // Pre-compute the buffer size so we hash everything in one pass.
+    size_t buf_size = kTranscriptDomainLen + 32 /*message*/;
+    for (size_t i = 0; i < count; ++i) {
+      const size_t rs = ring_sizes[i];
+      buf_size += 1 /*ring_size byte*/ + 32 /*key image*/ + 32 /*pseudo*/;
+      buf_size += rs * (32 /*pubkey*/ + 32 /*commit*/);
+      const auto& s = sigs[i];
+      buf_size += (s.I_bits.size() + s.A.size() + s.B.size() +
+                   s.Q_P.size()  + s.Q_M.size() + s.Q_U.size()) * 32;
+      buf_size += (s.z.size() + s.za.size() + s.zb.size()) * 32;
+      buf_size += 3 * 32; // f_P, f_M, f_U
+    }
+
+    std::vector<unsigned char> buf(buf_size);
+    unsigned char* ptr = buf.data();
+    std::memcpy(ptr, kTranscriptDomain, kTranscriptDomainLen);
+    ptr += kTranscriptDomainLen;
+    std::memcpy(ptr, message.data, 32);
+    ptr += 32;
+    for (size_t i = 0; i < count; ++i) {
+      const size_t rs = ring_sizes[i];
+      *ptr++ = static_cast<unsigned char>(rs);
+      std::memcpy(ptr, &key_images[i], 32);  ptr += 32;
+      std::memcpy(ptr, &pseudo_commits[i], 32); ptr += 32;
+      for (size_t k = 0; k < rs; ++k) {
+        std::memcpy(ptr, &ring_pubkeys[i][k], 32); ptr += 32;
+        std::memcpy(ptr, &ring_commits[i][k], 32); ptr += 32;
+      }
+      const auto& s = sigs[i];
+      auto copyPts = [&](const std::vector<EllipticCurvePoint>& v) {
+        for (const auto& p : v) { std::memcpy(ptr, &p, 32); ptr += 32; }
+      };
+      auto copyScs = [&](const std::vector<EllipticCurveScalar>& v) {
+        for (const auto& sc : v) { std::memcpy(ptr, &sc, 32); ptr += 32; }
+      };
+      copyPts(s.I_bits); copyPts(s.A); copyPts(s.B);
+      copyPts(s.Q_P);    copyPts(s.Q_M); copyPts(s.Q_U);
+      copyScs(s.z); copyScs(s.za); copyScs(s.zb);
+      std::memcpy(ptr, &s.f_P, 32); ptr += 32;
+      std::memcpy(ptr, &s.f_M, 32); ptr += 32;
+      std::memcpy(ptr, &s.f_U, 32); ptr += 32;
+    }
+    assert(ptr == buf.data() + buf_size);
+    cn_fast_hash(buf.data(), buf_size, batch_transcript);
+  }
+
   size_t total_eqs = 0;
   for (const auto& c : claims) total_eqs += c.equations.size();
   std::vector<EllipticCurveScalar> alpha(total_eqs);
   {
     size_t idx = 0;
-    static constexpr char kBatchDomain[16] = "TriptychBatchV1";
+    static constexpr char kAlphaDomain[] = "TriptychBatchAlphaV2";
+    constexpr size_t kAlphaDomainLen = sizeof(kAlphaDomain) - 1;
     for (size_t i = 0; i < count; ++i) {
       for (size_t e = 0; e < claims[i].equations.size(); ++e) {
-        unsigned char buf[32 + 8 + 8 + sizeof(kBatchDomain)];
-        std::memcpy(buf, message.data, 32);
-        uint64_t pidx = static_cast<uint64_t>(i);
-        uint64_t eidx = static_cast<uint64_t>(e);
-        std::memcpy(buf + 32, &pidx, 8);
-        std::memcpy(buf + 40, &eidx, 8);
-        std::memcpy(buf + 48, kBatchDomain, sizeof(kBatchDomain));
+        unsigned char buf[32 + 8 + 8 + kAlphaDomainLen];
+        std::memcpy(buf, batch_transcript.data, 32);
+        // Big-endian indices: same bytes on every host architecture.
+        const uint64_t pidx = static_cast<uint64_t>(i);
+        const uint64_t eidx = static_cast<uint64_t>(e);
+        for (int b = 0; b < 8; ++b) {
+          buf[32 + b] = static_cast<unsigned char>((pidx >> (56 - b * 8)) & 0xff);
+          buf[40 + b] = static_cast<unsigned char>((eidx >> (56 - b * 8)) & 0xff);
+        }
+        std::memcpy(buf + 48, kAlphaDomain, kAlphaDomainLen);
         Hash h;
         cn_fast_hash(buf, sizeof(buf), h);
         std::memcpy(alpha[idx].data, h.data, 32);
