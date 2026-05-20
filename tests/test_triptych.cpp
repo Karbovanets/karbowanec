@@ -3,7 +3,10 @@
 // Coverage:
 //   - sign/verify round-trip across every supported ring size (4, 8, 16)
 //     and every true-index slot
-//   - unsupported ring sizes (3, 5, 7, 9, 12, 32) rejected up front
+//   - unsupported ring sizes (1, 2, 3, 5, 7, 9, 12, 32) rejected up front
+//     (ring-size-1 Schnorr carve-out is intentionally not supported — the
+//     simpler two-Schnorr shape would not bind the same x to both P = xG
+//     and I = x·Hp(P), letting a holder forge fresh key images)
 //   - rejection of: wrong message, wrong pseudo-commitment, wrong key
 //     image, tampered scalar/point in every component of the proof
 //   - hidden-inflation attempt (different amount in real vs pseudo) is
@@ -610,16 +613,15 @@ static void test_batch_single_per_size(size_t ring_size) {
 }
 
 static void test_batch_mixed_ring_sizes() {
-  TEST("Batch: mixed ring sizes (1, 4, 8, 16) in one batch");
+  TEST("Batch: mixed ring sizes (4, 8, 16) in one batch");
 
   Crypto::Hash msg;
   Random::randomBytes(32, msg.data);
 
-  std::vector<batched::BatchInput> batch(4);
-  if (!batched::build_signed_input(1,  0, 100, msg, batch[0])) { FAIL("build 1"); return; }
-  if (!batched::build_signed_input(4,  2, 200, msg, batch[1])) { FAIL("build 4"); return; }
-  if (!batched::build_signed_input(8,  5, 300, msg, batch[2])) { FAIL("build 8"); return; }
-  if (!batched::build_signed_input(16,11, 400, msg, batch[3])) { FAIL("build 16"); return; }
+  std::vector<batched::BatchInput> batch(3);
+  if (!batched::build_signed_input(4,  2, 200, msg, batch[0])) { FAIL("build 4"); return; }
+  if (!batched::build_signed_input(8,  5, 300, msg, batch[1])) { FAIL("build 8"); return; }
+  if (!batched::build_signed_input(16,11, 400, msg, batch[2])) { FAIL("build 16"); return; }
 
   if (!batched::verify_batch(msg, batch)) { FAIL("verify"); return; }
   PASS();
@@ -647,12 +649,12 @@ static void test_batch_one_tampered_response() {
   Crypto::Hash msg;
   Random::randomBytes(32, msg.data);
 
-  // 4 valid inputs at various ring sizes.
+  // 4 valid inputs at various supported ring sizes.
   std::vector<batched::BatchInput> batch(4);
   if (!batched::build_signed_input(4,  0, 10, msg, batch[0])) { FAIL("build 0"); return; }
   if (!batched::build_signed_input(8,  3, 20, msg, batch[1])) { FAIL("build 1"); return; }
   if (!batched::build_signed_input(16, 7, 30, msg, batch[2])) { FAIL("build 2"); return; }
-  if (!batched::build_signed_input(1,  0, 40, msg, batch[3])) { FAIL("build 3"); return; }
+  if (!batched::build_signed_input(4,  1, 40, msg, batch[3])) { FAIL("build 3"); return; }
 
   // Tamper one input's f_P.
   batch[1].sig.f_P.data[0] ^= 1;
@@ -730,7 +732,6 @@ int main() {
   printf("==========================\n\n");
 
   printf("Sign/verify (all supported ring sizes × all true indices):\n");
-  test_sign_verify(1, 0);   // Schnorr branch (v5+ coinbase carve-out)
   for (size_t N : {size_t(4), size_t(8), size_t(16)}) {
     for (size_t i = 0; i < N; ++i) {
       test_sign_verify(N, i);
@@ -738,7 +739,8 @@ int main() {
   }
 
   printf("\nShape: unsupported ring sizes:\n");
-  test_unsupported_ring_size(2);  // n=1 reserved as invalid (see serializer)
+  test_unsupported_ring_size(1);  // ring-size-1 Schnorr carve-out was rejected as unsound
+  test_unsupported_ring_size(2);
   test_unsupported_ring_size(3);
   test_unsupported_ring_size(5);
   test_unsupported_ring_size(6);
@@ -769,7 +771,6 @@ int main() {
 
   printf("\nBatched verifier:\n");
   test_batch_empty();
-  test_batch_single_per_size(1);
   test_batch_single_per_size(4);
   test_batch_single_per_size(8);
   test_batch_single_per_size(16);

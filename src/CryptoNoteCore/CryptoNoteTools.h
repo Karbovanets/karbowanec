@@ -155,5 +155,27 @@ Crypto::Hash getObjectHash(const T& object) {
 uint64_t getInputAmount(const Transaction& transaction);
 std::vector<uint64_t> getInputsAmounts(const Transaction& transaction);
 uint64_t getOutputAmount(const Transaction& transaction);
+
+// Overflow-checked variants of the above. Return false (and leave `out`
+// undefined) if the uint64_t accumulator would wrap. Necessary on the CT
+// pool accounting path: MONEY_SUPPLY (1e19) exceeds INT64_MAX, so a
+// malicious transaction with large plain inputs can cause both uint64_t
+// summation wraparound and signed-int64 sign flips. Callers on the
+// consensus path MUST use the checked variants and reject on overflow.
+bool getInputAmountChecked(const Transaction& transaction, uint64_t& out);
+bool getOutputAmountChecked(const Transaction& transaction, uint64_t& out);
+
+// Compute the visible-value delta a CT-aware transaction applies to the
+// confidential pool in fully overflow-safe uint64_t arithmetic:
+//   delta = plain_in - (plain_out + fee)
+// where plain_in sums KeyInput.amount and plain_out sums output.amount
+// (ConfidentialOutput contributes 0 because its .amount is masked to 0).
+// On success exactly one of `inflow`/`outflow` is non-zero (both 0 for
+// delta == 0). Returns false on any uint64_t overflow in summation —
+// caller MUST reject the transaction in that case rather than silently
+// truncating to a wrapped value.
+bool computeCtPoolDelta(const Transaction& transaction, uint64_t fee,
+                        uint64_t& inflow, uint64_t& outflow);
+
 void decomposeAmount(uint64_t amount, uint64_t dustThreshold, std::vector<uint64_t>& decomposedAmounts);
 }

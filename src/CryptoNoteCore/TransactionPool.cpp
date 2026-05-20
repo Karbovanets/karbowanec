@@ -499,22 +499,37 @@ namespace CryptoNote {
       // delta = plain_in - plain_out - fee). If including this tx would drive
       // the running pool below zero, skip it — a later cheaper tx may still
       // fit, so we don't abort the whole template build.
-      const uint64_t plain_in  = getInputAmount(txd.tx);
-      const uint64_t plain_out = getOutputAmount(txd.tx);
-      const uint64_t tx_fee    = (txd.tx.version == TRANSACTION_VERSION_CT)
-                                 ? txd.tx.fee
-                                 : (plain_in - plain_out);
-      const int64_t  ct_delta  = static_cast<int64_t>(plain_in)
-                                - static_cast<int64_t>(plain_out)
-                                - static_cast<int64_t>(tx_fee);
-      if (ct_delta < 0) {
-        const uint64_t outflow = static_cast<uint64_t>(-ct_delta);
-        if (outflow > running_ct_pool) {
+      //
+      // computeCtPoolDelta sums in checked uint64_t. If the sums overflow
+      // skip the tx — consensus will reject it anyway, no point putting it
+      // in the template. Same direction-flip protection as the consensus
+      // path: a naive int64_t cast would misclassify amounts above
+      // INT64_MAX.
+      uint64_t ct_inflow = 0;
+      uint64_t ct_outflow = 0;
+      {
+        uint64_t plain_in = 0;
+        uint64_t plain_out = 0;
+        if (!getInputAmountChecked(txd.tx, plain_in) ||
+            !getOutputAmountChecked(txd.tx, plain_out)) {
           logger(DEBUGGING) << "Transaction " << txd.id
-                            << " not included: would underflow CT pool"
-                            << " (outflow=" << outflow << ", pool=" << running_ct_pool << ")";
+                            << " not included: plain in/out sum overflow";
           continue;
         }
+        const uint64_t tx_fee = (txd.tx.version == TRANSACTION_VERSION_CT)
+                                ? txd.tx.fee
+                                : (plain_in - plain_out);
+        if (!computeCtPoolDelta(txd.tx, tx_fee, ct_inflow, ct_outflow)) {
+          logger(DEBUGGING) << "Transaction " << txd.id
+                            << " not included: CT pool delta overflow";
+          continue;
+        }
+      }
+      if (ct_outflow > 0 && ct_outflow > running_ct_pool) {
+        logger(DEBUGGING) << "Transaction " << txd.id
+                          << " not included: would underflow CT pool"
+                          << " (outflow=" << ct_outflow << ", pool=" << running_ct_pool << ")";
+        continue;
       }
 
       TransactionCheckInfo checkInfo(txd);
@@ -538,10 +553,10 @@ namespace CryptoNote {
         total_size += txd.blobSize;
         fee += txd.fee;
         // Commit the CT pool delta only once the tx actually lands in the template.
-        if (ct_delta < 0) {
-          running_ct_pool -= static_cast<uint64_t>(-ct_delta);
+        if (ct_outflow > 0) {
+          running_ct_pool -= ct_outflow;
         } else {
-          running_ct_pool += static_cast<uint64_t>(ct_delta);
+          running_ct_pool += ct_inflow;
         }
         logger(DEBUGGING) << "Transaction " << txd.id << " included to block template";
       } else {

@@ -481,11 +481,24 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
 
     // Validate proof body counts match input/output counts. CT v2 supports
     // mixed inputs: per-input authorization is stored as a variant in
-    // tx.signatures[i] (size == inputs.size(), enforced by the deserializer):
+    // tx.signatures[i] (size == inputs.size()):
     //   KeyInput          → std::vector<Crypto::Signature>  (legacy ring sig)
     //   ConfidentialInput → CTInputSignature                (Triptych proof)
     // The variant alternative is implicit from inputs[i].type() — there is
     // no "empty Triptych slot" sentinel any more.
+    //
+    // tx.signatures.size() == tx.inputs.size() is enforced by the
+    // deserializer when a tx comes off the wire, but check_tx_semantic also
+    // runs on internally-constructed transactions (e.g. block-template
+    // assembly, RPC paths, test fixtures) that never went through
+    // CryptoNoteSerialization. Validate explicitly so the per-input loop
+    // below cannot index past tx.signatures.
+    if (tx.signatures.size() != tx.inputs.size()) {
+      logger(ERROR) << "CT tx signatures count " << tx.signatures.size()
+                    << " != inputs count " << tx.inputs.size()
+                    << ", rejected for tx id= " << Common::podToHex(txHash);
+      return false;
+    }
     if (tx.ctProofs.size() != tx.outputs.size()) {
       logger(ERROR) << "CT tx ctProofs count mismatch, rejected for tx id= " << Common::podToHex(txHash);
       return false;

@@ -40,10 +40,19 @@
 // observed proof. Routing through the platform CSPRNG removes that
 // failure mode.
 //
-// `generator()` still returns an std::mt19937, kept around solely for
-// non-cryptographic uses (e.g. std::shuffle of output decoy order). It
-// is seeded by drawing the full 624-word state from secure_random_bytes
-// so the shuffle remains unpredictable to outside observers.
+// `generator()` returns a freshly-seeded std::mt19937 on EVERY call (used
+// for non-cryptographic shuffles — output decoy order, CT mixing bucket
+// selection, peer-list rotation, etc.). The previous "static thread_local
+// returned by value" idiom looked like a shared PRNG but was a footgun: it
+// returned a fresh copy each call, so callers that did
+//   `std::mt19937 rng = Random::generator(); std::shuffle(..., rng);`
+// were always reading from the same starting state and the static stored
+// generator was never advanced. That made the shuffle output predictable
+// to anyone who could observe one prior shuffle from the same thread —
+// a privacy/fingerprinting issue for output ordering and decoy bucket
+// choices. Reseeding from the OS CSPRNG each call costs ~2.5 KB of OS
+// entropy per call but is invoked at most once per wallet send / network
+// event, so the cost is negligible.
 
 namespace Random
 {
@@ -98,19 +107,23 @@ namespace Random
     }
 
     /**
-     * Obtain the generator used internally. Helpful for passing to functions
-     * like std::shuffle. The generator is seeded once per thread by drawing
-     * its entire internal state from the OS CSPRNG, so the resulting shuffle
-     * sequence cannot be predicted by an outside observer.
+     * Obtain a freshly-seeded generator for passing to functions like
+     * std::shuffle. Each call draws a full 624-word MT state from the OS
+     * CSPRNG, so consecutive calls — including across short-lived helpers
+     * that copy the returned value into a local — produce independent
+     * sequences. Callers MUST treat this as a hot factory and not cache the
+     * result across operations they want to remain unlinkable.
+     *
+     * Returning a fresh instance every call is intentional: passing the
+     * result by value to std::shuffle or storing it in a local would have
+     * silently shared a starting state across callers under the old
+     * "static thread_local returned by value" idiom.
      */
     inline std::mt19937 generator()
     {
-        static thread_local std::mt19937 gen = []() {
-            std::array<uint32_t, std::mt19937::state_size> state{};
-            secure_random_bytes(state.data(), state.size() * sizeof(uint32_t));
-            std::seed_seq seq(state.begin(), state.end());
-            return std::mt19937(seq);
-        }();
-        return gen;
+        std::array<uint32_t, std::mt19937::state_size> state{};
+        secure_random_bytes(state.data(), state.size() * sizeof(uint32_t));
+        std::seed_seq seq(state.begin(), state.end());
+        return std::mt19937(seq);
     }
 }

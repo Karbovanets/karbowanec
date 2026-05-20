@@ -836,12 +836,85 @@ bool gk_verify_batch_dispatch(const EllipticCurvePoint* commitments,
   }
   if (!haveH) return true;
 
-  // Sample fresh random α scalars (one per equation per proof = 13n total).
-  // Soundness: αs must be unpredictable to the prover. Drawn from
-  // crypto-grade RNG here; in any real failure case the verifier picks
-  // first, and a prover can't reach 2^252-style collision odds.
+  // Derive α deterministically from a Fiat-Shamir transcript that commits
+  // to EVERY commitment + proof byte in the batch. Consensus validation
+  // must be deterministic: two honest nodes verifying the same tx must
+  // accept or reject identically, otherwise a tx whose batched check
+  // accepts on one node and rejects on another would fork the chain.
+  // Random α (the previous implementation) gave a vanishing but non-zero
+  // false-accept probability that could disagree across nodes.
+  //
+  // The transcript hashes (in this order):
+  //   domain string || tx_hash || for each proof i:
+  //     commitment[i] (32 bytes) ||
+  //     I[0..5] A[0..5] B[0..5] Q[0..5]  (96 × 4 = 768 bytes / proof)  ||
+  //     z[0..5] za[0..5] zb[0..5] f      (32 × 19 = 608 bytes / proof)
+  //
+  // Then α[i*13 + e] = sc_reduce32(H(transcript || α-domain || pidx_BE || eidx_BE)).
+  // Big-endian indices keep the derivation portable across host endianness.
+  // Mirrors triptych_verify_batch's transcript shape.
+  Hash batch_transcript;
+  {
+    static constexpr char kTranscriptDomain[] = "GKBatchTranscriptV1";
+    constexpr size_t kTranscriptDomainLen = sizeof(kTranscriptDomain) - 1;
+    constexpr size_t kPointsPerProof  = 4 * GK_n;            // I,A,B,Q each ×GK_n
+    constexpr size_t kScalarsPerProof = 3 * GK_n + 1;        // z,za,zb each ×GK_n, plus f
+    constexpr size_t kPerProofBytes   = 32 /*commitment*/
+                                      + 32 * kPointsPerProof
+                                      + 32 * kScalarsPerProof;
+    std::vector<unsigned char> buf(kTranscriptDomainLen + 32 + n * kPerProofBytes);
+    unsigned char* ptr = buf.data();
+    std::memcpy(ptr, kTranscriptDomain, kTranscriptDomainLen);
+    ptr += kTranscriptDomainLen;
+    std::memcpy(ptr, tx_hash.data, 32);
+    ptr += 32;
+    for (size_t i = 0; i < n; ++i) {
+      std::memcpy(ptr, &commitments[i], 32); ptr += 32;
+      // Points: I, A, B, Q each of length GK_n. They live in ge_p3 form on
+      // the proof; serialize each via ge_p3_tobytes so the transcript binds
+      // to the canonical 32-byte encoding, not internal coordinates.
+      const GKProof& p = proofs[i];
+      auto writePoint = [&](const ge_p3& pt) {
+        ge_p3_tobytes(ptr, &pt);
+        ptr += 32;
+      };
+      for (size_t j = 0; j < GK_n; ++j) writePoint(p.I[j]);
+      for (size_t j = 0; j < GK_n; ++j) writePoint(p.A[j]);
+      for (size_t j = 0; j < GK_n; ++j) writePoint(p.B[j]);
+      for (size_t j = 0; j < GK_n; ++j) writePoint(p.Q[j]);
+      for (size_t j = 0; j < GK_n; ++j) { std::memcpy(ptr, p.z[j].data,  32); ptr += 32; }
+      for (size_t j = 0; j < GK_n; ++j) { std::memcpy(ptr, p.za[j].data, 32); ptr += 32; }
+      for (size_t j = 0; j < GK_n; ++j) { std::memcpy(ptr, p.zb[j].data, 32); ptr += 32; }
+      std::memcpy(ptr, p.f.data, 32); ptr += 32;
+    }
+    assert(ptr == buf.data() + buf.size());
+    cn_fast_hash(buf.data(), buf.size(), batch_transcript);
+  }
+
+  // Derive α deterministically for each (proof, equation) slot. Per-proof
+  // we have 13 equations: 6 bit-commit a + 6 bit-commit b + 1 main = 13.
   std::vector<EllipticCurveScalar> alpha(13 * n);
-  for (size_t i = 0; i < alpha.size(); ++i) random_scalar(alpha[i]);
+  {
+    static constexpr char kAlphaDomain[] = "GKBatchAlphaV1";
+    constexpr size_t kAlphaDomainLen = sizeof(kAlphaDomain) - 1;
+    unsigned char abuf[32 + 8 + 8 + kAlphaDomainLen];
+    std::memcpy(abuf + 48, kAlphaDomain, kAlphaDomainLen);
+    std::memcpy(abuf, batch_transcript.data, 32);
+    for (size_t i = 0; i < n; ++i) {
+      for (size_t e = 0; e < 13; ++e) {
+        const uint64_t pidx = static_cast<uint64_t>(i);
+        const uint64_t eidx = static_cast<uint64_t>(e);
+        for (int b = 0; b < 8; ++b) {
+          abuf[32 + b] = static_cast<unsigned char>((pidx >> (56 - b * 8)) & 0xff);
+          abuf[40 + b] = static_cast<unsigned char>((eidx >> (56 - b * 8)) & 0xff);
+        }
+        Hash h;
+        cn_fast_hash(abuf, sizeof(abuf), h);
+        std::memcpy(alpha[i * 13 + e].data, h.data, 32);
+        sc_reduce32(alpha[i * 13 + e].data);
+      }
+    }
+  }
 
   // Build the combined term list and combined G/H scalars across all
   // proofs and equations. Each equation e of proof i is scaled by

@@ -2335,13 +2335,23 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
     }
   }
 
-  // Verify proof/signature count matches input/output count
+  // Verify proof/signature count matches input/output count.
   if (tx.ctProofs.size() != tx.outputs.size()) {
     logger(ERROR) << "CT validation: ctProofs count " << tx.ctProofs.size()
                   << " != outputs count " << tx.outputs.size() << " in tx " << txHash;
     return false;
   }
-  // tx.signatures.size() == tx.inputs.size() is enforced by the deserializer.
+  // Wire deserialization enforces tx.signatures.size() == tx.inputs.size(),
+  // but this validator also runs on internally-constructed transactions
+  // (block-template assembly, RPC submitrawtransaction reconstruction, test
+  // fixtures, alt-block reorgs) that never went through CryptoNoteSerialization.
+  // Check explicitly so the per-input loop below cannot index past
+  // tx.signatures.
+  if (tx.signatures.size() != tx.inputs.size()) {
+    logger(ERROR) << "CT validation: signatures count " << tx.signatures.size()
+                  << " != inputs count " << tx.inputs.size() << " in tx " << txHash;
+    return false;
+  }
 
   // Step 3: For all outputs: verify GK denomination membership proofs in
   // one batched call. Reconstruct each on-wire CTOutputProof into a
@@ -2433,8 +2443,7 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
         logger(ERROR) << "CT validation: KeyInput " << i << " has empty ring in tx " << txHash;
         return false;
       }
-      if (tx.signatures.size() != tx.inputs.size() ||
-          !isKeyInputSig(tx.signatures[i]) ||
+      if (!isKeyInputSig(tx.signatures[i]) ||
           keyInputSig(tx.signatures[i]).size() != ki.outputIndexes.size()) {
         logger(ERROR) << "CT validation: KeyInput " << i << " ring sig count mismatch in tx " << txHash;
         return false;
@@ -2886,14 +2895,21 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
   //   currently-accumulated pool. Mempool chaining can produce a sequence
   //   whose combined outflow exceeds the pool — that is caught at block-push
   //   time. The per-tx check here is necessary but not sufficient.
+  //
+  // computeCtPoolDelta sums plain_in/plain_out in checked uint64_t and
+  // reports overflow rather than wrapping or sign-flipping when individual
+  // KeyInput amounts approach MONEY_SUPPLY (1e19 > INT64_MAX). A wrap would
+  // misclassify the direction of the delta and let a CT outflow look like
+  // an inflow.
   {
-    const uint64_t plain_in  = getInputAmount(tx);
-    const uint64_t plain_out = getOutputAmount(tx);
-    const int64_t  delta     = static_cast<int64_t>(plain_in)
-                              - static_cast<int64_t>(plain_out)
-                              - static_cast<int64_t>(tx.fee);
-    if (delta < 0) {
-      const uint64_t outflow = static_cast<uint64_t>(-delta);
+    uint64_t inflow = 0;
+    uint64_t outflow = 0;
+    if (!computeCtPoolDelta(tx, tx.fee, inflow, outflow)) {
+      logger(ERROR) << "CT validation: tx " << txHash
+                    << " has plain input/output sums that overflow uint64_t";
+      return false;
+    }
+    if (outflow > 0) {
       uint32_t h = m_db.getChainHeight();
       uint64_t pool = 0;
       if (h > 0) {
@@ -2940,7 +2956,14 @@ bool Blockchain::checkConfidentialTransactionStructure(const Transaction& tx,
                   << " != outputs count " << tx.outputs.size() << " in tx " << txHash;
     return false;
   }
-  // tx.signatures.size() == tx.inputs.size() is enforced by the deserializer.
+  // Explicit check: this validator can run on internally-constructed
+  // transactions (alt-block reorgs from checkpointed history, RPC
+  // resubmission) that didn't pass through CryptoNoteSerialization.
+  if (tx.signatures.size() != tx.inputs.size()) {
+    logger(ERROR) << "CT structural validation: signatures count " << tx.signatures.size()
+                  << " != inputs count " << tx.inputs.size() << " in tx " << txHash;
+    return false;
+  }
 
   for (size_t i = 0; i < tx.outputs.size(); ++i) {
     if (tx.outputs[i].target.type() != typeid(ConfidentialOutput)) {
@@ -3355,6 +3378,23 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
         m_batchCount = 0;
         return false;
       }
+      // Activation gate: CT transactions are illegal before CT_FORK_HEIGHT.
+      // Core::check_tx_syntax rejects them on the mempool/broadcast path, but
+      // consensus block acceptance must enforce this itself rather than trust
+      // outer admission code — alt-block reorg paths, RPC submitblock, and
+      // direct downloaded checkpoint blobs can deliver CT txs to pushBlock
+      // without going through check_tx_syntax first.
+      if (transactions[i].version == TRANSACTION_VERSION_CT &&
+          !m_currency.isConfidentialTransactionsActivated(newHeight)) {
+        logger(ERROR, BRIGHT_RED) << "Block " << blockHash << " at height " << newHeight
+          << " contains CT transaction " << tx_id
+          << " before CT activation height "
+          << CryptoNote::parameters::CT_FORK_HEIGHT << ", rejected";
+        bvc.m_verification_failed = true;
+        m_db.abortTxn();
+        m_batchCount = 0;
+        return false;
+      }
 
       size_t blob_size = toBinaryArray(block.transactions.back().tx).size();
       // CT transactions carry an explicit fee field; transparent txs derive fee from I/O difference.
@@ -3363,10 +3403,22 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
                      ? transactions[i].fee
                      : getInputAmount(curTx) - getOutputAmount(curTx);
 
-      // Under a confirmed checkpoint the block hash has already been verified by
-      // the network. Skip the expensive per-input validation (key-image domain
-      // check, output-key LMDB scans) - pushTransaction still records everything.
-      if (!inCheckpoint && !checkTransactionInputs(curTx, TxValidationContext::Block)) {
+      // Under a confirmed checkpoint the block hash has already been verified
+      // by the network — we trust the heavy crypto (Triptych, GK, balance
+      // kernel, ring resolution) was already validated by the originating
+      // peers. We still run structural sanity (version, shape, subgroup
+      // checks, key-image domain, double-spend) before indexing so nothing
+      // malformed gets written into our LMDB tables.
+      if (inCheckpoint) {
+        if (!checkTransactionInputs(curTx, TxValidationContext::CheckpointedBlock)) {
+          logger(INFO, BRIGHT_WHITE) << "Block " << blockHash
+            << " has at least one transaction with structurally invalid inputs: " << tx_id;
+          bvc.m_verification_failed = true;
+          m_db.abortTxn();
+          m_batchCount = 0;
+          return false;
+        }
+      } else if (!checkTransactionInputs(curTx, TxValidationContext::Block)) {
         logger(INFO, BRIGHT_WHITE) << "Block " << blockHash
           << " has at least one transaction with wrong inputs: " << tx_id;
         bvc.m_verification_failed = true;
@@ -3388,14 +3440,24 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
       //   CT    → CT:     delta == -fee (only the visible fee leaves)
       // Reject the block if any tx would underflow the pool — that would mean
       // visible value is being conjured from CT outputs that don't exist.
+      //
+      // computeCtPoolDelta computes inflow / outflow in checked uint64_t. A
+      // naive cast through int64_t would sign-flip on individual amounts
+      // approaching MONEY_SUPPLY (1e19 > INT64_MAX ≈ 9.22e18), causing a
+      // valid large shield to be classified as outflow. Reject overflow
+      // explicitly rather than letting it wrap or corrupt confidential_supply.
       {
-        const uint64_t plain_in  = getInputAmount(curTx);   // sums KeyInput.amount only
-        const uint64_t plain_out = getOutputAmount(curTx);  // ConfidentialOutput contributes 0
-        const int64_t  delta     = static_cast<int64_t>(plain_in)
-                                  - static_cast<int64_t>(plain_out)
-                                  - static_cast<int64_t>(fee);
-        if (delta < 0) {
-          const uint64_t outflow = static_cast<uint64_t>(-delta);
+        uint64_t inflow = 0;
+        uint64_t outflow = 0;
+        if (!computeCtPoolDelta(curTx, fee, inflow, outflow)) {
+          logger(ERROR, BRIGHT_RED) << "Block " << blockHash
+            << " tx " << tx_id << " plain input/output sums overflow uint64_t";
+          bvc.m_verification_failed = true;
+          m_db.abortTxn();
+          m_batchCount = 0;
+          return false;
+        }
+        if (outflow > 0) {
           if (outflow > confidential_supply) {
             logger(ERROR, BRIGHT_RED) << "Block " << blockHash
               << " tx " << tx_id << " would underflow CT pool liability"
@@ -3406,8 +3468,21 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
             return false;
           }
           confidential_supply -= outflow;
-        } else {
-          confidential_supply += static_cast<uint64_t>(delta);
+        } else if (inflow > 0) {
+          // Defensive cap: confidential_supply is uint64_t, and it represents
+          // visible value held in the CT pool. MONEY_SUPPLY bounds the total
+          // emission, so the running pool can never legally exceed it. Reject
+          // any addition that would push it past UINT64_MAX before it's stored.
+          if (confidential_supply > std::numeric_limits<uint64_t>::max() - inflow) {
+            logger(ERROR, BRIGHT_RED) << "Block " << blockHash
+              << " tx " << tx_id << " would overflow CT pool liability"
+              << " (inflow=" << inflow << ", pool=" << confidential_supply << ")";
+            bvc.m_verification_failed = true;
+            m_db.abortTxn();
+            m_batchCount = 0;
+            return false;
+          }
+          confidential_supply += inflow;
         }
       }
 
