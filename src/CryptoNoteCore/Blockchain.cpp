@@ -2126,6 +2126,26 @@ bool Blockchain::haveTransactionKeyImagesAsSpent(const Transaction& tx) {
 bool Blockchain::checkTransactionInputs(const Transaction& tx,
                                         TxValidationContext context,
                                         uint32_t* pmax_used_block_height) {
+  // Defense-in-depth empty-side rejection, applied to BOTH v1 plain and
+  // v2 CT transactions before the version dispatch. Core::check_tx_semantic
+  // already rejects empty inputs/outputs on the mempool-admission path, but
+  // pushBlock and alt-block reorg paths flow straight through here without
+  // going via check_tx_semantic. A zero-input tx would skip every per-input
+  // loop below and reduce the validation surface to whatever cryptographic
+  // checks still fire on inputs.size()==0 (Schnorr forgery on the CT kernel
+  // for v2; nothing on v1). A zero-output tx skips per-output checks and
+  // produces a degenerate "burn everything as fee" shape that consensus
+  // shouldn't accept. Reject up front so nothing downstream needs to defend
+  // against either degenerate shape, on either tx version.
+  if (tx.inputs.empty()) {
+    logger(ERROR) << "Transaction has no inputs in tx " << getObjectHash(tx);
+    return false;
+  }
+  if (tx.outputs.empty()) {
+    logger(ERROR) << "Transaction has no outputs in tx " << getObjectHash(tx);
+    return false;
+  }
+
   // Intra-tx key-image uniqueness. Two inputs (KeyInput or ConfidentialInput,
   // in any mix) sharing a key image would double-spend within a single tx.
   // Core::check_tx_inputs_keyimages_diff catches this on the mempool path
