@@ -55,8 +55,12 @@ bool get_aux_block_header_hash(const Block& b, Crypto::Hash& res);
 bool get_block_hash(const Block& b, Crypto::Hash& res);
 Crypto::Hash get_block_hash(const Block& b);
 bool get_block_longhash(Crypto::cn_context &context, const Block& b, Crypto::Hash& res);
+// Both return false on uint64_t overflow when summing input/output amounts.
+// Callers on the consensus / mempool-admission path MUST treat false as a
+// hard reject — see CryptoNoteFormatUtils.cpp for why fail-fast is required
+// before check_tx_semantic gets a chance to run check_money_overflow.
 bool get_inputs_money_amount(const Transaction& tx, uint64_t& money);
-uint64_t get_outs_money_amount(const Transaction& tx);
+bool get_outs_money_amount(const Transaction& tx, uint64_t& money);
 bool check_inputs_types_supported(const TransactionPrefix& tx);
 bool check_outs_valid(const TransactionPrefix& tx, std::string* error = 0);
 
@@ -65,6 +69,11 @@ bool check_outs_overflow(const TransactionPrefix& tx);
 bool check_inputs_overflow(const TransactionPrefix& tx);
 uint32_t get_block_height(const Block& b);
 std::vector<uint32_t> relative_output_offsets_to_absolute(const std::vector<uint32_t>& off);
+// Overload that detects uint32_t overflow on the prefix-sum of delta-encoded
+// offsets. Returns false (and leaves `out` partially populated) on wrap.
+// Consensus-path callers MUST use this variant.
+bool relative_output_offsets_to_absolute(const std::vector<uint32_t>& off,
+                                         std::vector<uint32_t>& out);
 std::vector<uint32_t> absolute_output_offsets_to_relative(const std::vector<uint32_t>& off);
 
 

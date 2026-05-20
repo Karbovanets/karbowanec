@@ -365,12 +365,18 @@ bool Core::check_tx_fee(const Transaction& tx, const Crypto::Hash& txHash, size_
   }
 
   uint64_t inputs_amount = 0;
-  if (!get_inputs_money_amount(tx, inputs_amount)) {
+  uint64_t outputs_amount = 0;
+  // check_tx_fee runs before check_tx_semantic on the handleIncomingTransaction
+  // path, so check_money_overflow has not validated the sums yet. Both helpers
+  // return false on uint64_t overflow — fail the tx fast so the wrapped fee
+  // below can't slip past the policy check.
+  if (!get_inputs_money_amount(tx, inputs_amount) ||
+      !get_outs_money_amount(tx, outputs_amount)) {
+    logger(DEBUGGING) << "tx amounts overflow uint64_t, rejected for tx id= "
+                      << Common::podToHex(txHash);
     tvc.m_verification_failed = true;
     return false;
   }
-
-  uint64_t outputs_amount = get_outs_money_amount(tx);
 
   if (outputs_amount > inputs_amount) {
     logger(DEBUGGING) << "transaction use more money then it has: use " << m_currency.formatAmount(outputs_amount) <<
@@ -635,9 +641,17 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
   }
 
   if (tx.version != CryptoNote::TRANSACTION_VERSION_CT) {
+    // check_money_overflow above already validated both sums fit in uint64_t,
+    // so these calls cannot return false here. Still propagate the bool so
+    // a future call-order change cannot silently introduce a wrapped sum.
     uint64_t amount_in = 0;
-    get_inputs_money_amount(tx, amount_in);
-    uint64_t amount_out = get_outs_money_amount(tx);
+    uint64_t amount_out = 0;
+    if (!get_inputs_money_amount(tx, amount_in) ||
+        !get_outs_money_amount(tx, amount_out)) {
+      logger(ERROR) << "tx amounts overflow uint64_t, rejected for tx id= "
+                    << Common::podToHex(txHash);
+      return false;
+    }
 
     if (amount_in < amount_out) {
       logger(ERROR) << "tx with wrong amounts: ins " << amount_in << ", outs " << amount_out << ", rejected for tx id= " << Common::podToHex(txHash);

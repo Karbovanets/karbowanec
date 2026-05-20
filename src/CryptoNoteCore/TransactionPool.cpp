@@ -150,12 +150,13 @@ namespace CryptoNote {
       fee = tx.fee;
     } else {
       uint64_t inputs_amount = 0;
-      if (!get_inputs_money_amount(tx, inputs_amount)) {
+      uint64_t outputs_amount = 0;
+      if (!get_inputs_money_amount(tx, inputs_amount) ||
+          !get_outs_money_amount(tx, outputs_amount)) {
+        logger(INFO) << "tx amounts overflow uint64_t, rejected: " << id;
         tvc.m_verification_failed = true;
         return false;
       }
-
-      uint64_t outputs_amount = get_outs_money_amount(tx);
 
       if (outputs_amount > inputs_amount) {
         logger(INFO) << "transaction use more money then it has: use " << m_currency.formatAmount(outputs_amount) <<
@@ -443,7 +444,12 @@ namespace CryptoNote {
         << "last_failed_id: " << txd.lastFailedBlock.id << std::endl
         << "amount_out: " << (txd.tx.version == TRANSACTION_VERSION_CT
                               ? std::string("hidden")
-                              : m_currency.formatAmount(get_outs_money_amount(txd.tx))) << std::endl
+                              : [&]() {
+                                  uint64_t out = 0;
+                                  return get_outs_money_amount(txd.tx, out)
+                                         ? m_currency.formatAmount(out)
+                                         : std::string("overflow");
+                                }()) << std::endl
         << "fee_atomic_units: " << txd.fee << std::endl
         << "received_timestamp: " << txd.receiveTime << std::endl
         << "received: " << std::ctime(&txd.receiveTime) << std::endl;

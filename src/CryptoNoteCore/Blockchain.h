@@ -484,8 +484,13 @@ namespace CryptoNote {
     if (outputCount == 0 || tx_in_to_key.outputIndexes.empty())
       return false;
 
-    std::vector<uint32_t> absolute_offsets =
-      relative_output_offsets_to_absolute(tx_in_to_key.outputIndexes);
+    std::vector<uint32_t> absolute_offsets;
+    if (!relative_output_offsets_to_absolute(tx_in_to_key.outputIndexes, absolute_offsets)) {
+      logger(Logging::ERROR, Logging::BRIGHT_RED)
+        << "Relative output offsets overflow uint32_t in transaction input"
+        << " for amount=" << tx_in_to_key.amount;
+      return false;
+    }
 
     size_t count = 0;
     for (uint32_t i : absolute_offsets) {

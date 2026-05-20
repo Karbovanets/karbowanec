@@ -69,14 +69,33 @@ bool gk_verify(const EllipticCurvePoint& C,
 // proof linear-combination checks into a single multi-scalar multiplication
 // (Pippenger windowed bucket method, c=4) with random-coefficient batching.
 //
-// Soundness: verifier samples fresh random α_i / β_i per proof and per
-// equation, so a prover can't bias the collapsed check to mask a bad proof.
-// If any proof is invalid the batched check fails with overwhelming
-// probability (~2^-252 collision on the randoms).
+// Soundness: α scalars are derived deterministically from a Fiat-Shamir
+// transcript that commits to every commitment + proof byte in the batch
+// (domain "GKBatchTranscriptV1" — see gk_verify_batch_dispatch). Consensus
+// validation MUST be deterministic: two honest nodes verifying the same
+// transaction must reach the same accept/reject verdict, otherwise a single
+// tx could split the network. Sampling random α at verify time would give
+// a vanishing but non-zero false-accept probability that could disagree
+// across nodes. Mirrors triptych_verify_batch's transcript shape.
+//
+// Independence from the Triptych spend proof: separate domain separators
+// ("GKBatchTranscriptV1" / "Triptych-KarboCT-v1"), separate per-proof
+// challenges, separate batched α derivations. The only shared input is
+// tx_hash (the tx prefix hash), which both proofs commit to as their
+// transaction-identity binding — without that shared anchor an attacker
+// could swap a valid Triptych from tx A with a valid GK from tx B and
+// present a Frankenstein transaction. DO NOT collapse the two transcripts
+// or share challenges; the proof systems must remain algebraically
+// independent so a soundness break in one cannot leverage the other.
 //
 // The original gk_verify is unchanged and still callable; the validator uses
 // the batched path for speed, and the per-proof path remains available for
 // diagnostic fall-back when a batch fails (to pinpoint which output broke).
+//
+// Timing side channel during proving (not verification): gk_prove() branches
+// on the bits of `denomination_index` exactly as triptych_sign branches on
+// `true_index` bits. See the discussion in triptych.h — same threat model,
+// same accepted-risk classification.
 //
 // Returns true iff all n proofs verify.
 bool gk_verify_batch(const EllipticCurvePoint* commitments,

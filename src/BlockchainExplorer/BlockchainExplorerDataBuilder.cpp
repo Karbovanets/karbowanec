@@ -274,8 +274,14 @@ bool BlockchainExplorerDataBuilder::fillTransactionDetails(const Transaction& tr
 
   // For CT transactions amounts are hidden; these helpers correctly return 0 for CT
   // (CT inputs/outputs aren't typed as KeyInput / transparent KeyOutput here), which is
-  // the right "public total" to expose.
-  transactionDetails.totalOutputsAmount = get_outs_money_amount(transaction);
+  // the right "public total" to expose. Both helpers return false on uint64_t overflow —
+  // an on-chain tx should never reach that, but propagate the failure so the explorer
+  // doesn't surface a wrapped total.
+  uint64_t outputsAmount = 0;
+  if (!get_outs_money_amount(transaction, outputsAmount)) {
+    return false;
+  }
+  transactionDetails.totalOutputsAmount = outputsAmount;
 
   uint64_t inputsAmount;
   if (!get_inputs_money_amount(transaction, inputsAmount)) {

@@ -18,6 +18,7 @@
 
 #include "CryptoNoteFormatUtils.h"
 
+#include <limits>
 #include <set>
 
 #include <Logging/LoggerRef.h>
@@ -132,7 +133,28 @@ bool get_inputs_money_amount(const Transaction& tx, uint64_t& money) {
       amount = boost::get<KeyInput>(in).amount;
     }
 
+    // Overflow guard: a malicious v1 tx can claim KeyInput amounts whose
+    // uint64_t sum wraps. Downstream callers (Core::check_tx_fee at
+    // mempool-admission time, TransactionPool::add_tx, miner fee accounting)
+    // would otherwise read a wrapped sum and either misclassify the tx as
+    // fee-bearing or compute a wrong fee. check_money_overflow runs later
+    // in check_tx_semantic, but check_tx_fee is invoked before that on the
+    // handleIncomingTransaction path — so the overflow must fail-fast here.
+    if (money > std::numeric_limits<uint64_t>::max() - amount) {
+      return false;
+    }
     money += amount;
+  }
+  return true;
+}
+
+bool get_outs_money_amount(const Transaction& tx, uint64_t& money) {
+  money = 0;
+  for (const auto& o : tx.outputs) {
+    if (money > std::numeric_limits<uint64_t>::max() - o.amount) {
+      return false;
+    }
+    money += o.amount;
   }
   return true;
 }
@@ -267,13 +289,6 @@ bool check_outs_overflow(const TransactionPrefix& tx) {
   return true;
 }
 
-uint64_t get_outs_money_amount(const Transaction& tx) {
-  uint64_t outputs_amount = 0;
-  for (const auto& o : tx.outputs) {
-    outputs_amount += o.amount;
-  }
-  return outputs_amount;
-}
 
 std::string short_hash_str(const Hash& h) {
   std::string res = Common::podToHex(h);
@@ -427,6 +442,23 @@ std::vector<uint32_t> relative_output_offsets_to_absolute(const std::vector<uint
   for (size_t i = 1; i < res.size(); i++)
     res[i] += res[i - 1];
   return res;
+}
+
+bool relative_output_offsets_to_absolute(const std::vector<uint32_t>& off,
+                                         std::vector<uint32_t>& out) {
+  out = off;
+  for (size_t i = 1; i < out.size(); ++i) {
+    // KeyInput.outputIndexes is delta-encoded: out[i] is added to out[i-1]
+    // to recover the absolute global output index. A crafted tx can supply
+    // deltas whose running sum exceeds UINT32_MAX. On wrap the downstream
+    // bucket-bounds check could pass for a small wrapped value pointing at
+    // a legitimate index, opening a confusion attack. Reject the wrap.
+    if (out[i] > std::numeric_limits<uint32_t>::max() - out[i - 1]) {
+      return false;
+    }
+    out[i] += out[i - 1];
+  }
+  return true;
 }
 
 std::vector<uint32_t> absolute_output_offsets_to_relative(const std::vector<uint32_t>& off) {

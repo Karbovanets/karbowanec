@@ -272,9 +272,19 @@ Transaction buildConfidentialTransaction(
       }
     } else {
       // ConfidentialInput: random blinding, Pedersen commitment.
+      //
+      // Draw 64 random bytes and call sc_reduce — the unbiased way to sample
+      // a uniform scalar in [0, L). Reducing only 32 bytes (sc_reduce32) is
+      // biased because L is close to 2^252 < 2^256: values in [0, 2^256 − k·L)
+      // get hit one more time than values in [2^256 − k·L, L), yielding a
+      // ~1/16 non-uniformity at the high end. Matches random_scalar() in
+      // triptych.cpp and gk_proof.cpp.
       Crypto::EllipticCurveScalar r_pseudo;
-      Random::randomBytes(32, r_pseudo.data);
-      sc_reduce32(r_pseudo.data);
+      unsigned char tmp[64];
+      Random::randomBytes(64, tmp);
+      sc_reduce(tmp);
+      std::memcpy(r_pseudo.data, tmp, 32);
+      sodium_memzero(tmp, sizeof(tmp));
       pseudoBlindings[i] = r_pseudo;
 
       Crypto::PublicKey pseudo_pk;

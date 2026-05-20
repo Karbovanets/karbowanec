@@ -2126,6 +2126,35 @@ bool Blockchain::haveTransactionKeyImagesAsSpent(const Transaction& tx) {
 bool Blockchain::checkTransactionInputs(const Transaction& tx,
                                         TxValidationContext context,
                                         uint32_t* pmax_used_block_height) {
+  // Intra-tx key-image uniqueness. Two inputs (KeyInput or ConfidentialInput,
+  // in any mix) sharing a key image would double-spend within a single tx.
+  // Core::check_tx_inputs_keyimages_diff catches this on the mempool path
+  // via check_tx_semantic, but the block / checkpointed-block paths flow
+  // straight through Blockchain::checkTransactionInputs without going via
+  // check_tx_semantic. Without an early reject the duplicate is caught only
+  // at write time in pushTransaction's hasSpentKey loop, which then has to
+  // roll back partial putSpentKey writes. Fail fast here so all three
+  // contexts (Mempool, Block, CheckpointedBlock) behave identically.
+  {
+    std::unordered_set<Crypto::KeyImage> seenKeyImages;
+    seenKeyImages.reserve(tx.inputs.size());
+    for (const auto& in : tx.inputs) {
+      const Crypto::KeyImage* ki = nullptr;
+      if (in.type() == typeid(KeyInput)) {
+        ki = &boost::get<KeyInput>(in).keyImage;
+      } else if (in.type() == typeid(ConfidentialInput)) {
+        ki = &boost::get<ConfidentialInput>(in).keyImage;
+      } else {
+        continue;
+      }
+      if (!seenKeyImages.insert(*ki).second) {
+        logger(ERROR) << "Transaction has duplicate intra-tx key image in tx "
+                      << getObjectHash(tx);
+        return false;
+      }
+    }
+  }
+
   // CT transactions use a dedicated validation pipeline
   if (tx.version == CryptoNote::TRANSACTION_VERSION_CT) {
     if (pmax_used_block_height) *pmax_used_block_height = 0;
@@ -2308,6 +2337,23 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
   if (tx.version != TRANSACTION_VERSION_CT) {
     logger(ERROR) << "CT validation: wrong version " << (int)tx.version
                   << " for tx " << txHash;
+    return false;
+  }
+
+  // Shape: defense-in-depth empty-side rejection. Core::check_tx_semantic
+  // already rejects these on the mempool admission path, but this validator
+  // is also invoked from pushBlock and from alt-block reorg flows that
+  // bypass check_tx_semantic. An empty-input tx would skip every per-input
+  // crypto loop below and reduce the kernel equation to a Schnorr forgery
+  // problem; an empty-output tx would burn the kernel sig and skip the GK
+  // batch. Reject up front so nothing downstream needs to defend against
+  // either degenerate shape.
+  if (tx.inputs.empty()) {
+    logger(ERROR) << "CT validation: tx has no inputs in tx " << txHash;
+    return false;
+  }
+  if (tx.outputs.empty()) {
+    logger(ERROR) << "CT validation: tx has no outputs in tx " << txHash;
     return false;
   }
 
@@ -2948,6 +2994,20 @@ bool Blockchain::checkConfidentialTransactionStructure(const Transaction& tx,
   if (tx.version != TRANSACTION_VERSION_CT) {
     logger(ERROR) << "CT structural validation: wrong version " << (int)tx.version
                   << " for tx " << txHash;
+    return false;
+  }
+
+  // Same defense-in-depth empty-side rejection as the full validator. The
+  // structural path runs under checkpoint trust, so the crypto layers that
+  // would otherwise catch a malformed shape (Schnorr kernel sig, GK batch)
+  // are skipped. Reject empties here so an honestly-mined chain that
+  // somehow contained a degenerate tx still fails this index pass.
+  if (tx.inputs.empty()) {
+    logger(ERROR) << "CT structural validation: tx has no inputs in tx " << txHash;
+    return false;
+  }
+  if (tx.outputs.empty()) {
+    logger(ERROR) << "CT structural validation: tx has no outputs in tx " << txHash;
     return false;
   }
 

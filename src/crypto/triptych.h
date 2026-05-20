@@ -85,6 +85,41 @@
 // Independence from the GK denomination proof: separate domain separator,
 // separate transcript, separate challenges. The only shared input is the
 // tx prefix hash, which both proofs commit to as their tx-context binding.
+//
+// This is deliberate and load-bearing. The two proofs answer different
+// questions about the same transaction:
+//   - Triptych: "I know a spend key for one of these ring members and the
+//     pseudo-commitment opens to the same amount."
+//   - GK: "Each output commitment opens to one of the 64 canonical
+//     denominations."
+// Both must commit to the *same* transaction identity, otherwise an attacker
+// could swap a valid Triptych from tx A with a valid GK from tx B. The
+// prefix hash is exactly that identity. The proofs do NOT share verifier
+// challenges, batched α scalars, or any other internal randomness — the
+// domain tags ("Triptych-KarboCT-v1", "GKBatchTranscriptV1", etc.) keep
+// the proof systems algebraically independent so a soundness break in one
+// cannot be leveraged against the other. Future refactoring must preserve
+// this property: do NOT merge the transcripts or pull challenges across.
+//
+// Timing side channel during signing (NOT verification):
+//   triptych_sign() branches on the bits of `true_index` to build the I_bits
+//   commitments, the bit-commitment Q polynomials, and the selector-polynomial
+//   coefficients. The sc_invert(spend_privkey) call is also variable-time
+//   (square-and-multiply over the public exponent L−2, but with the secret
+//   spend key as base). An adversary who can observe per-signature wall-clock
+//   from inside the prover's host could in principle narrow the ring's
+//   anonymity set over many signatures and learn statistical bits of the
+//   spend key. This matches the academic Triptych reference and ref10's
+//   `ge_scalarmult`, which is also variable-time on the secret scalar in
+//   `x · Hp(P)` and `x · G` everywhere else in the wallet.
+//
+// Threat model: signing happens locally in the user's wallet process.
+// Realistic exploitation requires a co-located observer (malicious hypervisor,
+// shared host, side-channel-capable malware) AND many signatures from the
+// same spend key. For a typical desktop wallet this is out of scope.
+// A future constant-time crypto migration would close this; it is not a
+// targeted fix because the dependency surface (ref10) is variable-time
+// throughout, so a piecemeal patch buys little.
 
 #pragma once
 
