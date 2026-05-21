@@ -2188,6 +2188,36 @@ bool Blockchain::checkTransactionInputs(const Transaction& tx,
   if (tx.version == CryptoNote::TRANSACTION_VERSION_CT) {
     if (pmax_used_block_height) *pmax_used_block_height = 0;
     Crypto::Hash transactionHash = getObjectHash(tx);
+    // CT semantic shape, enforced before the full / structural dispatch.
+    //
+    // TransactionOutput.amount is wire-serialized for every output variant
+    // (CryptoNoteSerialization.cpp), and the CT proofs bind to the prefix
+    // hash — which includes the amount field — so the crypto layers cannot
+    // catch a CT output that carries a nonzero visible amount.
+    //
+    // Core::check_tx_semantic rejects such an output via check_outs_valid on
+    // the mempool admission path, but block-import paths (sync, alt-chain
+    // reorg, NOTIFY_NEW_BLOCK) flow straight into checkTransactionInputs
+    // without going through check_tx_semantic. If a malicious miner mines a
+    // block containing a CT tx with a nonzero ConfidentialOutput amount, the
+    // tx survives both checkConfidentialTransaction and the structural path,
+    // and pushBlock's computeCtPoolDelta then sums the bogus amount into
+    // plain_out — falsely draining confidential_supply. Mirror the semantic
+    // shape check here so the dispatch below cannot be reached on either
+    // path with malformed CT output shape, keeping CT block validation
+    // self-contained and the pool accounting honest.
+    for (size_t i = 0; i < tx.outputs.size(); ++i) {
+      if (tx.outputs[i].target.type() != typeid(ConfidentialOutput)) {
+        logger(ERROR) << "CT tx output " << i << " is not ConfidentialOutput in tx "
+                      << transactionHash;
+        return false;
+      }
+      if (tx.outputs[i].amount != 0) {
+        logger(ERROR) << "CT tx output " << i << " has nonzero amount field in tx "
+                      << transactionHash;
+        return false;
+      }
+    }
     // Under a confirmed checkpoint the block hash is already trusted by the
     // network. Run only cheap structural checks so historical CT blocks can
     // stream through the pool/index path without re-verifying Triptych, GK and
