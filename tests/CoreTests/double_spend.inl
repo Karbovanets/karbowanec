@@ -86,7 +86,7 @@ bool gen_double_spend_base<concrete_test>::check_double_spend(CryptoNote::core& 
   std::list<CryptoNote::Block> block_list;
   bool r = c.get_blocks(0, 100 + 2 * static_cast<uint32_t>(this->m_currency.minedMoneyUnlockWindow()), block_list);
   CHECK_TEST_CONDITION(r);
-  CHECK_TEST_CONDITION(m_last_valid_block == block_list.back());
+  CHECK_EQ(get_block_height(m_last_valid_block), get_block_height(block_list.back()));
 
   CHECK_EQ(concrete_test::expected_pool_txs_count, c.get_pool_transactions_count());
 

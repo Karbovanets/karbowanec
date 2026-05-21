@@ -78,12 +78,30 @@ namespace CryptoNote {
     }
 
     if (isTestnet()) {
-      m_upgradeHeightV2 = 10;
-      m_upgradeHeightV3 = 60;
-      m_upgradeHeightV4 = 70;
-      m_upgradeHeightV5 = 80;
-      m_upgradeHeightV6 = 100;
-      m_upgradeHeightV7 = 120;
+      // Apply compressed testnet upgrade schedule only where the caller did
+      // not explicitly override the height. CurrencyBuilder / CoreTests need
+      // to drive specific upgrade points (e.g. activating V7 at a controlled
+      // height to exercise CT activation logic). The mainnet UPGRADE_HEIGHT_V*
+      // constants are picked to be distinct from any value a test would set,
+      // so equality here reliably means "still at the default, safe to clamp".
+      if (m_upgradeHeightV2 == parameters::UPGRADE_HEIGHT_V2) {
+        m_upgradeHeightV2 = 10;
+      }
+      if (m_upgradeHeightV3 == parameters::UPGRADE_HEIGHT_V3) {
+        m_upgradeHeightV3 = 60;
+      }
+      if (m_upgradeHeightV4 == parameters::UPGRADE_HEIGHT_V4) {
+        m_upgradeHeightV4 = 70;
+      }
+      if (m_upgradeHeightV5 == parameters::UPGRADE_HEIGHT_V5) {
+        m_upgradeHeightV5 = 80;
+      }
+      if (m_upgradeHeightV6 == parameters::UPGRADE_HEIGHT_V6) {
+        m_upgradeHeightV6 = 100;
+      }
+      if (m_upgradeHeightV7 == parameters::UPGRADE_HEIGHT_V7) {
+        m_upgradeHeightV7 = 120;
+      }
       m_blocksFileName = "testnet_" + m_blocksFileName;
       m_blocksCacheFileName = "testnet_" + m_blocksCacheFileName;
       m_blockIndexesFileName = "testnet_" + m_blockIndexesFileName;

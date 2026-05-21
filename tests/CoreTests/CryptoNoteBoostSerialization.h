@@ -20,6 +20,7 @@
 #include <boost/serialization/vector.hpp>
 #include <boost/serialization/utility.hpp>
 #include <boost/serialization/variant.hpp>
+#include <boost/blank.hpp>
 #include <boost/serialization/set.hpp>
 #include <boost/serialization/map.hpp>
 #include <boost/foreach.hpp>
@@ -35,6 +36,23 @@ namespace boost
   {
 
   //---------------------------------------------------
+  template <class Archive>
+  inline void serialize(Archive&, boost::blank&, const boost::serialization::version_type)
+  {
+  }
+
+  template <class Archive>
+  inline void serialize(Archive &a, Crypto::EllipticCurvePoint &x, const boost::serialization::version_type ver)
+  {
+    a & reinterpret_cast<char (&)[sizeof(Crypto::EllipticCurvePoint)]>(x);
+  }
+
+  template <class Archive>
+  inline void serialize(Archive &a, Crypto::EllipticCurveScalar &x, const boost::serialization::version_type ver)
+  {
+    a & reinterpret_cast<char (&)[sizeof(Crypto::EllipticCurveScalar)]>(x);
+  }
+
   template <class Archive>
   inline void serialize(Archive &a, Crypto::PublicKey &x, const boost::serialization::version_type ver)
   {
@@ -85,6 +103,73 @@ namespace boost
     a & x.amount;
     a & x.outputIndexes;
     a & x.keyImage;
+  }
+
+  template <class Archive>
+  inline void serialize(Archive &a, CryptoNote::RingMemberRef &x, const boost::serialization::version_type ver)
+  {
+    a & x.amount;
+    a & x.outputIndex;
+  }
+
+  template <class Archive>
+  inline void serialize(Archive &a, CryptoNote::ConfidentialInput &x, const boost::serialization::version_type ver)
+  {
+    a & x.ringMembers;
+    a & x.ringPubkeys;
+    a & x.ringCommitments;
+    a & x.pseudoCommitment;
+    a & x.keyImage;
+  }
+
+  template <class Archive>
+  inline void serialize(Archive &a, CryptoNote::ConfidentialOutput &x, const boost::serialization::version_type ver)
+  {
+    a & x.targetKey;
+    a & x.commitment;
+    for (auto& byte : x.maskedAmount) {
+      a & byte;
+    }
+  }
+
+  template <class Archive>
+  inline void serialize(Archive &a, CryptoNote::CTInputSignature &x, const boost::serialization::version_type ver)
+  {
+    a & x.I_bits;
+    a & x.A;
+    a & x.B;
+    a & x.Q_P;
+    a & x.Q_M;
+    a & x.Q_U;
+    a & x.z;
+    a & x.za;
+    a & x.zb;
+    a & x.f_P;
+    a & x.f_M;
+    a & x.f_U;
+  }
+
+  template <class Archive>
+  inline void serialize(Archive &a, CryptoNote::CTOutputProof &x, const boost::serialization::version_type ver)
+  {
+    for (size_t i = 0; i < 6; ++i) {
+      a & x.I[i];
+      a & x.A[i];
+      a & x.B[i];
+      a & x.Q[i];
+      a & x.z[i];
+      a & x.za[i];
+      a & x.zb[i];
+    }
+    a & x.f;
+  }
+
+  template <class Archive>
+  inline void serialize(Archive &a, CryptoNote::TransactionKernel &x, const boost::serialization::version_type ver)
+  {
+    a & x.excessCommitment;
+    a & x.sigE;
+    a & x.sigS;
   }
 
   template <class Archive>

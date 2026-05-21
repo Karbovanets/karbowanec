@@ -184,14 +184,13 @@ namespace
     tx.unlockTime = 0;
     tx.fee = fee;
 
-    ConfidentialInput in;
-    in.ringMembers.push_back(RingMemberRef{1, 0});
-    in.ringPubkeys.emplace_back();
-    in.ringCommitments.emplace_back();
-    std::memset(in.pseudoCommitment.data, 0, sizeof(in.pseudoCommitment.data));
+    KeyInput in;
+    in.amount = fee;
+    in.outputIndexes.push_back(0);
     std::memset(in.keyImage.data, 0, sizeof(in.keyImage.data));
     in.keyImage.data[0] = keyImageTag;
     tx.inputs.push_back(std::move(in));
+    tx.signatures.push_back(std::vector<Crypto::Signature>(1));
 
     ConfidentialOutput out;
     std::memset(&out.targetKey, 0, sizeof(out.targetKey));
@@ -766,7 +765,7 @@ TEST_F(tx_pool, TxPoolAcceptsValidFusionTransaction) {
   std::unique_ptr<tx_memory_pool> pool(new tx_memory_pool(currency, validator, coreStub, timeProvider, logger));
   ASSERT_TRUE(pool->init(m_configDir.string()));
 
-  FusionTransactionBuilder builder(currency, 10 * currency.defaultDustThreshold());
+  FusionTransactionBuilder builder(currency, currency.fusionTxMinInputCount() * currency.defaultDustThreshold());
   auto tx = builder.buildTx();
   tx_verification_context tvc = boost::value_initialized<tx_verification_context>();
 

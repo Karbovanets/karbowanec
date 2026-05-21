@@ -3604,7 +3604,8 @@ TEST_F(WalletApi, transferFailsIfNoChangeDestinationAndMultipleSourceAddressesSe
 }
 
 TEST_F(WalletApi, transferSendsChangeToAddress) {
-  const uint64_t MONEY = SENT + FEE + 1;
+  const uint64_t CHANGE = currency.defaultDustThreshold();
+  const uint64_t MONEY = SENT + FEE + CHANGE;
 
   generator.getSingleOutputTransaction(parseAddress(aliceAddress), MONEY);
   unlockMoney();
@@ -3614,17 +3615,17 @@ TEST_F(WalletApi, transferSendsChangeToAddress) {
   params.fee = FEE;
   params.changeDestination = alice.createAddress();
 
-  alice.transfer(params);
+  auto txId = alice.transfer(params);
   node.updateObservers();
 
-  waitActualBalanceUpdated(MONEY);
+  waitForTransactionConfirmed(alice, txId);
 
-  EXPECT_EQ(MONEY - SENT - FEE, alice.getPendingBalance());
+  EXPECT_EQ(CHANGE, alice.getPendingBalance());
   EXPECT_EQ(0, alice.getActualBalance());
   EXPECT_EQ(0, alice.getActualBalance(aliceAddress));
   EXPECT_EQ(0, alice.getPendingBalance(aliceAddress));
   EXPECT_EQ(0, alice.getActualBalance(alice.getAddress(1)));
-  EXPECT_EQ(MONEY - SENT - FEE, alice.getPendingBalance(alice.getAddress(1)));
+  EXPECT_EQ(CHANGE, alice.getPendingBalance(alice.getAddress(1)));
 }
 
 TEST_F(WalletApi, checkBaseTransaction) {
@@ -3861,6 +3862,9 @@ TEST_F(WalletApi, walletHandlesResetAndSwitchingToAlternativeChain) {
   generator.generateEmptyBlocks(alternativeChainSize - detachHeight);
   node.updateObservers();
   waitForWalletEvent(alice, CryptoNote::SYNC_COMPLETED, std::chrono::seconds(30));
+  waitForPredicate(alice, [&] {
+    return alice.getTransaction(tx2).state == WalletTransactionState::CANCELLED;
+  });
 
   // Make sure transaction 2 was cancelled
   ASSERT_EQ(WalletTransactionState::SUCCEEDED, alice.getTransaction(tx1).state);

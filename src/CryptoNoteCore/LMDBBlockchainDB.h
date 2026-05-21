@@ -89,6 +89,9 @@ public:
 
   // Transaction control
   void beginWriteTxn();
+  void beginNestedWriteTxn();
+  void commitNestedWriteTxn();
+  void abortNestedWriteTxn();
   void commitTxn();
   void abortTxn();
 
@@ -189,6 +192,7 @@ public:
   // True while a write txn is active.  Used by Blockchain to detect an open
   // IBD batch so it can reuse rather than re-open the transaction.
   bool hasActiveTxn() const noexcept { return m_writeTxn != nullptr; }
+  bool hasNestedTxn() const noexcept { return m_parentWriteTxn != nullptr; }
 
   // Enable/disable MDB_NOSYNC (skips ALL per-commit fdatasyncs).
   // Only safe during IBD; call with enable=false when returning to live
@@ -207,8 +211,9 @@ public:
   static bool isLocked(const std::string& path);
 
 private:
-  MDB_env* m_env      = nullptr;
-  MDB_txn* m_writeTxn = nullptr;
+  MDB_env* m_env            = nullptr;
+  MDB_txn* m_writeTxn       = nullptr;
+  MDB_txn* m_parentWriteTxn = nullptr;
 
 #ifdef _WIN32
   HANDLE m_lockFile = INVALID_HANDLE_VALUE;
