@@ -37,6 +37,7 @@
 #include "Serialization/BinarySerializationTools.h"
 #include "CryptoNoteTools.h"
 #include "CryptoNoteFormatUtils.h"
+#include "TransactionValidation.h"
 #include "TransactionExtra.h"
 
 #include "../crypto/hash.h"
@@ -2187,52 +2188,23 @@ bool Blockchain::haveTransactionKeyImagesAsSpent(const Transaction& tx) {
 bool Blockchain::checkTransactionInputs(const Transaction& tx,
                                         TxValidationContext context,
                                         uint32_t* pmax_used_block_height) {
-  // Defense-in-depth empty-side rejection, applied to BOTH v1 plain and
-  // v2 CT transactions before the version dispatch. Core::check_tx_semantic
-  // already rejects empty inputs/outputs on the mempool-admission path, but
-  // pushBlock and alt-block reorg paths flow straight through here without
-  // going via check_tx_semantic. A zero-input tx would skip every per-input
-  // loop below and reduce the validation surface to whatever cryptographic
-  // checks still fire on inputs.size()==0 (Schnorr forgery on the CT kernel
-  // for v2; nothing on v1). A zero-output tx skips per-output checks and
-  // produces a degenerate "burn everything as fee" shape that consensus
-  // shouldn't accept. Reject up front so nothing downstream needs to defend
-  // against either degenerate shape, on either tx version.
-  if (tx.inputs.empty()) {
-    logger(ERROR) << "Transaction has no inputs in tx " << getObjectHash(tx);
-    return false;
-  }
-  if (tx.outputs.empty()) {
-    logger(ERROR) << "Transaction has no outputs in tx " << getObjectHash(tx);
-    return false;
-  }
-
-  // Intra-tx key-image uniqueness. Two inputs (KeyInput or ConfidentialInput,
-  // in any mix) sharing a key image would double-spend within a single tx.
-  // Core::check_tx_inputs_keyimages_diff catches this on the mempool path
-  // via check_tx_semantic, but the block / checkpointed-block paths flow
-  // straight through Blockchain::checkTransactionInputs without going via
-  // check_tx_semantic. Without an early reject the duplicate is caught only
-  // at write time in pushTransaction's hasSpentKey loop, which then has to
-  // roll back partial putSpentKey writes. Fail fast here so all three
-  // contexts (Mempool, Block, CheckpointedBlock) behave identically.
+  // Consensus-shaped invariants — must hold identically on every code path
+  // (mempool admission via Core::check_tx_semantic, block import, alt-chain
+  // reorg, checkpointed-block replay). Delegated to the shared
+  // TransactionValidation module so this dispatcher and check_tx_semantic
+  // cannot drift. Anything that used to be mirrored inline here and is now
+  // upstream: empty-side reject, supported version, input/output variant
+  // shape, check_outs_valid (incl. CT amount==0), check_money_overflow,
+  // signatures.size()==inputs.size(), per-input authorization variant match,
+  // KeyInput outputIndexes structure + ring-sig count, ConfidentialInput
+  // ring-size consistency + Triptych proof slot, intra-tx keyimage
+  // uniqueness, v1 plain amount_in >= amount_out, CT unlockTime == 0.
   {
-    std::unordered_set<Crypto::KeyImage> seenKeyImages;
-    seenKeyImages.reserve(tx.inputs.size());
-    for (const auto& in : tx.inputs) {
-      const Crypto::KeyImage* ki = nullptr;
-      if (in.type() == typeid(KeyInput)) {
-        ki = &boost::get<KeyInput>(in).keyImage;
-      } else if (in.type() == typeid(ConfidentialInput)) {
-        ki = &boost::get<ConfidentialInput>(in).keyImage;
-      } else {
-        continue;
-      }
-      if (!seenKeyImages.insert(*ki).second) {
-        logger(ERROR) << "Transaction has duplicate intra-tx key image in tx "
-                      << getObjectHash(tx);
-        return false;
-      }
+    std::string shapeErr;
+    if (!checkTransactionConsensusShape(tx, /*blockHeight=*/0u, m_currency, &shapeErr)) {
+      logger(ERROR) << "tx fails consensus shape: " << shapeErr
+                    << " in tx " << getObjectHash(tx);
+      return false;
     }
   }
 
@@ -2240,36 +2212,6 @@ bool Blockchain::checkTransactionInputs(const Transaction& tx,
   if (tx.version == CryptoNote::TRANSACTION_VERSION_CT) {
     if (pmax_used_block_height) *pmax_used_block_height = 0;
     Crypto::Hash transactionHash = getObjectHash(tx);
-    // CT semantic shape, enforced before the full / structural dispatch.
-    //
-    // TransactionOutput.amount is wire-serialized for every output variant
-    // (CryptoNoteSerialization.cpp), and the CT proofs bind to the prefix
-    // hash — which includes the amount field — so the crypto layers cannot
-    // catch a CT output that carries a nonzero visible amount.
-    //
-    // Core::check_tx_semantic rejects such an output via check_outs_valid on
-    // the mempool admission path, but block-import paths (sync, alt-chain
-    // reorg, NOTIFY_NEW_BLOCK) flow straight into checkTransactionInputs
-    // without going through check_tx_semantic. If a malicious miner mines a
-    // block containing a CT tx with a nonzero ConfidentialOutput amount, the
-    // tx survives both checkConfidentialTransaction and the structural path,
-    // and pushBlock's computeCtPoolDelta then sums the bogus amount into
-    // plain_out — falsely draining confidential_supply. Mirror the semantic
-    // shape check here so the dispatch below cannot be reached on either
-    // path with malformed CT output shape, keeping CT block validation
-    // self-contained and the pool accounting honest.
-    for (size_t i = 0; i < tx.outputs.size(); ++i) {
-      if (tx.outputs[i].target.type() != typeid(ConfidentialOutput)) {
-        logger(ERROR) << "CT tx output " << i << " is not ConfidentialOutput in tx "
-                      << transactionHash;
-        return false;
-      }
-      if (tx.outputs[i].amount != 0) {
-        logger(ERROR) << "CT tx output " << i << " has nonzero amount field in tx "
-                      << transactionHash;
-        return false;
-      }
-    }
     // Under a confirmed checkpoint the block hash is already trusted by the
     // network. Run only cheap structural checks so historical CT blocks can
     // stream through the pool/index path without re-verifying Triptych, GK and
@@ -2444,40 +2386,21 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
   using namespace CryptoNote::parameters;
   std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
-  // Step 1: Verify transaction version == CT version (2)
-  if (tx.version != TRANSACTION_VERSION_CT) {
-    logger(ERROR) << "CT validation: wrong version " << (int)tx.version
-                  << " for tx " << txHash;
-    return false;
-  }
-
-  // Shape: defense-in-depth empty-side rejection. Core::check_tx_semantic
-  // already rejects these on the mempool admission path, but this validator
-  // is also invoked from pushBlock and from alt-block reorg flows that
-  // bypass check_tx_semantic. An empty-input tx would skip every per-input
-  // crypto loop below and reduce the kernel equation to a Schnorr forgery
-  // problem; an empty-output tx would burn the kernel sig and skip the GK
-  // batch. Reject up front so nothing downstream needs to defend against
-  // either degenerate shape.
-  if (tx.inputs.empty()) {
-    logger(ERROR) << "CT validation: tx has no inputs in tx " << txHash;
-    return false;
-  }
-  if (tx.outputs.empty()) {
-    logger(ERROR) << "CT validation: tx has no outputs in tx " << txHash;
-    return false;
-  }
+  // Version, empty-side, and output-variant invariants are now enforced
+  // upstream by checkTransactionConsensusShape (called from both
+  // checkTransactionInputs and Core::check_tx_semantic). By the time we
+  // reach here every output is guaranteed to be a ConfidentialOutput with
+  // amount == 0; this validator only needs to run the curve-level checks
+  // that require crypto context.
 
   // Use the prefix hash for Fiat-Shamir binding. Proof response fields (Triptych, GK, kernel)
   // are in the Transaction body, not the prefix, so the prefix hash naturally excludes them.
   const Crypto::Hash ct_signing_hash = getObjectHash(*static_cast<const TransactionPrefix*>(&tx));
 
-  // Step 2: For each output: verify subgroup membership of commitment C
+  // Step 2: For each output: verify subgroup membership of commitment C and
+  // of the stealth public key. Output variant is guaranteed ConfidentialOutput
+  // by the shape helper.
   for (size_t i = 0; i < tx.outputs.size(); ++i) {
-    if (tx.outputs[i].target.type() != typeid(ConfidentialOutput)) {
-      logger(ERROR) << "CT validation: output " << i << " is not ConfidentialOutput in tx " << txHash;
-      return false;
-    }
     const auto& cout = boost::get<ConfidentialOutput>(tx.outputs[i].target);
 
     // Verify targetKey is a valid prime-order CT public key (stealth address)
@@ -3102,46 +3025,19 @@ bool Blockchain::checkConfidentialTransactionStructure(const Transaction& tx,
   using namespace CryptoNote::parameters;
   std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
-  if (tx.version != TRANSACTION_VERSION_CT) {
-    logger(ERROR) << "CT structural validation: wrong version " << (int)tx.version
-                  << " for tx " << txHash;
-    return false;
-  }
-
-  // Same defense-in-depth empty-side rejection as the full validator. The
-  // structural path runs under checkpoint trust, so the crypto layers that
-  // would otherwise catch a malformed shape (Schnorr kernel sig, GK batch)
-  // are skipped. Reject empties here so an honestly-mined chain that
-  // somehow contained a degenerate tx still fails this index pass.
-  if (tx.inputs.empty()) {
-    logger(ERROR) << "CT structural validation: tx has no inputs in tx " << txHash;
-    return false;
-  }
-  if (tx.outputs.empty()) {
-    logger(ERROR) << "CT structural validation: tx has no outputs in tx " << txHash;
-    return false;
-  }
+  // Version, empty-side, output-variant, and signatures.size()==inputs.size()
+  // are all enforced upstream by checkTransactionConsensusShape. This
+  // validator runs under checkpoint trust and only needs the CT-specific
+  // structural checks (ctProofs count, curve membership, ring-size bounds,
+  // key-image domain, double-spend).
 
   if (tx.ctProofs.size() != tx.outputs.size()) {
     logger(ERROR) << "CT structural validation: ctProofs count " << tx.ctProofs.size()
                   << " != outputs count " << tx.outputs.size() << " in tx " << txHash;
     return false;
   }
-  // Explicit check: this validator can run on internally-constructed
-  // transactions (alt-block reorgs from checkpointed history, RPC
-  // resubmission) that didn't pass through CryptoNoteSerialization.
-  if (tx.signatures.size() != tx.inputs.size()) {
-    logger(ERROR) << "CT structural validation: signatures count " << tx.signatures.size()
-                  << " != inputs count " << tx.inputs.size() << " in tx " << txHash;
-    return false;
-  }
 
   for (size_t i = 0; i < tx.outputs.size(); ++i) {
-    if (tx.outputs[i].target.type() != typeid(ConfidentialOutput)) {
-      logger(ERROR) << "CT structural validation: output " << i
-                    << " is not ConfidentialOutput in tx " << txHash;
-      return false;
-    }
     const auto& cout = boost::get<ConfidentialOutput>(tx.outputs[i].target);
     if (!Crypto::ct_public_key_valid(cout.targetKey)) {
       logger(ERROR) << "CT structural validation: output " << i

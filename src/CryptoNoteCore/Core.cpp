@@ -37,6 +37,7 @@
 #include "CryptoNoteStatInfo.h"
 #include "Miner.h"
 #include "TransactionExtra.h"
+#include "TransactionValidation.h"
 #include "IBlock.h"
 
 #undef ERROR
@@ -460,13 +461,35 @@ bool Core::check_tx_unmixable(const Transaction& tx, const Crypto::Hash& txHash,
 }
 
 bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, bool keeped_by_block) {
-  if (!tx.inputs.size()) {
-    logger(ERROR) << "tx with empty inputs, rejected for tx id= " << Common::podToHex(txHash);
-    return false;
+  // Consensus-shaped invariants — must hold identically on every code path
+  // (mempool admission, block import, alt-chain reorg, checkpoint replay).
+  // Delegated to the shared TransactionValidation module so the block-import path
+  // (Blockchain::checkTransactionInputs) and this mempool-admission path
+  // cannot drift. Anything that used to live inline here and is now in the
+  // shared validator: empty-side reject, supported version, input/output
+  // variant shape, check_outs_valid (incl. CT amount==0), check_money_overflow,
+  // signatures.size()==inputs.size(), per-input authorization variant match,
+  // KeyInput outputIndexes structure + ring-sig count, ConfidentialInput
+  // ring-size consistency + Triptych proof slot, intra-tx keyimage uniqueness,
+  // v1 plain amount_in >= amount_out, CT unlockTime == 0.
+  {
+    std::string shapeErr;
+    if (!checkTransactionConsensusShape(tx, /*blockHeight=*/0u, m_currency, &shapeErr)) {
+      logger(ERROR) << "tx fails consensus shape: " << shapeErr
+                    << " (tx id= " << Common::podToHex(txHash) << ")";
+      return false;
+    }
   }
+  (void)keeped_by_block;  // reserved for future mempool/block carve-outs
 
+  // ── Mempool / CT-specific policy beyond the consensus shape ─────────────
   if (tx.version == CryptoNote::TRANSACTION_VERSION_CT) {
-    // CT transaction semantic checks
+    // CT input/output caps. These are policy parameters the node operator may
+    // tighten without forking; the consensus shape helper deliberately does
+    // not enforce them so historical alt-chain blocks built when the cap was
+    // higher still verify cleanly. If a cap is ever *tightened* and applied
+    // to historical data, it MUST move to a height-gated rule inside
+    // TransactionValidation rather than be enforced uniformly here.
     if (tx.inputs.size() > CryptoNote::parameters::CT_MAX_INPUTS) {
       logger(ERROR) << "CT tx has too many inputs (" << tx.inputs.size() << "), rejected for tx id= " << Common::podToHex(txHash);
       return false;
@@ -475,46 +498,21 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
       logger(ERROR) << "CT tx has too many outputs (" << tx.outputs.size() << "), rejected for tx id= " << Common::podToHex(txHash);
       return false;
     }
-    if (tx.outputs.empty()) {
-      logger(ERROR) << "CT tx with empty outputs, rejected for tx id= " << Common::podToHex(txHash);
-      return false;
-    }
-    // CT tx must have unlockTime == 0
-    if (tx.unlockTime != 0) {
-      logger(ERROR) << "CT tx with non-zero unlockTime, rejected for tx id= " << Common::podToHex(txHash);
-      return false;
-    }
 
-    // Validate proof body counts match input/output counts. CT v2 supports
-    // mixed inputs: per-input authorization is stored as a variant in
-    // tx.signatures[i] (size == inputs.size()):
-    //   KeyInput          → std::vector<Crypto::Signature>  (legacy ring sig)
-    //   ConfidentialInput → CTInputSignature                (Triptych proof)
-    // The variant alternative is implicit from inputs[i].type() — there is
-    // no "empty Triptych slot" sentinel any more.
-    //
-    // tx.signatures.size() == tx.inputs.size() is enforced by the
-    // deserializer when a tx comes off the wire, but check_tx_semantic also
-    // runs on internally-constructed transactions (e.g. block-template
-    // assembly, RPC paths, test fixtures) that never went through
-    // CryptoNoteSerialization. Validate explicitly so the per-input loop
-    // below cannot index past tx.signatures.
-    if (tx.signatures.size() != tx.inputs.size()) {
-      logger(ERROR) << "CT tx signatures count " << tx.signatures.size()
-                    << " != inputs count " << tx.inputs.size()
-                    << ", rejected for tx id= " << Common::podToHex(txHash);
-      return false;
-    }
+    // ctProofs slot count: tightly coupled with the CT verifier and
+    // Triptych proof-shape gate below, so kept here next to them. The CT
+    // crypto module relies on this count downstream.
     if (tx.ctProofs.size() != tx.outputs.size()) {
       logger(ERROR) << "CT tx ctProofs count mismatch, rejected for tx id= " << Common::podToHex(txHash);
       return false;
     }
 
-    // Validate each CT input has consistent sizes. Mixed inputs allowed:
-    //   KeyInput        → transparent shielding into the CT pool. Authorized
-    //                     by a legacy ring signature.
-    //   ConfidentialInput → CT-to-CT or transparent-decoy spend. Authorized
-    //                     by a Triptych proof.
+    // Per-input checks beyond the consensus shape: KeyInput.amount > 0 (the
+    // amount selects the ring bucket in the legacy v1 indexes; a zero-amount
+    // ring lookup would silently return nothing), and Triptych proof shape
+    // versus ring size for ConfidentialInput. Both are CT-specific policy
+    // rather than universal structure, so they stay here rather than in the
+    // shared shape validator.
     for (size_t i = 0; i < tx.inputs.size(); ++i) {
       if (tx.inputs[i].type() == typeid(KeyInput)) {
         const auto& ki = boost::get<KeyInput>(tx.inputs[i]);
@@ -523,54 +521,11 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
                         << Common::podToHex(txHash);
           return false;
         }
-        if (ki.outputIndexes.empty()) {
-          logger(ERROR) << "CT tx KeyInput " << i << " has empty ring, rejected for tx id= "
-                        << Common::podToHex(txHash);
-          return false;
-        }
-        // KeyInput requires a legacy ring signature in tx.signatures[i] sized
-        // to ki.outputIndexes.size(). The deep check is in check_tx_input.
-        if (!isKeyInputSig(tx.signatures[i]) ||
-            keyInputSig(tx.signatures[i]).size() != ki.outputIndexes.size()) {
-          logger(ERROR) << "CT tx KeyInput " << i << " ring sig count mismatch, rejected for tx id= "
-                        << Common::podToHex(txHash);
-          return false;
-        }
         continue;
       }
-
-      if (tx.inputs[i].type() != typeid(ConfidentialInput)) {
-        logger(ERROR) << "CT tx input " << i << " has unsupported type, rejected for tx id= "
-                      << Common::podToHex(txHash);
-        return false;
-      }
+      // ConfidentialInput (the only other variant after consensus-shape pass).
       const auto& ci = boost::get<ConfidentialInput>(tx.inputs[i]);
-      if (ci.ringMembers.empty()) {
-        logger(ERROR) << "CT tx input " << i << " has empty ring, rejected for tx id= " << Common::podToHex(txHash);
-        return false;
-      }
-      if (ci.ringPubkeys.size() != ci.ringMembers.size()) {
-        logger(ERROR) << "CT tx input " << i << " ring pubkeys/members size mismatch, rejected for tx id= " << Common::podToHex(txHash);
-        return false;
-      }
-      if (ci.ringCommitments.size() != ci.ringMembers.size()) {
-        logger(ERROR) << "CT tx input " << i << " ring commitments/members size mismatch, rejected for tx id= " << Common::podToHex(txHash);
-        return false;
-      }
-      for (size_t k = 0; k < ci.ringMembers.size(); ++k) {
-        if (ci.ringMembers[k].amount == 0) {
-          logger(ERROR) << "CT tx input " << i << " ring member " << k
-                        << " has zero amount bucket, rejected for tx id= " << Common::podToHex(txHash);
-          return false;
-        }
-      }
-      // ConfidentialInput requires a Triptych proof in tx.signatures[i].
-      if (!isCtInputSig(tx.signatures[i])) {
-        logger(ERROR) << "CT tx ConfidentialInput " << i << " missing Triptych proof, rejected for tx id= "
-                      << Common::podToHex(txHash);
-        return false;
-      }
-      const auto& s = ctInputSig(tx.signatures[i]);
+      const auto& s  = ctInputSig(tx.signatures[i]);
       // Triptych proof shape must match the ring size:
       //   ring_size = 4  → bits = 2, q_len = 2
       //   ring_size = 8  → bits = 3, q_len = 3
@@ -596,76 +551,9 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
         return false;
       }
     }
-  } else {
-    // Legacy transparent transaction semantic checks.
-    // Per-input variant: BaseInput → boost::blank,
-    // KeyInput → vector<Signature>, ConfidentialInput → not legal in v1.
-    if (tx.inputs.size() != tx.signatures.size()) {
-      logger(ERROR) << "tx signatures size doesn't match inputs size, rejected for tx id= " << Common::podToHex(txHash);
-      return false;
-    }
-
-    for (size_t i = 0; i < tx.inputs.size(); ++i) {
-      if (tx.inputs[i].type() == typeid(KeyInput)) {
-        if (!isKeyInputSig(tx.signatures[i]) ||
-            boost::get<KeyInput>(tx.inputs[i]).outputIndexes.size() != keyInputSig(tx.signatures[i]).size()) {
-          logger(ERROR) << "tx signatures count doesn't match outputIndexes count for input "
-            << i << ", rejected for tx id= " << Common::podToHex(txHash);
-          return false;
-        }
-      } else if (tx.inputs[i].type() == typeid(BaseInput)) {
-        // BaseInput slot must hold boost::blank (no authorization bytes).
-        if (tx.signatures[i].which() != 0) {
-          logger(ERROR) << "tx BaseInput " << i
-            << " has non-empty signature slot, rejected for tx id= " << Common::podToHex(txHash);
-          return false;
-        }
-      }
-    }
   }
 
-  if (!check_inputs_types_supported(tx)) {
-    logger(ERROR) << "unsupported input types for tx id= " << Common::podToHex(txHash);
-    return false;
-  }
-
-  std::string errmsg;
-  if (!check_outs_valid(tx, &errmsg)) {
-    logger(ERROR) << "tx with invalid outputs, rejected for tx id= " << Common::podToHex(txHash) << ": " << errmsg;
-    return false;
-  }
-
-  if (!check_money_overflow(tx)) {
-    logger(ERROR) << "tx have money overflow, rejected for tx id= " << Common::podToHex(txHash);
-    return false;
-  }
-
-  if (tx.version != CryptoNote::TRANSACTION_VERSION_CT) {
-    // check_money_overflow above already validated both sums fit in uint64_t,
-    // so these calls cannot return false here. Still propagate the bool so
-    // a future call-order change cannot silently introduce a wrapped sum.
-    uint64_t amount_in = 0;
-    uint64_t amount_out = 0;
-    if (!get_inputs_money_amount(tx, amount_in) ||
-        !get_outs_money_amount(tx, amount_out)) {
-      logger(ERROR) << "tx amounts overflow uint64_t, rejected for tx id= "
-                    << Common::podToHex(txHash);
-      return false;
-    }
-
-    if (amount_in < amount_out) {
-      logger(ERROR) << "tx with wrong amounts: ins " << amount_in << ", outs " << amount_out << ", rejected for tx id= " << Common::podToHex(txHash);
-      return false;
-    }
-  }
-
-  //check if tx use different key images
-  if (!check_tx_inputs_keyimages_diff(tx)) {
-    logger(ERROR) << "tx has a few inputs with identical keyimages";
-    return false;
-  }
-
-  // Validate account registration tx extra
+  // Account-registration well-formedness: node-local policy, not consensus.
   {
     TransactionExtraAccountRegistration reg;
     if (getAccountRegistrationFromExtra(tx.extra, reg)) {
