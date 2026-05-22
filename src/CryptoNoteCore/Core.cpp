@@ -567,39 +567,6 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
   return true;
 }
 
-bool Core::check_tx_inputs_keyimages_diff(const Transaction& tx) {
-  std::unordered_set<Crypto::KeyImage> ki;
-  std::set<std::pair<uint64_t, uint32_t>> outputsUsage;
-  for (const auto& input : tx.inputs) {
-    if (input.type() == typeid(KeyInput)) {
-      const KeyInput& in = boost::get<KeyInput>(input);
-      if (!ki.insert(in.keyImage).second) {
-        logger(ERROR) << "Transaction has identical key images";
-          return false;
-      }
-
-      if (in.outputIndexes.empty()) {
-        logger(ERROR) << "Transaction's input uses empty output";
-        return false;
-      }
-
-      // outputIndexes are packed here, first is absolute, others are offsets to previous,
-      // so first can be zero, others can't
-      if (std::find(++std::begin(in.outputIndexes), std::end(in.outputIndexes), 0) != std::end(in.outputIndexes)) {
-        logger(ERROR) << "Transaction has identical output indexes";
-        return false;
-      }
-    } else if (input.type() == typeid(ConfidentialInput)) {
-      const ConfidentialInput& ci = boost::get<ConfidentialInput>(input);
-      if (!ki.insert(ci.keyImage).second) {
-        logger(ERROR) << "CT transaction has identical key images";
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 size_t Core::getBlockchainTotalTransactions() {
   return m_blockchain.getTotalTransactions();
 }

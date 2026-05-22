@@ -167,6 +167,7 @@ namespace CryptoNote {
      void print_blockchain_index();
      std::string print_pool(bool short_format);
      std::list<CryptoNote::tx_memory_pool::TransactionDetails> getMemoryPool() const;
+     tx_memory_pool& getMempool() { return m_mempool; } // Accessor used by tests, not intended for use in production code
      void print_blockchain_outs(const std::string& file);
      virtual bool getPoolChanges(const Crypto::Hash& tailBlockId, const std::vector<Crypto::Hash>& knownTxsIds,
                                  std::vector<Transaction>& addedTxs, std::vector<Crypto::Hash>& deletedTxsIds) override;
@@ -216,7 +217,6 @@ namespace CryptoNote {
 
      bool update_miner_block_template();
      bool handle_command_line(const boost::program_options::variables_map& vm);
-     bool check_tx_inputs_keyimages_diff(const Transaction& tx);
      virtual void blockchainUpdated() override;
      virtual void txDeletedFromPool() override;
      void poolUpdated();

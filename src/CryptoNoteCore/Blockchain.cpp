@@ -2888,8 +2888,8 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
   // Step 6: Verify all ConfidentialInput key images are absent from global
   // spent-key set. KeyInput key images were already checked in Step 4 via the
   // have_tx_keyimg_as_spent / check_tx_input pair, so we skip them here.
-  // (Intra-transaction uniqueness across both input types is already checked
-  // by check_tx_inputs_keyimages_diff in Core::check_tx_semantic.)
+  // (Intra-transaction uniqueness across both input types is already enforced
+  // upstream by checkTransactionConsensusShape.)
   for (size_t i = 0; i < tx.inputs.size(); ++i) {
     if (tx.inputs[i].type() != typeid(ConfidentialInput)) continue;
     const auto& cin = boost::get<ConfidentialInput>(tx.inputs[i]);
