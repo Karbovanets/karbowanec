@@ -1450,8 +1450,30 @@ bool Blockchain::switch_to_alternative_blockchain(const std::list<Crypto::Hash>&
   for (auto alt_ch_iter = alt_chain.begin(); alt_ch_iter != alt_chain.end(); alt_ch_iter++) {
     const auto& ch_ent_h = *alt_ch_iter;
     block_verification_context bvc = boost::value_initialized<block_verification_context>();
-    const Block& b = m_alternative_chains[ch_ent_h].bl;
-    bool r = pushBlock(b, get_block_hash(b), bvc);
+    const BlockEntry& alt_bei = m_alternative_chains[ch_ent_h];
+    const Block& b = alt_bei.bl;
+    // Replay using the transaction bodies we snapshotted at alt-block-accept
+    // time. The (Block, vector<Transaction>, hash, bvc) overload does NOT
+    // touch the mempool, so reorg success no longer depends on whether the
+    // pool still happens to cache these bodies. After a successful push we
+    // also take-and-discard each hash from the pool to mirror the cleanup
+    // that the load-from-pool path used to do implicitly.
+    std::vector<Transaction> alt_txs;
+    alt_txs.reserve(alt_bei.transactions.size());
+    for (const auto& te : alt_bei.transactions) {
+      alt_txs.push_back(te.tx);
+    }
+    const Crypto::Hash bh = get_block_hash(b);
+    bool r = pushBlock(b, alt_txs, bh, bvc);
+    if (r && bvc.m_added_to_main_chain) {
+      // Best-effort pool cleanup; the tx may or may not still be present and
+      // either outcome is fine — what matters is that it's not left in the
+      // mempool now that it has been committed to LMDB.
+      Transaction discarded; size_t discardedSize; uint64_t discardedFee;
+      for (const Crypto::Hash& txh : b.transactionHashes) {
+        (void)m_tx_pool.take_tx(txh, discarded, discardedSize, discardedFee);
+      }
+    }
     if (!r || !bvc.m_added_to_main_chain) {
       logger(INFO, BRIGHT_WHITE) << "Failed to switch to alternative blockchain";
       rollback_blockchain_switching(disconnected_chain, split_height);
@@ -1669,6 +1691,36 @@ bool Blockchain::handle_alternative_block(const Block& b, const Crypto::Hash& id
       bei.cumulative_difficulty = prevMeta.cumulativeDifficulty;
     }
     bei.cumulative_difficulty += current_diff;
+
+    // Snapshot the non-coinbase transaction bodies from the mempool into the
+    // alt block entry. Without this, switch_to_alternative_blockchain replays
+    // alt blocks via pushBlock(b, hash, bvc) → loadTransactions() → take_tx(),
+    // which depends on the local mempool still holding every referenced tx at
+    // reorg time. Alt blocks may sit in m_alternative_chains for a long time
+    // before they win on cumulative difficulty, and during that window the
+    // pool can churn (TTL eviction, restart, mined-block clearance) — a valid
+    // CT alt chain could then fail to switch in just because this node no
+    // longer happens to cache the bodies. Capture them now while the protocol
+    // layer has just admitted them, so reorg success depends on validated
+    // alt-chain data rather than local pool state.
+    //
+    // getTransaction() copies (does not consume) the body. If any referenced
+    // tx is missing, reject the alt block — we cannot validate or replay it
+    // later from this incomplete state.
+    bei.transactions.clear();
+    bei.transactions.reserve(b.transactionHashes.size());
+    for (const Crypto::Hash& txh : b.transactionHashes) {
+      Transaction tx;
+      if (!m_tx_pool.getTransaction(txh, tx)) {
+        logger(INFO, BRIGHT_RED) << "Alt block " << id << " references tx " << txh
+          << " not in pool; cannot snapshot, rejecting alt block.";
+        bvc.m_verification_failed = true;
+        return false;
+      }
+      TransactionEntry te;
+      te.tx = std::move(tx);
+      bei.transactions.push_back(std::move(te));
+    }
 
     auto i_res = m_alternative_chains.insert(blocks_ext_by_hash::value_type(id, bei));
     if (!i_res.second) {
@@ -3347,6 +3399,34 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
   std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
   auto blockProcessingStart = std::chrono::steady_clock::now();
+
+  // Bind the supplied transaction vector to the block's declared tx hash list
+  // before any indexed access. The loop below assumes |transactions| ==
+  // |blockData.transactionHashes| and that transactions[i] hashes to
+  // transactionHashes[i]. The (Block, hash, bvc) overload upstream guarantees
+  // this via take_tx-by-hash, but the (Block, vector<Transaction>, hash, bvc)
+  // overload is now also reached from alt-chain replay (snapshotted bodies)
+  // and any future caller that hand-assembles a tx vector — a count or order
+  // mismatch would silently mis-pair tx index entries and let a malformed
+  // alt-block snapshot index past transactionHashes.
+  if (transactions.size() != blockData.transactionHashes.size()) {
+    logger(ERROR, BRIGHT_RED) << "Block " << blockHash
+      << " transaction-vector size " << transactions.size()
+      << " does not match block transactionHashes count "
+      << blockData.transactionHashes.size();
+    bvc.m_verification_failed = true;
+    return false;
+  }
+  for (size_t i = 0; i < transactions.size(); ++i) {
+    Crypto::Hash computed = getObjectHash(transactions[i]);
+    if (computed != blockData.transactionHashes[i]) {
+      logger(ERROR, BRIGHT_RED) << "Block " << blockHash
+        << " transaction " << i << " hash mismatch: have=" << computed
+        << " expected=" << blockData.transactionHashes[i];
+      bvc.m_verification_failed = true;
+      return false;
+    }
+  }
 
   {
     uint32_t h = 0;
