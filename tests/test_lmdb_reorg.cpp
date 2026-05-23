@@ -599,6 +599,39 @@ bool buildAlternativeBlockWithTxs(CryptoNote::Core& core,
   return true;
 }
 
+bool buildMainBlockWithTxs(CryptoNote::Core& core,
+                           const CryptoNote::Currency& currency,
+                           test_generator& generator,
+                           const CryptoNote::AccountBase& miner,
+                           uint64_t timestamp,
+                           const std::list<CryptoNote::Transaction>& embeddedTxs,
+                           CryptoNote::Block& out) {
+  uint32_t chainHeight = core.getCurrentBlockchainHeight();
+  Crypto::Hash tailHash = core.get_tail_id();
+
+  uint64_t alreadyGenerated = 0;
+  if (!core.getAlreadyGeneratedCoins(tailHash, alreadyGenerated)) return false;
+
+  std::vector<size_t> blockSizes;
+  if (!core.getBackwardBlocksSizes(chainHeight - 1, blockSizes,
+                                   currency.rewardBlocksWindow())) {
+    return false;
+  }
+
+  if (!generator.constructBlock(out, chainHeight, tailHash, miner, timestamp,
+                                alreadyGenerated, blockSizes, embeddedTxs)) {
+    return false;
+  }
+
+  const CryptoNote::difficulty_type difficulty = core.getNextBlockDifficulty();
+  if (difficulty > 1) {
+    fillNonce(out, difficulty);
+  }
+
+  generator.addBlock(out, 0, 0, blockSizes, alreadyGenerated);
+  return true;
+}
+
 bool runReorgWithTxEvictionScenario() {
   Logging::ConsoleLogger logger;
   const CryptoNote::Currency currency = CryptoNote::CurrencyBuilder(logger).currency();
@@ -782,6 +815,178 @@ bool runReorgWithTxEvictionScenario() {
   return true;
 }
 
+bool runReorgWithTxAlreadyInMainChainScenario() {
+  Logging::ConsoleLogger logger;
+  const CryptoNote::Currency currency = CryptoNote::CurrencyBuilder(logger).currency();
+
+  const std::filesystem::path dataDir =
+      std::filesystem::path("lmdb_reorg_overlap_test_data");
+  std::error_code ec;
+  std::filesystem::remove_all(dataDir, ec);
+  std::filesystem::create_directories(dataDir, ec);
+  if (ec) {
+    std::cerr << "[FAIL] could not create overlap data directory: "
+              << ec.message() << std::endl;
+    return false;
+  }
+
+  System::Dispatcher dispatcher;
+  CryptoNote::Core core(currency, nullptr, logger, dispatcher, 0, false);
+  CryptoNote::CoreConfig coreConfig;
+  coreConfig.configFolder = dataDir.string();
+  CryptoNote::MinerConfig minerConfig;
+
+  if (!expect(core.init(coreConfig, minerConfig, false),
+              "overlap: core.init failed")) {
+    std::filesystem::remove_all(dataDir, ec);
+    return false;
+  }
+
+  auto cleanup = [&]() {
+    core.deinit();
+    std::filesystem::remove_all(dataDir, ec);
+  };
+
+  test_generator generator(currency);
+  CryptoNote::AccountBase miner;
+  miner.generate();
+  CryptoNote::AccountBase receiver;
+  receiver.generate();
+
+  std::vector<CryptoNote::Block> mainChain;
+  Crypto::Hash genesisHash = core.getBlockIdByHeight(0);
+  CryptoNote::Block genesis;
+  if (!expect(core.getBlockByHash(genesisHash, genesis),
+              "overlap: failed to load genesis")) {
+    cleanup();
+    return false;
+  }
+
+  std::vector<size_t> emptySizes;
+  generator.addBlock(genesis, 0, 0, emptySizes, 0);
+  mainChain.push_back(genesis);
+
+  const size_t totalMainBlocks = currency.minedMoneyUnlockWindow() + 6;
+  const uint64_t now = static_cast<uint64_t>(std::time(nullptr));
+  const uint64_t startTimestamp = now - 24 * 60 * 60;
+  for (size_t i = 0; i < totalMainBlocks; ++i) {
+    CryptoNote::Block block;
+    const uint64_t timestamp = (i == 0)
+        ? startTimestamp
+        : (mainChain.back().timestamp + currency.difficultyTarget());
+    if (!expect(buildMainBlock(core, currency, generator, miner, timestamp, block),
+                "overlap: failed to construct main-chain block")) {
+      cleanup();
+      return false;
+    }
+    if (!expect(submitBlock(core, block, true, false, "overlap: submit main block"),
+                "overlap: main block submit checks failed")) {
+      cleanup();
+      return false;
+    }
+    mainChain.push_back(block);
+  }
+
+  const CryptoNote::Block forkBase = mainChain.back();
+  const uint32_t forkHeight = get_block_height(forkBase);
+
+  CryptoNote::Transaction spendTx;
+  if (!expect(buildSpendOfBlock1Coinbase(core, currency, mainChain[1], miner,
+                                         receiver, spendTx),
+              "overlap: failed to build spend tx")) {
+    cleanup();
+    return false;
+  }
+  const Crypto::Hash spendTxHash = CryptoNote::getObjectHash(spendTx);
+
+  if (!expect(submitTxToPool(core, spendTx),
+              "overlap: failed to admit spend tx to mempool")) {
+    cleanup();
+    return false;
+  }
+
+  std::list<CryptoNote::Transaction> embedded{spendTx};
+  CryptoNote::Block mainSpendBlock;
+  if (!expect(buildMainBlockWithTxs(core, currency, generator, miner,
+                                    forkBase.timestamp + currency.difficultyTarget(),
+                                    embedded, mainSpendBlock),
+              "overlap: failed to build main spend block")) {
+    cleanup();
+    return false;
+  }
+  if (!expect(submitBlock(core, mainSpendBlock, true, false,
+                          "overlap: submit main spend block"),
+              "overlap: main spend block submit checks failed")) {
+    cleanup();
+    return false;
+  }
+
+  CryptoNote::Transaction poolCopy;
+  if (!expect(!core.getMempool().getTransaction(spendTxHash, poolCopy),
+              "overlap: spend tx unexpectedly remained in pool after main mining")) {
+    cleanup();
+    return false;
+  }
+
+  CryptoNote::Block altSpendBlock;
+  if (!expect(buildAlternativeBlockWithTxs(core, currency, generator, miner,
+                                           forkBase, embedded, altSpendBlock),
+              "overlap: failed to build alt spend block")) {
+    cleanup();
+    return false;
+  }
+  if (!expect(submitBlock(core, altSpendBlock, false, false,
+                          "overlap: submit alt spend block"),
+              "overlap: alt spend block submit checks failed")) {
+    cleanup();
+    return false;
+  }
+
+  CryptoNote::Block altWinningBlock;
+  std::list<CryptoNote::Transaction> noTxs;
+  if (!expect(buildAlternativeBlockWithTxs(core, currency, generator, miner,
+                                           altSpendBlock, noTxs, altWinningBlock),
+              "overlap: failed to build winning alt block")) {
+    cleanup();
+    return false;
+  }
+  if (!expect(submitBlock(core, altWinningBlock, true, true,
+                          "overlap: submit winning alt block"),
+              "overlap: winning alt block submit checks failed")) {
+    cleanup();
+    return false;
+  }
+
+  const uint32_t expectedHeight = forkHeight + 3;
+  if (!expect(core.getCurrentBlockchainHeight() == expectedHeight,
+              "overlap: unexpected height after reorg")) {
+    cleanup();
+    return false;
+  }
+  if (!expect(core.getBlockIdByHeight(expectedHeight - 1) == get_block_hash(altWinningBlock),
+              "overlap: top hash mismatch after reorg")) {
+    cleanup();
+    return false;
+  }
+
+  Crypto::Hash containingBlock{};
+  uint32_t containingHeight = 0;
+  if (!expect(core.getBlockContainingTx(spendTxHash, containingBlock, containingHeight),
+              "overlap: spend tx not indexed after reorg")) {
+    cleanup();
+    return false;
+  }
+  if (!expect(containingBlock == get_block_hash(altSpendBlock) &&
+              containingHeight == forkHeight + 1,
+              "overlap: spend tx resolved to wrong block after reorg")) {
+    cleanup();
+    return false;
+  }
+
+  cleanup();
+  return true;
+}
+
 } // namespace
 
 int main() {
@@ -794,6 +999,10 @@ int main() {
   }
 
   if (!runReorgWithTxEvictionScenario()) {
+    return 1;
+  }
+
+  if (!runReorgWithTxAlreadyInMainChainScenario()) {
     return 1;
   }
 

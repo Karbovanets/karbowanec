@@ -229,11 +229,20 @@ bool gen_double_spend_in_alt_chain_in_the_same_block<txs_keeped_by_block>::gener
   }
   MAKE_TX_LIST(events, txs_1, bob_account, alice_account, send_amount - this->m_currency.minimumFee(), blk_1);
   events.insert(events.begin() + tx_1_idx, tx_1);
-  MAKE_NEXT_BLOCK_TX_LIST(events, blk_3, blk_1r, miner_account, txs_1);
 
-  // Try to switch to alternative chain
-  DO_CALLBACK(events, "mark_invalid_block");
-  MAKE_NEXT_BLOCK(events, blk_4, blk_3, miner_account);
+  if (has_invalid_tx)
+  {
+    DO_CALLBACK(events, "mark_invalid_block");
+    MAKE_NEXT_BLOCK_TX_LIST(events, blk_3, blk_1r, miner_account, txs_1);
+  }
+  else
+  {
+    MAKE_NEXT_BLOCK_TX_LIST(events, blk_3, blk_1r, miner_account, txs_1);
+
+    // Try to switch to alternative chain
+    DO_CALLBACK(events, "mark_invalid_block");
+    MAKE_NEXT_BLOCK(events, blk_4, blk_3, miner_account);
+  }
 
   DO_CALLBACK(events, "check_double_spend");
 

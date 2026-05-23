@@ -1705,18 +1705,34 @@ bool Blockchain::handle_alternative_block(const Block& b, const Crypto::Hash& id
     // layer has just admitted them, so reorg success depends on validated
     // alt-chain data rather than local pool state.
     //
-    // getTransaction() copies (does not consume) the body. If any referenced
-    // tx is missing, reject the alt block — we cannot validate or replay it
-    // later from this incomplete state.
+    // getTransaction() copies (does not consume) the body. If the tx is not in
+    // the pool, fall back to the current main chain: competing branches may
+    // legitimately include the same tx that our active branch has already
+    // mined, and Core::add_new_tx() deliberately keeps such txs out of the
+    // mempool. If any referenced tx is missing from both stores, reject the alt
+    // block; we cannot validate or replay it later from incomplete state.
     bei.transactions.clear();
     bei.transactions.reserve(b.transactionHashes.size());
     for (const Crypto::Hash& txh : b.transactionHashes) {
       Transaction tx;
       if (!m_tx_pool.getTransaction(txh, tx)) {
-        logger(INFO, BRIGHT_RED) << "Alt block " << id << " references tx " << txh
-          << " not in pool; cannot snapshot, rejecting alt block.";
-        bvc.m_verification_failed = true;
-        return false;
+        uint32_t block = 0;
+        uint16_t txSlot = 0;
+        if (!m_db.getTxIndex(txh, block, txSlot)) {
+          logger(INFO, BRIGHT_RED) << "Alt block " << id << " references tx " << txh
+            << " not in pool or current chain; cannot snapshot, rejecting alt block.";
+          bvc.m_verification_failed = true;
+          return false;
+        }
+
+        try {
+          tx = transactionByIndex({block, txSlot}).tx;
+        } catch (const std::exception& e) {
+          logger(INFO, BRIGHT_RED) << "Alt block " << id << " references tx " << txh
+            << " indexed in current chain but unreadable: " << e.what();
+          bvc.m_verification_failed = true;
+          return false;
+        }
       }
       TransactionEntry te;
       te.tx = std::move(tx);
