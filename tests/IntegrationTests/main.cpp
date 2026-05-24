@@ -30,6 +30,7 @@
 
 #include "../IntegrationTestLib/BaseFunctionalTests.h"
 #include "../IntegrationTestLib/Logger.h"
+#include "../IntegrationTestLib/TestNode.h"  // for Tests::accountKeysFromWallet
 
 #include "Logging/ConsoleLogger.h"
 
@@ -373,7 +374,7 @@ public:
     localNode->addObserver(&localHCO);
     remoteNode->addObserver(&remoteHCO);
     for (size_t blockNumber = 0; blockNumber < blocksCount; ++blockNumber) {
-      nodeDaemons.front()->startMining(1, wallet->getAddress());
+      nodeDaemons.front()->startMining(1, Tests::accountKeysFromWallet(*wallet));
       blockMined.wait();
       CHECK_AND_ASSERT_MES(blockArrivedToRemote.wait_for(std::chrono::milliseconds(5000)), false, "block propagation too slow >5000ms.");
       nodeDaemons.front()->stopMining();

@@ -58,11 +58,12 @@ if(MSVC)
 endif()
 
 target_link_libraries(CoreTests TestGenerator Wallet CryptoNoteCore Serialization System Logging Common Crypto BlockchainExplorer Checkpoints ${Boost_LIBRARIES})
-target_link_libraries(IntegrationTests IntegrationTestLibrary Wallet NodeRpcProxy InProcessNode P2P Rpc Http Transfers Serialization System CryptoNoteCore Logging Common Crypto BlockchainExplorer gtest Mnemonics upnpc-static ${Boost_LIBRARIES})
+target_link_libraries(CryptoTests Crypto Common ${Boost_LIBRARIES})
+target_link_libraries(IntegrationTests IntegrationTestLibrary Wallet NodeRpcProxy InProcessNode P2P Rpc Http CryptoNoteProtocol Transfers Serialization System CryptoNoteCore Logging Common Crypto BlockchainExplorer gtest Mnemonics upnpc-static ${Boost_LIBRARIES})
 target_link_libraries(NodeRpcProxyTests NodeRpcProxy CryptoNoteCore Rpc Http Serialization System Logging Common Crypto ${Boost_LIBRARIES})
 target_link_libraries(PerformanceTests Wallet CryptoNoteCore Serialization Logging Common Crypto ${Boost_LIBRARIES})
 target_link_libraries(SystemTests System gtest_main ${Boost_LIBRARIES})
-target_link_libraries(TransfersTests IntegrationTestLibrary Wallet gtest_main InProcessNode NodeRpcProxy P2P Rpc Http BlockchainExplorer CryptoNoteCore Serialization System Logging Transfers Common Crypto Mnemonics upnpc-static ${Boost_LIBRARIES})
+target_link_libraries(TransfersTests IntegrationTestLibrary Wallet gtest_main InProcessNode NodeRpcProxy P2P Rpc Http CryptoNoteProtocol BlockchainExplorer CryptoNoteCore Serialization System Logging Transfers Common Crypto Mnemonics upnpc-static ${Boost_LIBRARIES})
 target_link_libraries(UnitTests gtest_main PaymentGate Wallet TestGenerator InProcessNode NodeRpcProxy Rpc Http Transfers Serialization System Logging BlockchainExplorer CryptoNoteCore Checkpoints Common Crypto Mnemonics ${Boost_LIBRARIES})
 target_link_libraries(LMDBReorgTests TestGenerator Wallet CryptoNoteCore Serialization System Logging Common Crypto BlockchainExplorer Checkpoints ${Boost_LIBRARIES})
 target_link_libraries(DifficultyTests CryptoNoteCore Serialization Crypto Logging Common ${Boost_LIBRARIES})
@@ -91,6 +92,19 @@ if(MSVC)
   target_link_libraries(UnitTests legacy_stdio_definitions.lib)
   target_link_libraries(LMDBReorgTests ws2_32)
   target_link_libraries(LMDBReorgTests legacy_stdio_definitions.lib)
+  # PerformanceTests pulls in Common::StringTools which references the inline
+  # sscanf shim; same MSVC compat hookup as the other CryptoNoteCore-linking
+  # targets above. Without this the linker reports unresolved `sscanf`.
+  target_link_libraries(PerformanceTests legacy_stdio_definitions.lib)
+  # NodeRpcProxyTests transitively depends on System (TLS streambuf) which
+  # needs OpenSSL, and on Common (sscanf shim). The production daemon /
+  # wallet binaries link OPENSSL_LIBRARIES the same way (see src/CMakeLists.txt).
+  target_link_libraries(NodeRpcProxyTests legacy_stdio_definitions.lib ${OPENSSL_LIBRARIES})
+  # IntegrationTests and TransfersTests transitively use System TLS streambufs
+  # (via NodeRpcProxy / Http) and Common StringTools — same shim + OpenSSL
+  # link as NodeRpcProxyTests above.
+  target_link_libraries(IntegrationTests legacy_stdio_definitions.lib ${OPENSSL_LIBRARIES} ws2_32)
+  target_link_libraries(TransfersTests   legacy_stdio_definitions.lib ${OPENSSL_LIBRARIES} ws2_32)
 endif()
 
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR APPLE AND NOT ANDROID)

@@ -29,17 +29,13 @@
 using namespace std;
 typedef Crypto::Hash chash;
 
-bool operator !=(const Crypto::EllipticCurveScalar &a, const Crypto::EllipticCurveScalar &b) {
-  return 0 != memcmp(&a, &b, sizeof(Crypto::EllipticCurveScalar));
-}
-
-bool operator !=(const Crypto::EllipticCurvePoint &a, const Crypto::EllipticCurvePoint &b) {
-  return 0 != memcmp(&a, &b, sizeof(Crypto::EllipticCurvePoint));
-}
-
-bool operator !=(const Crypto::KeyDerivation &a, const Crypto::KeyDerivation &b) {
-  return 0 != memcmp(&a, &b, sizeof(Crypto::KeyDerivation));
-}
+// The local operator!= overloads for EllipticCurveScalar / EllipticCurvePoint
+// / KeyDerivation that used to live here were removed: crypto/crypto.h now
+// provides them via CRYPTO_MAKE_COMPARABLE on every comparable PoD type
+// (Hash, EllipticCurveScalar, EllipticCurvePoint, PublicKey, SecretKey,
+// KeyDerivation, KeyImage, Signature). Keeping local copies caused an
+// ambiguous-overload diagnostic — both candidates visible at the call
+// sites via ADL.
 
 int main(int argc, char *argv[]) {
   fstream input;
@@ -68,27 +64,44 @@ int main(int argc, char *argv[]) {
         goto error;
       }
     } else if (cmd == "random_scalar") {
-      Crypto::EllipticCurveScalar expected, actual;
+      // Retired: the legacy Keccak-state PRNG that produced these recorded
+      // vectors was replaced by an OS-CSPRNG-backed Random::randomBytes
+      // (see crypto/random.h header comment). The new generator is
+      // intentionally not seedable, so vectors recorded against a specific
+      // seed of the old PRNG cannot be matched. We still consume the
+      // expected value from the stream so file offsets stay aligned with
+      // the rest of the vectors.
+      Crypto::EllipticCurveScalar expected;
       get(input, expected);
-      random_scalar(actual);
-      if (expected != actual) {
-        goto error;
+      static bool announced_random_scalar_skip = false;
+      if (!announced_random_scalar_skip) {
+        cerr << "note: skipping `random_scalar` cases (retired by CSPRNG hardening)" << endl;
+        announced_random_scalar_skip = true;
       }
     } else if (cmd == "hash_to_scalar") {
       vector<char> data;
       Crypto::EllipticCurveScalar expected, actual;
       get(input, data, expected);
-      hash_to_scalar(data.data(), data.size(), actual);
+      // Qualified call: the production crypto.h header now also exports
+      // Crypto::hash_to_scalar with a matching signature, so ADL on the
+      // EllipticCurveScalar argument makes the unqualified name ambiguous
+      // with the file-scope shim in crypto.cpp. Force global resolution.
+      ::hash_to_scalar(data.data(), data.size(), actual);
       if (expected != actual) {
         goto error;
       }
     } else if (cmd == "generate_keys") {
-      Crypto::PublicKey expected1, actual1;
-      Crypto::SecretKey expected2, actual2;
+      // Retired: see comment on `random_scalar`. generate_keys() consumes
+      // PRNG bytes internally so its output is non-reproducible under the
+      // current CSPRNG. We still drain the expected values to keep file
+      // offsets aligned for the rest of the harness.
+      Crypto::PublicKey expected1;
+      Crypto::SecretKey expected2;
       get(input, expected1, expected2);
-      generate_keys(actual1, actual2);
-      if (expected1 != actual1 || expected2 != actual2) {
-        goto error;
+      static bool announced_generate_keys_skip = false;
+      if (!announced_generate_keys_skip) {
+        cerr << "note: skipping `generate_keys` cases (retired by CSPRNG hardening)" << endl;
+        announced_generate_keys_skip = true;
       }
     } else if (cmd == "check_key") {
       Crypto::PublicKey key;
@@ -185,7 +198,7 @@ int main(int argc, char *argv[]) {
       chash h;
       Crypto::EllipticCurvePoint expected, actual;
       get(input, h, expected);
-      hash_to_point(h, actual);
+      ::hash_to_point(h, actual);
       if (expected != actual) {
         goto error;
       }
@@ -193,7 +206,7 @@ int main(int argc, char *argv[]) {
       Crypto::PublicKey key;
       Crypto::EllipticCurvePoint expected, actual;
       get(input, key, expected);
-      hash_to_ec(key, actual);
+      ::hash_to_ec(key, actual);
       if (expected != actual) {
         goto error;
       }

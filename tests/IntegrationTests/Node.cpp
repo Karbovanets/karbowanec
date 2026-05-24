@@ -32,6 +32,7 @@
 #include "Wallet/WalletGreen.h"
 
 #include "../IntegrationTestLib/TestNetwork.h"
+#include "../IntegrationTestLib/TestNode.h"  // for Tests::accountKeysFromWallet
 #include "../IntegrationTestLib/NodeObserver.h"
 #include "../IntegrationTestLib/NodeCallback.h"
 
@@ -200,8 +201,13 @@ TEST_F(NodeTest, generateBlockchain) {
 
     wallet.initialize(TEST_WALLET_FILE, password);
 
+    // Generate a fresh subaddress AND its keys; signed-PoW needs both spend
+    // and view secret. WalletGreen exposes per-address spend keys + a shared
+    // view key (the address index is just bookkeeping); Tests::accountKeysFromWallet
+    // bundles them into a flat AccountKeys for TestNode::startMining.
     std::string minerAddress = wallet.createAddress();
-    daemon.startMining(1, minerAddress);
+    (void)minerAddress;  // kept for symmetry / future diagnostics
+    daemon.startMining(1, Tests::accountKeysFromWallet(wallet, 0));
 
     System::Timer timer(dispatcher);
 
@@ -246,8 +252,10 @@ TEST_F(NodeTest, addMoreBlocks) {
     CryptoNote::WalletGreen wallet(dispatcher, currency, *mainNode, logger);
     wallet.load(TEST_WALLET_FILE, password);
 
+    // See first Node.cpp call site for why we pull AccountKeys, not the address.
     std::string minerAddress = wallet.getAddress(0);
-    daemon.startMining(1, minerAddress);
+    (void)minerAddress;
+    daemon.startMining(1, Tests::accountKeysFromWallet(wallet, 0));
 
     System::Timer timer(dispatcher);
 
