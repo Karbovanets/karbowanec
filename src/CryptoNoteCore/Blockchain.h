@@ -161,10 +161,9 @@ namespace CryptoNote {
                                        std::vector<Crypto::Hash>& transactionHashes);
     bool isBlockInMainChain(const Crypto::Hash& blockId);
     bool isInCheckpointZone(const uint32_t height);
-    // Restricts the zone to checkpoints sourced from trusted origins (the
-    // baked-in CHECKPOINTS table or operator file). Used to gate the CT
-    // structural-only validation fast path — DNS-added checkpoints must
-    // not be able to unlock that bypass.
+    // Restricts the zone to trusted checkpoints: baked-in CHECKPOINTS,
+    // operator file checkpoints, or signed DNS checkpoints. Used to gate the
+    // CT structural-only validation fast path during checkpointed sync.
     bool isInHardcodedCheckpointZone(const uint32_t height);
 
     bool getHashingBlob(const uint32_t height, BinaryArray& blob);

@@ -3415,17 +3415,14 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
   
   // Two separate notions of "in a checkpoint zone":
   //
-  // - inCheckpoint (broad): height is covered by ANY checkpoint, including
-  //   DNS-added ones. Used only for the block-level anchor check + the
-  //   legacy PoW skip below. (PoW skip under poisoned DNS is a separate
-  //   open hardening question — see the comment further down.)
+  // - inCheckpoint (broad): height is covered by any accepted checkpoint.
+  //   Used for the block-level anchor check and legacy PoW skip.
   //
-  // - inHardcodedCheckpoint (narrow): height is covered by a checkpoint
-  //   sourced from a trusted origin only (binary's CHECKPOINTS table or
-  //   operator file). Used to gate the CT structural-only validation
-  //   fast path further down, so a DNS-injected checkpoint cannot unlock
-  //   that shortcut and ship a block whose Triptych/GK/balance-kernel
-  //   proofs were never verified.
+  // - inHardcodedCheckpoint (trusted): height is covered by a checkpoint
+  //   sourced from the baked-in table, an operator file, or signed DNS.
+  //   Despite the historical name, signed DNS records reach this set only
+  //   after signature verification. This gates the CT structural-only fast
+  //   path for checkpointed historical sync.
   const bool inCheckpoint           = m_checkpoints.is_in_checkpoint_zone(newHeight);
   const bool inHardcodedCheckpoint  = m_checkpoints.is_in_hardcoded_checkpoint_zone(newHeight);
   if (inCheckpoint) {
@@ -3444,15 +3441,11 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
       return false;
     }
   }
-  // Open hardening question: the PoW skip above uses the broad
-  // `inCheckpoint` flag, so a poisoned DNS checkpoint at a height the
-  // attacker controls would let their malicious block (hash matching the
-  // injected anchor) bypass PoW validation during fresh sync. The user-
-  // facing security note in this codebase scopes the immediate fix to
-  // the CT structural-only path (the qualitatively different "forged
-  // proof persistently corrupts confidentialSupply" risk); narrowing
-  // the PoW skip to hardcoded-only is a separate decision and would
-  // change sync-time CPU cost for legitimate DNS-anchored syncs.
+  // Checkpointed blocks skip PoW after the block hash matches a trusted
+  // checkpoint. This is the checkpoint trust tradeoff: the operator accepts
+  // the checkpoint signer/operator assertion for faster historical sync.
+  // Running with --without-checkpoints disables this shortcut and performs
+  // full local validation instead.
 
   auto longhash_calculating_time = std::chrono::duration_cast<std::chrono::milliseconds>(
     std::chrono::steady_clock::now() - longhashTimeStart).count();
@@ -3593,20 +3586,13 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
                      ? transactions[i].fee
                      : getInputAmount(curTx) - getOutputAmount(curTx);
 
-      // Under a *hardcoded* checkpoint the block hash has already been verified
-      // by the network and the binary we trust — we accept that the heavy
-      // crypto (Triptych, GK, balance kernel, ring resolution) was validated
-      // by the originating peers and skip to structural sanity (version,
-      // shape, subgroup checks, key-image domain, double-spend) only.
-      //
-      // DNS-added checkpoints deliberately do NOT enable this bypass. They
-      // are unsigned anchors that an on-path attacker can forge; using them
-      // to skip CT proof verification lets that attacker mint balanced CT
-      // outputs against ring-sigs that were never actually checked — and
-      // unlike a transparent-tx forgery, that permanently corrupts
-      // confidentialSupply (the consensus invariant we track for ECC-CT).
-      // So the predicate here is inHardcodedCheckpoint, not the broad
-      // inCheckpoint we set above.
+      // Under a trusted checkpoint the block hash has already matched an
+      // accepted anchor. We accept that the heavy historical crypto
+      // (Triptych, GK, balance kernel, ring resolution) was validated before
+      // publication of that checkpoint and run only structural sanity here
+      // (version, shape, subgroup checks, key-image domain, double-spend).
+      // Built-in, operator-file, and signed-DNS checkpoints all reach this
+      // path; --without-checkpoints keeps the full validation path active.
       if (inHardcodedCheckpoint) {
         if (!checkTransactionInputs(curTx, TxValidationContext::CheckpointedBlock)) {
           logger(INFO, BRIGHT_WHITE) << "Block " << blockHash

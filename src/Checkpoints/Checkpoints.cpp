@@ -99,10 +99,9 @@ bool Checkpoints::is_in_checkpoint_zone(uint32_t  height) const {
 }
 //---------------------------------------------------------------------------
 bool Checkpoints::is_in_hardcoded_checkpoint_zone(uint32_t height) const {
-  // *rbegin() is the largest element; the zone is everything at or below it.
-  // DNS-added checkpoints are deliberately excluded — they can extend the
-  // top of m_points but not the top of m_hardcoded_heights, so a DNS
-  // injection cannot grow the trusted bypass zone.
+  // *rbegin() is the largest trusted checkpoint; the zone is everything at
+  // or below it. Despite the historical "hardcoded" name, signed DNS
+  // checkpoints are admitted here after signature verification.
   return !m_hardcoded_heights.empty() && (height <= *m_hardcoded_heights.rbegin());
 }
 //---------------------------------------------------------------------------

@@ -58,25 +58,23 @@ namespace CryptoNote
       return *this;
     }
 
-    // `hardcoded`: whether this checkpoint comes from a trusted source — the
-    // baked-in CryptoNote::CHECKPOINTS table, or an operator-supplied file
-    // loaded via --load-checkpoints (both inherit the trust of the binary or
-    // its operator). DNS-added checkpoints pass `hardcoded=false` since DNS
-    // TXT records have no cryptographic signature and a path-on-attacker can
-    // inject arbitrary height→hash mappings. The flag is consulted by
-    // is_in_hardcoded_checkpoint_zone() to decide whether expensive consensus
-    // validation (in particular: the CT structural-only fast path) is allowed
-    // to short-circuit. The default is true to preserve the semantics of all
-    // existing call sites (binary table, file load) without per-call updates.
+    // `hardcoded` is the historical name for "trusted checkpoint". It is true
+    // for anchors inside the operator's trust boundary: the baked-in
+    // CryptoNote::CHECKPOINTS table, an operator-supplied file loaded via
+    // --load-checkpoints, or a DNS record verified against
+    // DNS_CHECKPOINT_SIGNERS. Unsigned DNS records are rejected before this
+    // function is called. The flag feeds is_in_hardcoded_checkpoint_zone(),
+    // which decides whether expensive historical consensus validation,
+    // including the CT structural-only fast path, may short-circuit.
     bool add_checkpoint(uint32_t height, const std::string& hash_str, bool hardcoded = true);
     bool load_checkpoints_from_file(const std::string& fileName);
     bool load_checkpoints_from_dns();
     bool is_in_checkpoint_zone(uint32_t height) const;
-    // True iff `height` is at or below the largest *hardcoded* checkpoint
-    // height. Excludes DNS-added checkpoints from the zone determination —
-    // those serve only as anchor hints in check_block(), they do not grant
-    // the bypass that hardcoded checkpoints do. Returns false when no
-    // hardcoded checkpoints have been seeded (e.g. testnet, --disable-checkpoints).
+    // True iff `height` is at or below the largest trusted checkpoint height.
+    // The method keeps the historical "hardcoded" name, but the trusted set
+    // includes built-in checkpoints, operator file checkpoints, and signed DNS
+    // checkpoints. Returns false when no trusted checkpoints have been seeded
+    // (e.g. testnet, --without-checkpoints).
     bool is_in_hardcoded_checkpoint_zone(uint32_t height) const;
     bool check_block(uint32_t height, const Crypto::Hash& h) const;
     bool check_block(uint32_t height, const Crypto::Hash& h, bool& is_a_checkpoint) const;
