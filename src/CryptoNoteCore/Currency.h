@@ -130,12 +130,24 @@ public:
   uint32_t minNumberVotingBlocks() const { return (m_upgradeVotingWindow * m_upgradeVotingThreshold + 99) / 100; }
   uint32_t maxUpgradeDistance() const { return 7 * m_upgradeWindow; }
   uint32_t calculateUpgradeHeight(uint32_t voteCompleteHeight) const { return voteCompleteHeight + m_upgradeWindow; }
-  bool isConfidentialTransactionsActivated(uint32_t height) const { return height >= CryptoNote::parameters::CT_FORK_HEIGHT; }
+  // CT activation gate: uses the dynamic m_upgradeHeightV6, NOT the compile-time
+  // CT_FORK_HEIGHT constant. This is the same height the upgrade detector uses
+  // to dispatch block major versions; tying the two together means:
+  //   - Mainnet: m_upgradeHeightV6 defaults to parameters::UPGRADE_HEIGHT_V6 =
+  //     CT_FORK_HEIGHT, so behavior is identical to the old compile-time check.
+  //   - Testnet: the testnet override (Currency.cpp) lowers m_upgradeHeightV6
+  //     to 100; CT activates at testnet height 100, matching block version
+  //     dispatch (a previously-broken state where V6 blocks were accepted but
+  //     CT v2 txs inside them were rejected by the gate).
+  //   - Tests: CurrencyBuilder::upgradeHeightV6(N) override is now respected
+  //     by both block version dispatch and the CT tx-version gate.
+  bool isConfidentialTransactionsActivated(uint32_t height) const { return height >= m_upgradeHeightV6; }
   // Block major v6+ replaces the legacy dual height/timestamp unlock_time
   // interpretation with a height-only rule capped at
   // CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6, both for accepting new txs and for
   // deciding whether referenced outputs from old txs are spendable.
-  bool isUnlockTimeCappedAt(uint32_t height) const { return height >= CryptoNote::parameters::UPGRADE_HEIGHT_V6; }
+  // Uses dynamic m_upgradeHeightV6 for the same testnet/test reasons as above.
+  bool isUnlockTimeCappedAt(uint32_t height) const { return height >= m_upgradeHeightV6; }
   uint8_t currentTransactionVersion(uint32_t height) const {
     return isConfidentialTransactionsActivated(height) ? TRANSACTION_VERSION_CT : CURRENT_TRANSACTION_VERSION;
   }
