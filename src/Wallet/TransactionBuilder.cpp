@@ -162,7 +162,8 @@ Transaction buildConfidentialTransaction(
     const Crypto::SecretKey& viewSecretKey,
     uint64_t fee,
     const std::string& extra,
-    Crypto::SecretKey& txSecretKey) {
+    Crypto::SecretKey& txSecretKey,
+    uint64_t unlockTime) {
 
   if (inputs.empty()) {
     throw std::invalid_argument("CT transaction must have at least one input");
@@ -307,7 +308,11 @@ Transaction buildConfidentialTransaction(
   // used by isOurOutgoingTransaction() in TransfersConsumer.cpp.
   Transaction tx;
   tx.version = TRANSACTION_VERSION_CT;
-  tx.unlockTime = 0;  // CT transactions: unlockTime must be 0
+  // Caller-supplied unlockTime. The consensus rule is `<= CRYPTONOTE_MAX_
+  // UNLOCK_HEIGHT_V6` (same height-only cap as v6 plain). 0 means
+  // immediately spendable; non-zero values enable refund-on-timeout
+  // patterns. See CT-DESIGN.md for the threat-model rationale.
+  tx.unlockTime = unlockTime;
   tx.fee = fee;
 
   tx.inputs.resize(inputs.size());

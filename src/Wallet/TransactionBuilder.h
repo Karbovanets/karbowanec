@@ -113,6 +113,13 @@ struct CTBuildOutput {
 // extra:         extra data (payment ID, etc.) — encoded in tx.extra.
 // txSecretKey:   [out] the deterministic tx secret key for sending-proof.
 //
+// unlockTime: height before which the output is unspendable. Defaults to 0
+// (immediately spendable). Karbo CT transactions previously required this
+// to be 0; the relaxed rule (see CT-DESIGN.md "hide amounts, not graph"
+// threat model) allows any value up to CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6,
+// matching the v6 plain-tx cap. Wallets that want pre-signed refund
+// transactions for atomic swaps or vesting schedules pass a real height here.
+//
 // Returns the fully constructed and signed CryptoNote::Transaction.
 // Throws on invalid input (non-canonical denomination, ring size mismatch, etc.).
 Transaction buildConfidentialTransaction(
@@ -121,6 +128,7 @@ Transaction buildConfidentialTransaction(
     const Crypto::SecretKey& viewSecretKey,
     uint64_t fee,
     const std::string& extra,
-    Crypto::SecretKey& txSecretKey);
+    Crypto::SecretKey& txSecretKey,
+    uint64_t unlockTime = 0);
 
 } // namespace CryptoNote

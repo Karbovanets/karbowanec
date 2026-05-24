@@ -209,12 +209,28 @@ bool checkTransactionConsensusShape(const Transaction& tx,
     }
   }
 
-  // ── 10. v2 CT: unlockTime must be zero ──────────────────────────────────
-  // CT outputs are not lockable; the ring decoy selection assumes uniform
-  // unlock semantics. A non-zero unlockTime on a CT tx is malformed.
+  // ── 10. v2 CT: unlockTime within the v6 height-only cap ─────────────────
+  // Karbo CT hides amounts, not the transaction graph (see CT-DESIGN.md).
+  // Under that threat model, exposing a per-output lock height is acceptable
+  // (it labels the output as "time-locked CT" but doesn't reveal the amount),
+  // and the practical utility — pre-signed refund transactions for atomic
+  // swaps, vesting schedules, time-delayed payouts, escrow with timeout —
+  // is significant.
+  //
+  // The cap is the same one v6 plain txs use:
+  //   tx.unlockTime <= CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6 (~76 years of blocks)
+  // This is height-only — no timestamp branch, matching the v6 rule cleanup
+  // that retired the dual height/timestamp ambiguity. Values above the cap
+  // are bogus (Unix-timestamp typo for height, etc.) and rejected as
+  // structurally invalid.
+  //
+  // Historical note: this rule was originally `unlockTime == 0`. That was
+  // overly strict for the "hide amounts only" threat model; relaxed to the
+  // v6 cap so CT can participate in the same time-lock-based protocols as
+  // v6 plain txs do.
   if (tx.version == TRANSACTION_VERSION_CT) {
-    if (tx.unlockTime != 0) {
-      setError(error, "CT transaction has non-zero unlockTime");
+    if (tx.unlockTime > CryptoNote::parameters::CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6) {
+      setError(error, "CT transaction unlockTime exceeds CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6");
       return false;
     }
   }

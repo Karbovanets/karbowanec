@@ -49,7 +49,9 @@ class Currency;
 //     zero-amount ring buckets, Triptych proof slot present
 //   * Intra-tx key-image uniqueness across all input variants
 //   * v1 plain: amount_in >= amount_out
-//   * v2 CT: unlockTime == 0
+//   * v2 CT: unlockTime <= CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6 (same height-only
+//     cap as v6 plain — see CT-DESIGN.md for the "hide amounts, not graph"
+//     threat-model rationale that allows CT outputs to be lockable)
 //
 // Out of scope (kept in the downstream validators where context lives):
 //   * Curve membership for individual keys (ct_public_key_valid,

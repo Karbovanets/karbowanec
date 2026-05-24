@@ -471,7 +471,7 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
   // signatures.size()==inputs.size(), per-input authorization variant match,
   // KeyInput outputIndexes structure + ring-sig count, ConfidentialInput
   // ring-size consistency + Triptych proof slot, intra-tx keyimage uniqueness,
-  // v1 plain amount_in >= amount_out, CT unlockTime == 0.
+  // v1 plain amount_in >= amount_out, CT unlockTime within v6 cap.
   {
     std::string shapeErr;
     if (!checkTransactionConsensusShape(tx, /*blockHeight=*/0u, m_currency, &shapeErr)) {
