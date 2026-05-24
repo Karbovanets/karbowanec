@@ -1436,8 +1436,12 @@ bool Core::handleIncomingTransaction(const Transaction& tx, const Crypto::Hash& 
 
     // v6+: drop the legacy dual height/timestamp unlock_time interpretation.
     // New txs must use a height ≤ CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6, or 0.
-    // CT txs already require unlock_time == 0 (enforced in check_tx_semantic);
-    // this also constrains v1 plain txs that remain valid post-fork.
+    // The same cap applies uniformly to both v1 plain txs and v2 CT txs
+    // post-fork. CT structural validation (checkTransactionConsensusShape)
+    // enforces the same bound; this check is the height-aware policy
+    // tier and the CT consensus tier is the byte-level structural tier.
+    // See CT-DESIGN.md for why CT honors the v6 cap rather than being
+    // pinned at unlock_time == 0 like the original Karbo CT draft.
     if (m_currency.isUnlockTimeCappedAt(height) &&
         tx.unlockTime > CryptoNote::parameters::CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6) {
       logger(ERROR) << "Transaction verification failed: unlock_time " << tx.unlockTime

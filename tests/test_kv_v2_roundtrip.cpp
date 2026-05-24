@@ -37,10 +37,16 @@ T makePod(uint8_t seed) {
   return v;
 }
 
+// Regression sentinel for the CT unlockTime wire-binding bug: a non-zero
+// value here makes the round-trip assertion below catch any reintroduction
+// of the "force unlockTime = 0 during prefix serialization" behavior.
+// Picked well under CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6.
+static constexpr uint64_t kRegressionUnlockTime = 12345;
+
 TransactionPrefix buildV2PrefixCommon() {
   TransactionPrefix p;
   p.version = TRANSACTION_VERSION_CT;
-  p.unlockTime = 0;
+  p.unlockTime = kRegressionUnlockTime;
   p.fee = 10000000000ULL;
   p.extra = {0x01, 0xAA, 0xBB, 0xCC};
 
@@ -130,12 +136,19 @@ int tryRoundtrip(const char* label, const TransactionPrefix& src) {
     Common::MemoryInputStream stream(body.data(), body.size());
     KVBinaryInputStreamSerializer s(stream);
     serialize(parsed, s);
-    std::printf("[%s] OK\n", label);
-    return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "[%s] FAIL: KV deserialize threw: %s\n", label, e.what());
     return 1;
   }
+
+  // Regression check for the CT unlockTime wire-binding bug: confirm the
+  // non-zero sentinel survives the full KV round-trip. The bug-prone
+  // serializer used to silently zero this field on CT txs.
+  CHECK(parsed.items.size() == 1);
+  CHECK(parsed.items[0].txPrefixes.size() == 1);
+  CHECK(parsed.items[0].txPrefixes[0].txPrefix.unlockTime == kRegressionUnlockTime);
+  std::printf("[%s] OK\n", label);
+  return 0;
 }
 
 int run() {

@@ -45,7 +45,13 @@ Crypto::Signature makeSig(uint8_t seed) {
 Transaction buildMixedV2() {
   Transaction tx;
   tx.version = TRANSACTION_VERSION_CT;
-  tx.unlockTime = 0;
+  // Regression: CT prefix used to forcibly zero unlockTime during
+  // serialization (and omit it from the wire entirely). A non-zero value
+  // here ensures the round-trip assertion below (dst.unlockTime ==
+  // src.unlockTime) detects any return of that behavior. 12345 is well
+  // under CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6 so structural validation would
+  // accept it; we don't run validation here, only the prefix codec.
+  tx.unlockTime = 12345;
   tx.fee = 10000000000ULL;
   tx.extra = {0x01, 0xAA, 0xBB, 0xCC};
 

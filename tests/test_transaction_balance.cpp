@@ -531,6 +531,33 @@ static void test_transparent_zero() {
 
 // ── Test 14: Kernel signature binds to specific tx_hash ──────────────
 
+// Regression for the "zero-excess signer silently emits an invalid kernel"
+// bug. With a zero scalar, ge_scalarmult_base produces the identity point —
+// which the verifier rejects via ct_public_key_valid(). Before the fix,
+// sign_transaction_kernel happily returned true with a kernel the network
+// would refuse, leaving the wallet thinking it had built a valid tx.
+//
+// Zero excess is astronomically unlikely with CSPRNG-drawn blindings, but
+// reachable in (a) test fixtures, (b) pathological constructions where
+// sum(input_blindings) == sum(output_blindings) exactly, and (c) hostile
+// inputs in unit tests crafted to probe the signer's contract.
+static void test_kernel_zero_excess_rejected() {
+  TEST("Kernel: zero excess scalar rejected (no silent identity-point kernel)");
+
+  Crypto::EllipticCurveScalar zero;
+  std::memset(&zero, 0, sizeof(zero));
+
+  Crypto::Hash tx_hash;
+  random_hash(tx_hash);
+
+  Crypto::TransactionKernel kernel;
+  bool sign_ok = Crypto::sign_transaction_kernel(zero, tx_hash, kernel);
+  if (sign_ok)
+    FAIL("sign_transaction_kernel returned true for zero excess (should reject)");
+
+  PASS();
+}
+
 static void test_kernel_sig_binding() {
   TEST("Kernel sig binding: different tx_hash → different signature");
 
@@ -643,6 +670,7 @@ int main() {
   test_mixed_multi();
 
   printf("\n[Kernel signature properties]\n");
+  test_kernel_zero_excess_rejected();
   test_kernel_sig_binding();
 
   printf("\n[Subgroup validation]\n");
