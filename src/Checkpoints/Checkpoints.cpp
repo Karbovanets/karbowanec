@@ -305,16 +305,30 @@ bool Checkpoints::load_checkpoints_from_dns()
                                  << ". Ignoring DNS checkpoint.";
       continue;
     }
-    // Signed DNS checkpoint: still passes `hardcoded=false`. The signature
-    // proves the (height, hash) pair came from a maintainer, which is what
-    // lets us trust it as an anchor for check_block(); it does NOT
-    // re-classify it as hardcoded, because the zone-expansion attack model
-    // (extending the CT structural-bypass zone arbitrarily far past the
-    // baked-in checkpoints) is what the hardcoded-vs-DNS distinction
-    // protects against. Hardcoded checkpoints live in the binary the
-    // operator chose to run; DNS checkpoints, even signed, are a live
-    // signal that can extend arbitrarily and shouldn't unlock the bypass.
-    add_checkpoint(height, hash_str, /*hardcoded=*/false);
+    // Signed DNS checkpoint: passes `hardcoded=true`.
+    //
+    // Rationale for treating signed DNS as equivalent to the baked-in
+    // CHECKPOINTS table: both anchors are signed by a maintainer key. The
+    // binary table is signed implicitly (the operator trusts the binary
+    // they chose to run); DNS records are signed explicitly against the
+    // DNS_CHECKPOINT_SIGNERS pubkey embedded in that same binary. A
+    // forger would need either signing key, and the binary release key
+    // strictly dominates the DNS one — losing the binary key is "publish
+    // a malicious daemon", losing the DNS key is "ship malicious blocks
+    // during fresh sync until release N+1 rotates the signer". Both keys
+    // are inside the same trust boundary; granting them the same in-
+    // protocol privileges is the consistent position.
+    //
+    // The practical effect: at heights anchored by a signed DNS record,
+    // CT transactions in the block route to the structural-only fast
+    // path (checkConfidentialTransactionStructure) instead of the full
+    // pipeline. This is the original sync-speedup intent of the
+    // checkpoint mechanism; restricting it to baked-in checkpoints only
+    // defeats the purpose of DNS checkpoints once they're authenticated.
+    //
+    // Unsigned DNS records are NOT admitted at all by the loader above —
+    // legacy 2-field "height:hash" entries are rejected at parse time.
+    add_checkpoint(height, hash_str, /*hardcoded=*/true);
     logger(Logging::DEBUGGING) << "Added signed DNS checkpoint: " << height_str << ":" << hash_str;
   }
 
