@@ -418,9 +418,19 @@ namespace CryptoNote {
     // Increment batch counter; commit if batch is full or we've caught up.
     void commitBatchOrBlock(bool forceSingle = false);
 
+    // forceFullRingSigCheck:
+    //   When true, the legacy "checkpoint zone -> return true" shortcut at
+    //   the end of check_tx_input is bypassed and the ring signature is
+    //   verified regardless of where the node currently is in the chain.
+    //   The CT shield-in path (full checkConfidentialTransaction) must pass
+    //   true here — a forged shield-in claims a transparent output without
+    //   proving ownership and then mints a balanced CT output against it,
+    //   permanently inflating confidentialSupply. That risk doesn't exist
+    //   for the legacy v1 spend path which still uses the default (false).
     bool check_tx_input(const KeyInput& txin, const Crypto::Hash& tx_prefix_hash,
                          const std::vector<Crypto::Signature>& sig,
-                         uint32_t* pmax_related_block_height = nullptr);
+                         uint32_t* pmax_related_block_height = nullptr,
+                         bool forceFullRingSigCheck = false);
     bool checkTransactionInputs(const Transaction& tx, const Crypto::Hash& tx_prefix_hash,
                                  uint32_t* pmax_used_block_height = nullptr);
     bool checkTransactionInputs(const Transaction& tx,

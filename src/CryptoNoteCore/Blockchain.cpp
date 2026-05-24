@@ -2322,7 +2322,8 @@ bool Blockchain::is_tx_spendtime_unlocked(uint64_t unlock_time, uint32_t height)
 
 bool Blockchain::check_tx_input(const KeyInput& txin, const Crypto::Hash& tx_prefix_hash,
                                   const std::vector<Crypto::Signature>& sig,
-                                  uint32_t* pmax_related_block_height) {
+                                  uint32_t* pmax_related_block_height,
+                                  bool forceFullRingSigCheck) {
   std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
   struct outputs_visitor {
@@ -2385,7 +2386,16 @@ bool Blockchain::check_tx_input(const KeyInput& txin, const Crypto::Hash& tx_pre
     return false;
   }
 
-  if (isInCheckpointZone(getCurrentBlockchainHeight())) return true;
+  // Legacy checkpoint-zone fast path: under a confirmed checkpoint we trust
+  // the network's verdict on the ring signature and skip the verification.
+  // Disabled when the caller demands a full check (in particular, the CT
+  // shield-in path passes forceFullRingSigCheck=true so a poisoned
+  // checkpoint cannot let a fake transparent claim mint a balanced CT
+  // output — the resulting confidentialSupply inflation is not recoverable
+  // the way a stale legacy ring sig is). See the comment on the .h
+  // declaration for the full rationale.
+  if (!forceFullRingSigCheck && isInCheckpointZone(getCurrentBlockchainHeight()))
+    return true;
 
   bool check_tx_ring_signature = Crypto::check_ring_signature(
     tx_prefix_hash, txin.keyImage, output_keys, sig.data());
@@ -2547,11 +2557,20 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
       // Legacy ring sig + key-image-not-spent + ring-member existence /
       // unlock-time / pubkey resolution. ct_signing_hash is the prefix hash,
       // identical to what check_tx_input expects for the legacy path.
+      //
+      // forceFullRingSigCheck=true: CT shield-in must verify the ring sig
+      // even inside a checkpoint zone. A skipped ring sig here means a
+      // forged claim of a transparent output, followed by minting a
+      // balanced CT output against it — permanent confidentialSupply
+      // inflation. The transparent-only legacy path can recover from a
+      // bad ring sig (the bogus state lives in plain UTXO indexes that a
+      // reorg can roll back); the CT pool integer cannot.
       if (have_tx_keyimg_as_spent(ki.keyImage)) {
         logger(DEBUGGING) << "CT validation: KeyInput " << i << " key image already spent in tx " << txHash;
         return false;
       }
-      if (!check_tx_input(ki, ct_signing_hash, keyInputSig(tx.signatures[i]), pmax_used_block_height)) {
+      if (!check_tx_input(ki, ct_signing_hash, keyInputSig(tx.signatures[i]),
+                          pmax_used_block_height, /*forceFullRingSigCheck=*/true)) {
         logger(ERROR) << "CT validation: KeyInput " << i << " ring sig check failed in tx " << txHash;
         return false;
       }
@@ -3394,7 +3413,21 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
   auto longhashTimeStart = std::chrono::steady_clock::now();
   Crypto::Hash proof_of_work = NULL_HASH;
   
-  const bool inCheckpoint = m_checkpoints.is_in_checkpoint_zone(newHeight);
+  // Two separate notions of "in a checkpoint zone":
+  //
+  // - inCheckpoint (broad): height is covered by ANY checkpoint, including
+  //   DNS-added ones. Used only for the block-level anchor check + the
+  //   legacy PoW skip below. (PoW skip under poisoned DNS is a separate
+  //   open hardening question — see the comment further down.)
+  //
+  // - inHardcodedCheckpoint (narrow): height is covered by a checkpoint
+  //   sourced from a trusted origin only (binary's CHECKPOINTS table or
+  //   operator file). Used to gate the CT structural-only validation
+  //   fast path further down, so a DNS-injected checkpoint cannot unlock
+  //   that shortcut and ship a block whose Triptych/GK/balance-kernel
+  //   proofs were never verified.
+  const bool inCheckpoint           = m_checkpoints.is_in_checkpoint_zone(newHeight);
+  const bool inHardcodedCheckpoint  = m_checkpoints.is_in_hardcoded_checkpoint_zone(newHeight);
   if (inCheckpoint) {
     if (!m_checkpoints.check_block(newHeight, blockHash)) {
       logger(ERROR, BRIGHT_RED) << "CHECKPOINT VALIDATION FAILED";
@@ -3411,6 +3444,15 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
       return false;
     }
   }
+  // Open hardening question: the PoW skip above uses the broad
+  // `inCheckpoint` flag, so a poisoned DNS checkpoint at a height the
+  // attacker controls would let their malicious block (hash matching the
+  // injected anchor) bypass PoW validation during fresh sync. The user-
+  // facing security note in this codebase scopes the immediate fix to
+  // the CT structural-only path (the qualitatively different "forged
+  // proof persistently corrupts confidentialSupply" risk); narrowing
+  // the PoW skip to hardcoded-only is a separate decision and would
+  // change sync-time CPU cost for legitimate DNS-anchored syncs.
 
   auto longhash_calculating_time = std::chrono::duration_cast<std::chrono::milliseconds>(
     std::chrono::steady_clock::now() - longhashTimeStart).count();
@@ -3551,13 +3593,21 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
                      ? transactions[i].fee
                      : getInputAmount(curTx) - getOutputAmount(curTx);
 
-      // Under a confirmed checkpoint the block hash has already been verified
-      // by the network — we trust the heavy crypto (Triptych, GK, balance
-      // kernel, ring resolution) was already validated by the originating
-      // peers. We still run structural sanity (version, shape, subgroup
-      // checks, key-image domain, double-spend) before indexing so nothing
-      // malformed gets written into our LMDB tables.
-      if (inCheckpoint) {
+      // Under a *hardcoded* checkpoint the block hash has already been verified
+      // by the network and the binary we trust — we accept that the heavy
+      // crypto (Triptych, GK, balance kernel, ring resolution) was validated
+      // by the originating peers and skip to structural sanity (version,
+      // shape, subgroup checks, key-image domain, double-spend) only.
+      //
+      // DNS-added checkpoints deliberately do NOT enable this bypass. They
+      // are unsigned anchors that an on-path attacker can forge; using them
+      // to skip CT proof verification lets that attacker mint balanced CT
+      // outputs against ring-sigs that were never actually checked — and
+      // unlike a transparent-tx forgery, that permanently corrupts
+      // confidentialSupply (the consensus invariant we track for ECC-CT).
+      // So the predicate here is inHardcodedCheckpoint, not the broad
+      // inCheckpoint we set above.
+      if (inHardcodedCheckpoint) {
         if (!checkTransactionInputs(curTx, TxValidationContext::CheckpointedBlock)) {
           logger(INFO, BRIGHT_WHITE) << "Block " << blockHash
             << " has at least one transaction with structurally invalid inputs: " << tx_id;

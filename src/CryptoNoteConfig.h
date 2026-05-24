@@ -197,6 +197,7 @@ const char     DNS_CHECKPOINTS_HOST[]                        = "checkpoints.karb
 //      next release build.
 //   3. encrypt the wallet file and keep it offline; it should never receive
 //      funds — the only operation it performs is `sign_message`.
+//      Any funds sent to it are simply donations to the project.
 //   4. to publish a new checkpoint, load the wallet on an offline machine,
 //      run `sign_message`, enter "<height>:<block_hash_hex>", and copy the
 //      signature into the corresponding DNS TXT record.
@@ -207,18 +208,27 @@ const char     DNS_CHECKPOINTS_HOST[]                        = "checkpoints.karb
 // release N+1) without an emergency rollout, and lets multiple maintainers
 // hold independent signers without coordinating on a single hot key.
 //
-// Empty list: DNS checkpoint loading is effectively fail-closed —
-// the loader logs once and skips every record. This is the safe
-// default; populate at release time when keys are provisioned.
+// Empty signer set: leave just the nullptr sentinel below — DNS checkpoint
+// loading then fail-closes (the loader logs once and skips every record).
+// This is the safe default before keys are provisioned.
 //
-// Implementation note: std::array (rather than a bare C array) so the empty
-// case is well-formed under MSVC, which rejects zero-sized C arrays.
-constexpr std::array<const char*, 0> DNS_CHECKPOINT_SIGNERS = {
+// Implementation note: nullptr-terminated C array, not std::array. The
+// previous std::array<const char*, N> form required maintainers to update
+// N manually each time they added or removed a signer; under MSVC the
+// extra initializers were silently dropped (no diagnostic, COUNT stayed
+// at N), which fail-closed the loader even with real signers configured —
+// the security-degrading kind of "silent". The sentinel scheme makes
+// COUNT auto-track the entry count via sizeof, requires no manual sizing,
+// and works for any count including zero (MSVC rejects zero-element C
+// arrays, but a one-element `{ nullptr }` is well-formed).
+constexpr const char* const DNS_CHECKPOINT_SIGNERS[]         = {
   // "Kxxx...maintainer-1-address...",
   // "Kxxx...maintainer-2-address...",
-  "Kdns13W9JuUHg8D12yWk9CSMREzZRw5bzFP4qHuMuAYtDwdgQbCdFJJMZEn6iPuZuAMRDuY5S4QcWTj55P7aYfP2SXtTQz7"
+  "Kdns13W9JuUHg8D12yWk9CSMREzZRw5bzFP4qHuMuAYtDwdgQbCdFJJMZEn6iPuZuAMRDuY5S4QcWTj55P7aYfP2SXtTQz7",
+  nullptr   // sentinel — must remain the final entry
 };
-constexpr size_t DNS_CHECKPOINT_SIGNERS_COUNT                = DNS_CHECKPOINT_SIGNERS.size();
+constexpr size_t DNS_CHECKPOINT_SIGNERS_COUNT                =
+  (sizeof(DNS_CHECKPOINT_SIGNERS) / sizeof(DNS_CHECKPOINT_SIGNERS[0])) - 1;
 
 const uint8_t  CURRENT_TRANSACTION_VERSION                   =  1;
 const uint8_t  TRANSACTION_VERSION_CT                        =  2;

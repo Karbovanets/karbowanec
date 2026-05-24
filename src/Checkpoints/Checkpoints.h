@@ -42,6 +42,16 @@ namespace CryptoNote
         std::unique_lock<std::mutex> lock_other(other.m_mutex, std::defer_lock);
         std::lock(lock_this, lock_other); // ensure no deadlock
         m_points = other.m_points;
+        // The hardcoded-vs-DNS distinction is consensus-relevant: it gates
+        // the CT structural-only validation fast path in pushBlock /
+        // handleIncomingTransaction. Forgetting to copy m_hardcoded_heights
+        // (and m_reject_deep_reorg_depth) silently downgrades a Checkpoints
+        // object that *had* hardcoded checkpoints into one that pretends
+        // every entry came from DNS. The most common path that exercises this
+        // assignment is Daemon.cpp's `m_core.set_checkpoints(std::move(
+        // checkpoints))` after seeding the binary table.
+        m_hardcoded_heights = other.m_hardcoded_heights;
+        m_reject_deep_reorg_depth = other.m_reject_deep_reorg_depth;
         logger = other.logger;
       }
 
