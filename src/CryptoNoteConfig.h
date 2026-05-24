@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -178,6 +179,46 @@ const char     GENESIS_COINBASE_TX_HEX[]                     =
 "01"                                                                // extra pubkey tag
 "f904925cc23f86f9f3565188862275dc556a9bdfb6aec22c5aca7f0177c45ba8"; // tx pubkey
 const char     DNS_CHECKPOINTS_HOST[]                        = "checkpoints.karbo.org";
+
+// Approved signer addresses for DNS checkpoint records.
+//
+// DNS TXT records served from DNS_CHECKPOINTS_HOST must be in the form
+//   "<height>:<block_hash_hex>:<signature>"
+// where <signature> is produced by signing the string "<height>:<block_hash_hex>"
+// with one of the wallets whose address appears in DNS_CHECKPOINT_SIGNERS. The
+// signature scheme is the one wired into simplewallet's `sign_message` command
+// (CryptoNoteFormatUtils::signMessage / verifyMessage) — Schnorr over the
+// account's spend keypair, Base58-encoded with the
+// CRYPTONOTE_KEYS_SIGNATURE_BASE58_PREFIX tag.
+//
+// Operational workflow for a maintainer:
+//   1. simplewallet --generate-new-wallet checkpoint-signer.wallet
+//   2. note the printed address, e.g. "Kxxx..."; add it to this array in the
+//      next release build.
+//   3. encrypt the wallet file and keep it offline; it should never receive
+//      funds — the only operation it performs is `sign_message`.
+//   4. to publish a new checkpoint, load the wallet on an offline machine,
+//      run `sign_message`, enter "<height>:<block_hash_hex>", and copy the
+//      signature into the corresponding DNS TXT record.
+//
+// Multi-signer / any-of-N semantics: a DNS record is accepted if its signature
+// verifies against ANY address in this list. This lets the project rotate a
+// signing wallet (add the new address in release N, drop the old one in
+// release N+1) without an emergency rollout, and lets multiple maintainers
+// hold independent signers without coordinating on a single hot key.
+//
+// Empty list: DNS checkpoint loading is effectively fail-closed —
+// the loader logs once and skips every record. This is the safe
+// default; populate at release time when keys are provisioned.
+//
+// Implementation note: std::array (rather than a bare C array) so the empty
+// case is well-formed under MSVC, which rejects zero-sized C arrays.
+constexpr std::array<const char*, 0> DNS_CHECKPOINT_SIGNERS = {
+  // "Kxxx...maintainer-1-address...",
+  // "Kxxx...maintainer-2-address...",
+  "Kdns13W9JuUHg8D12yWk9CSMREzZRw5bzFP4qHuMuAYtDwdgQbCdFJJMZEn6iPuZuAMRDuY5S4QcWTj55P7aYfP2SXtTQz7"
+};
+constexpr size_t DNS_CHECKPOINT_SIGNERS_COUNT                = DNS_CHECKPOINT_SIGNERS.size();
 
 const uint8_t  CURRENT_TRANSACTION_VERSION                   =  1;
 const uint8_t  TRANSACTION_VERSION_CT                        =  2;
