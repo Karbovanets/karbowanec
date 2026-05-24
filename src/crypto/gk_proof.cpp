@@ -769,13 +769,19 @@ static bool gk_collect_claims_internal(const EllipticCurvePoint& C,
     eq.push_back(t_C);
 
     // Σ p_k*V[k] → coefficient on H, negated.
+    // Use a real EllipticCurveScalar local (matches the sibling pattern in the
+    // single-prove path further down). The previous code cast an `unsigned
+    // char[32]` to `EllipticCurveScalar*` and dereferenced it to invoke
+    // uint64_to_scalar — that is a strict-aliasing UB and, in principle, an
+    // alignment-mismatch UB if `EllipticCurveScalar` ever grows stricter
+    // alignment than `unsigned char`. Consensus crypto must not contain UB
+    // even when it happens to round-trip correctly today.
     unsigned char sumPkVk[32];
     sc_0(sumPkVk);
     for (size_t k = 0; k < GK_N; ++k) {
-      unsigned char vk_scalar[32];
-      uint64_to_scalar(CryptoNote::DENOMINATIONS[k],
-                        *reinterpret_cast<EllipticCurveScalar*>(vk_scalar));
-      sc_addmul(sumPkVk, pk[k].data, vk_scalar);
+      EllipticCurveScalar vk_scalar;
+      uint64_to_scalar(CryptoNote::DENOMINATIONS[k], vk_scalar);
+      sc_addmul(sumPkVk, pk[k].data, vk_scalar.data);
     }
     unsigned char neg_sumPkVk[32];
     sc_neg(neg_sumPkVk, sumPkVk);
