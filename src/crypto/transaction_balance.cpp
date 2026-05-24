@@ -176,6 +176,22 @@ bool sign_transaction_kernel(
   if (sc_check(reinterpret_cast<const unsigned char*>(&excess_scalar)) != 0)
     return false;
 
+  // Reject zero excess. A zero scalar produces the identity point as the
+  // excess commitment, which ct_public_key_valid() in verify_transaction_
+  // kernel() rejects unconditionally. Without this check the signer
+  // returns true while emitting a kernel the network will reject — a
+  // wallet-UX bug where the user thinks they built a valid tx but
+  // broadcast fails. Force the caller (buildConfidentialTransaction)
+  // to notice and adjust one blinding factor.
+  //
+  // The zero case is astronomically unlikely with CSPRNG-drawn blindings
+  // (probability 2^-252), but it's reachable in test fixtures, in
+  // pathological constructions where sum(input_blindings) ==
+  // sum(output_blindings) exactly, and via adversarial inputs in unit
+  // tests. Cheap to check; closes the silent-success path.
+  if (sc_isnonzero(reinterpret_cast<const unsigned char*>(&excess_scalar)) == 0)
+    return false;
+
   // Compute excess commitment = excess * G
   ge_p3 excess_point;
   ge_scalarmult_base(&excess_point,

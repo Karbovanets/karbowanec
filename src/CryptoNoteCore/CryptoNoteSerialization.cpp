@@ -259,8 +259,33 @@ void serialize(TransactionPrefix& txP, ISerializer& serializer) {
   }
 
   if (txP.version == TRANSACTION_VERSION_CT) {
-    // Version 4 (CT): fee is plaintext, unlockTime must be 0
-    txP.unlockTime = 0;
+    // CT v2 prefix layout: version, unlock_time, fee, vin, vout, extra.
+    //
+    // unlock_time matches the position v1 uses, so external tooling that
+    // walks the prefix field-by-field gets uniform structure across
+    // versions (the only CT-specific addition is the plaintext `fee`).
+    //
+    // Historical note: this branch used to FORCE txP.unlockTime = 0 in
+    // memory and then omit the field from the wire entirely. That had two
+    // bad consequences:
+    //
+    //   1. The consensus rule allowing non-zero unlockTime on CT (see
+    //      CT-DESIGN.md and checkTransactionConsensusShape) was
+    //      effectively dead — the wallet's intended lock height never
+    //      reached the wire, so refund-on-timeout patterns for atomic
+    //      swaps and vesting payouts silently produced immediately-
+    //      spendable outputs.
+    //
+    //   2. Calling toBinaryArray(tx) — used by getObjectHash() under the
+    //      hood — mutated tx as a side effect via the const_cast in
+    //      CryptoNoteTools.h. Any code path that computed a CT tx's hash
+    //      silently wiped its unlockTime field.
+    //
+    // Both are fixed by treating unlockTime as a proper serialized field
+    // here. The consensus cap (`<= CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6`) is
+    // enforced in checkTransactionConsensusShape against the deserialized
+    // value, so over-cap junk is still rejected at admission.
+    serializer(txP.unlockTime, "unlock_time");
     serializer(txP.fee, "fee");
     serializeBoundedVector(txP.inputs, serializer, "vin", CryptoNote::parameters::CT_MAX_INPUTS, "vin",
       [&serializer](TransactionInput& input) { serializer(input, ""); });
