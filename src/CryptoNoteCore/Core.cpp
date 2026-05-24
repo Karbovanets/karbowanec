@@ -1389,10 +1389,23 @@ bool Core::handleIncomingTransaction(const Transaction& tx, const Crypto::Hash& 
   // block's own height (not the current chain tip) to decide checkpoint
   // coverage - the chain tip can race ahead of the block we're streaming in
   // and the historical block is what the checkpoint actually authorizes.
+  //
+  // CheckpointedBlock requires a *hardcoded* checkpoint zone — i.e. a
+  // checkpoint sourced from the binary's CHECKPOINTS table or an operator-
+  // supplied file. DNS-added checkpoints deliberately do NOT extend this
+  // zone: DNS TXT records have no cryptographic signature, so a path-on
+  // attacker could otherwise unlock the CT structural-only fast path
+  // (Blockchain::checkConfidentialTransactionStructure) for blocks of their
+  // choosing, bypassing Triptych / GK / balance-kernel verification. The
+  // hardcoded constraint keeps the bypass available for the legitimate
+  // "trust the binary's signed history" case while denying it to network-
+  // injected checkpoints. DNS checkpoints still function as anchor hashes —
+  // check_block() rejects mismatches at their height — they just don't
+  // grant the structural-validation shortcut.
   TxValidationContext validationContext;
   if (!keptByBlock) {
     validationContext = TxValidationContext::Mempool;
-  } else if (m_blockchain.isInCheckpointZone(height)) {
+  } else if (m_blockchain.isInHardcodedCheckpointZone(height)) {
     validationContext = TxValidationContext::CheckpointedBlock;
   } else {
     validationContext = TxValidationContext::Block;

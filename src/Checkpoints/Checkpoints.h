@@ -21,6 +21,7 @@
 
 #include <map>
 #include <mutex>
+#include <set>
 
 #include <CryptoNoteCore/CryptoNoteBasicImpl.h>
 #include <Logging/LoggerRef.h>
@@ -47,10 +48,26 @@ namespace CryptoNote
       return *this;
     }
 
-    bool add_checkpoint(uint32_t height, const std::string& hash_str);
+    // `hardcoded`: whether this checkpoint comes from a trusted source — the
+    // baked-in CryptoNote::CHECKPOINTS table, or an operator-supplied file
+    // loaded via --load-checkpoints (both inherit the trust of the binary or
+    // its operator). DNS-added checkpoints pass `hardcoded=false` since DNS
+    // TXT records have no cryptographic signature and a path-on-attacker can
+    // inject arbitrary height→hash mappings. The flag is consulted by
+    // is_in_hardcoded_checkpoint_zone() to decide whether expensive consensus
+    // validation (in particular: the CT structural-only fast path) is allowed
+    // to short-circuit. The default is true to preserve the semantics of all
+    // existing call sites (binary table, file load) without per-call updates.
+    bool add_checkpoint(uint32_t height, const std::string& hash_str, bool hardcoded = true);
     bool load_checkpoints_from_file(const std::string& fileName);
     bool load_checkpoints_from_dns();
     bool is_in_checkpoint_zone(uint32_t height) const;
+    // True iff `height` is at or below the largest *hardcoded* checkpoint
+    // height. Excludes DNS-added checkpoints from the zone determination —
+    // those serve only as anchor hints in check_block(), they do not grant
+    // the bypass that hardcoded checkpoints do. Returns false when no
+    // hardcoded checkpoints have been seeded (e.g. testnet, --disable-checkpoints).
+    bool is_in_hardcoded_checkpoint_zone(uint32_t height) const;
     bool check_block(uint32_t height, const Crypto::Hash& h) const;
     bool check_block(uint32_t height, const Crypto::Hash& h, bool& is_a_checkpoint) const;
     bool is_alternative_block_allowed(uint32_t blockchain_height, uint32_t block_height) const;
@@ -59,6 +76,10 @@ namespace CryptoNote
 
   private:
     std::map<uint32_t, Crypto::Hash> m_points;
+    // Subset of m_points whose source was trusted at insertion time. Tracked
+    // as a parallel index (rather than embedded in the value of m_points) so
+    // existing iteration patterns over m_points stay unchanged.
+    std::set<uint32_t> m_hardcoded_heights;
     Logging::LoggerRef logger;
     mutable std::mutex m_mutex;
 

@@ -4239,6 +4239,10 @@ bool Blockchain::isInCheckpointZone(const uint32_t height) {
   return m_checkpoints.is_in_checkpoint_zone(height);
 }
 
+bool Blockchain::isInHardcodedCheckpointZone(const uint32_t height) {
+  return m_checkpoints.is_in_hardcoded_checkpoint_zone(height);
+}
+
 // ─── Account number lookups ──────────────────────────────────────────────────
 
 bool Blockchain::resolveAccountNumber(uint32_t blockHeight, uint32_t txIndex,

@@ -46,7 +46,7 @@ Checkpoints::Checkpoints(Logging::ILogger &log, uint32_t reject_deep_reorg_depth
   
 }
 //---------------------------------------------------------------------------
-bool Checkpoints::add_checkpoint(uint32_t height, const std::string &hash_str) {
+bool Checkpoints::add_checkpoint(uint32_t height, const std::string &hash_str, bool hardcoded) {
   Crypto::Hash h = NULL_HASH;
 
   if (!Common::podFromHex(hash_str, h)) {
@@ -57,6 +57,10 @@ bool Checkpoints::add_checkpoint(uint32_t height, const std::string &hash_str) {
   if (!m_points.insert({ height, h }).second) {
     logger(WARNING) << "Checkpoint already exists.";
     return false;
+  }
+
+  if (hardcoded) {
+    m_hardcoded_heights.insert(height);
   }
 
   return true;
@@ -90,6 +94,14 @@ bool Checkpoints::load_checkpoints_from_file(const std::string& fileName) {
 //---------------------------------------------------------------------------
 bool Checkpoints::is_in_checkpoint_zone(uint32_t  height) const {
   return !m_points.empty() && (height <= (--m_points.end())->first);
+}
+//---------------------------------------------------------------------------
+bool Checkpoints::is_in_hardcoded_checkpoint_zone(uint32_t height) const {
+  // *rbegin() is the largest element; the zone is everything at or below it.
+  // DNS-added checkpoints are deliberately excluded — they can extend the
+  // top of m_points but not the top of m_hardcoded_heights, so a DNS
+  // injection cannot grow the trusted bypass zone.
+  return !m_hardcoded_heights.empty() && (height <= *m_hardcoded_heights.rbegin());
 }
 //---------------------------------------------------------------------------
 bool Checkpoints::check_block(uint32_t  height, const Crypto::Hash &h,
@@ -204,7 +216,13 @@ bool Checkpoints::load_checkpoints_from_dns()
     if (!(0 == m_points.count(height))) {
       logger(DEBUGGING) << "Checkpoint already exists for height: " << height << ". Ignoring DNS checkpoint.";
     } else {
-      add_checkpoint(height, hash_str);
+      // DNS TXT records are not signed; treat as untrusted. The checkpoint
+      // hash still functions as an anchor (check_block enforces it once we
+      // reach that height) but the height does NOT extend the hardcoded
+      // checkpoint zone, so the CT structural-only fast path in
+      // Blockchain::checkTransactionInputs cannot be triggered by an
+      // attacker who can inject DNS records.
+      add_checkpoint(height, hash_str, /*hardcoded=*/false);
       logger(DEBUGGING) << "Added DNS checkpoint: " << height_str << ":" << hash_str;
     }
   }
