@@ -856,7 +856,7 @@ namespace CryptoNote {
 
     next_D = std::max<difficulty_type>(1, next_D);
 
-    logger(INFO) << "nextDifficultyV5:"
+    logger(TRACE) << "nextDifficultyV5:"
                << " isTestnet=" << isTestnet()
                << " nextHeight=" << nextHeight
                << " topIndex=" << height
