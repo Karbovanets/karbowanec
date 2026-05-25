@@ -723,27 +723,20 @@ namespace CryptoNote {
     // https://github.com/zawy12/difficulty-algorithms/issues/3
 
     // begin reset difficulty for new epoch
-
     if (height > 0) {
       height--; // there's difference between karbo1 and karbo2 here (height vs top block index)
     }
-
     const uint32_t upgradeHeightV5 = upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5);
-    if (height == upgradeHeightV5) {
-      const difficulty_type resetDifficulty = height == 0 ? 1 : cumulativeDifficulties[0] / height / RESET_WORK_FACTOR_V5;
+    if (!isTestnet() && height == upgradeHeightV5) {
+      difficulty_type resetDifficulty = cumulativeDifficulties[0] / height / RESET_WORK_FACTOR_V5;
       return std::max<difficulty_type>(1, resetDifficulty);
     }
-    uint32_t count = (uint32_t)difficultyBlocksCountByBlockVersion(blockMajorVersion) - 1;
-    if (height > upgradeHeightV5 && height < upgradeHeightV5 + count) {
+    uint32_t count = static_cast<uint32_t>(difficultyBlocksCountByBlockVersion(blockMajorVersion)) - 1;
+    if (!isTestnet() && height > upgradeHeightV5 && height < upgradeHeightV5 + count) {
       uint32_t offset = count - (height - upgradeHeightV5);
-      uint32_t maxOffset = timestamps.size() > 2 ? static_cast<uint32_t>(timestamps.size() - 2) : 0;
-      offset = std::min(offset, maxOffset);
-      if (offset > 0) {
-        timestamps.erase(timestamps.begin(), timestamps.begin() + offset);
-        cumulativeDifficulties.erase(cumulativeDifficulties.begin(), cumulativeDifficulties.begin() + offset);
-      }
+      timestamps.erase(timestamps.begin(), timestamps.begin() + offset);
+      cumulativeDifficulties.erase(cumulativeDifficulties.begin(), cumulativeDifficulties.begin() + offset);
     }
-
     // end reset difficulty for new epoch
 
     assert(timestamps.size() == cumulativeDifficulties.size());
@@ -784,7 +777,7 @@ namespace CryptoNote {
       next_D = 100000;
     }
 
-    return next_D;
+    return std::max<difficulty_type>(1, next_D);
   }
 
   bool Currency::checkProofOfWorkV1(Crypto::cn_context& context, const Block& block, difficulty_type currentDiffic,
