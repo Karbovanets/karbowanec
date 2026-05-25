@@ -98,10 +98,10 @@ namespace CryptoNote {
         m_upgradeHeightV5 = 80;
       }
       if (m_upgradeHeightV6 == parameters::UPGRADE_HEIGHT_V6) {
-        m_upgradeHeightV6 = 100;
+        m_upgradeHeightV6 = 400;
       }
       if (m_upgradeHeightV7 == parameters::UPGRADE_HEIGHT_V7) {
-        m_upgradeHeightV7 = 120;
+        m_upgradeHeightV7 = 4294967294;
       }
       m_blocksFileName = "testnet_" + m_blocksFileName;
       m_blocksCacheFileName = "testnet_" + m_blocksCacheFileName;
