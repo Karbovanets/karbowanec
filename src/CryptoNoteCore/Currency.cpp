@@ -724,83 +724,84 @@ namespace CryptoNote {
     // Copyright (c) 2017-2018 Zawy, MIT License
     // See commented link below for required config file changes. Fix FTL and MTP.
     // https://github.com/zawy12/difficulty-algorithms/issues/3
-  
-    const uint32_t nextHeight = height;
-  
+
     // begin reset difficulty for new epoch
-    if (height > 0) {
-      height--; // there's difference between karbo1 and karbo2 here (height vs top block index)
-    }
-  
-    const uint32_t upgradeHeightV5 =
-        upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5);
-  
+
+    height--; // there's difference between karbo1 and karbo2 here (height vs top block index)
+
+    const uint32_t upgradeHeightV5 = upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5);
+
+    /*
+      Mainnet: keep original V5 reset behavior for consensus compatibility.
+      Testnet: skip this reset. On low-height testnet this can produce bad/zero
+      difficulty or interact badly with the small available window.
+    */
     if (!isTestnet() && height == upgradeHeightV5) {
       difficulty_type resetDifficulty =
-          height == 0 ? 1 : cumulativeDifficulties[0] / height / RESET_WORK_FACTOR_V5;
-  
+          cumulativeDifficulties[0] / height / RESET_WORK_FACTOR_V5;
+
       return std::max<difficulty_type>(1, resetDifficulty);
     }
-  
+
     uint32_t count =
         static_cast<uint32_t>(difficultyBlocksCountByBlockVersion(blockMajorVersion)) - 1;
-  
+
+    /*
+      Mainnet: keep original post-upgrade window trimming.
+      Testnet: skip this. At low testnet heights, offset can be larger than the
+      available vectors and can break difficulty calculation/template generation.
+    */
     if (!isTestnet() &&
         height > upgradeHeightV5 &&
-        height < upgradeHeightV5 + count) {
-  
+        height < CryptoNote::parameters::UPGRADE_HEIGHT_V5 + count) {
+
       uint32_t offset = count - (height - upgradeHeightV5);
-  
+
+      /*
+        Nasty bug guard only. This should not affect normal mainnet behavior,
+        but prevents invalid erase if the available history is shorter than offset.
+      */
       if (offset >= timestamps.size() || offset >= cumulativeDifficulties.size()) {
-        logger(WARNING) << "nextDifficultyV5: insufficient data for post-upgrade trim:"
-                        << " isTestnet=" << isTestnet()
-                        << " nextHeight=" << nextHeight
-                        << " topIndex=" << height
-                        << " upgradeHeightV5=" << upgradeHeightV5
-                        << " count=" << count
-                        << " offset=" << offset
-                        << " timestamps=" << timestamps.size()
-                        << " cumulativeDifficulties=" << cumulativeDifficulties.size();
-  
         return 1;
       }
-  
+
       timestamps.erase(timestamps.begin(), timestamps.begin() + offset);
       cumulativeDifficulties.erase(cumulativeDifficulties.begin(), cumulativeDifficulties.begin() + offset);
     }
+
     // end reset difficulty for new epoch
-  
+
     assert(timestamps.size() == cumulativeDifficulties.size());
-  
-    const uint64_t available =
-        std::min<uint64_t>(timestamps.size(), cumulativeDifficulties.size());
-  
-    if (available <= 1) {
+
+    /*
+      Testnet/mainnet safety guard. Original code assumes there are at least
+      two cumulative difficulty entries. Without this, size_t underflow is possible:
+      cumulativeDifficulties.size() - 1.
+    */
+    if (timestamps.size() <= 1 || cumulativeDifficulties.size() <= 1) {
       return 1;
     }
-  
+
     const int64_t T = static_cast<int64_t>(m_difficultyTarget);
-  
-    uint64_t N = std::min<uint64_t>(
-        difficultyBlocksCount4(),
-        available - 1
-    );
-  
+
+    /*
+      Use the smaller available vector length. In normal mainnet operation they
+      are equal, so this does not change mainnet behavior.
+    */
+    uint64_t available =
+        std::min<uint64_t>(timestamps.size(), cumulativeDifficulties.size());
+
+    uint64_t N =
+        std::min<uint64_t>(difficultyBlocksCount4(), available - 1);
+
     if (N == 0) {
       return 1;
     }
-  
-    uint64_t L = 0;
-    uint64_t avg_D = 0;
-    uint64_t next_D = 0;
-    uint64_t i = 0;
-    uint64_t this_timestamp = 0;
-    uint64_t previous_timestamp = 0;
-  
-    previous_timestamp = timestamps[0] > static_cast<uint64_t>(T)
-        ? timestamps[0] - static_cast<uint64_t>(T)
-        : 0;
-  
+
+    uint64_t L(0), avg_D, next_D, i, this_timestamp(0), previous_timestamp(0);
+
+    previous_timestamp = timestamps[0] - T;
+
     for (i = 1; i <= N; i++) {
       // Safely prevent out-of-sequence timestamps
       if (timestamps[i] > previous_timestamp) {
@@ -808,36 +809,36 @@ namespace CryptoNote {
       } else {
         this_timestamp = previous_timestamp + 1;
       }
-  
-      L += i * std::min<uint64_t>(
-          6 * static_cast<uint64_t>(T),
-          this_timestamp - previous_timestamp
-      );
-  
+
+      L += i * std::min<uint64_t>(6 * T, this_timestamp - previous_timestamp);
       previous_timestamp = this_timestamp;
     }
-  
-    if (L < N * N * static_cast<uint64_t>(T) / 20) {
-      L = N * N * static_cast<uint64_t>(T) / 20;
+
+    if (L < N * N * T / 20) {
+      L = N * N * T / 20;
     }
-  
+
     if (L == 0) {
       return 1;
     }
-  
+
     avg_D = (cumulativeDifficulties[N] - cumulativeDifficulties[0]) / N;
-  
+
+    /*
+      If testnet cumulative difficulty barely moved, avg_D can become 0.
+      Original mainnet is unlikely to hit this, but returning difficulty 0 is invalid.
+    */
     if (avg_D == 0) {
       return 1;
     }
-  
+
     // Prevent round off error for small D and overflow for large D.
-    if (avg_D > 2000000 * N * N * static_cast<uint64_t>(T)) {
-      next_D = (avg_D / (200 * L)) * (N * (N + 1) * static_cast<uint64_t>(T) * 99);
+    if (avg_D > 2000000 * N * N * T) {
+      next_D = (avg_D / (200 * L)) * (N * (N + 1) * T * 99);
     } else {
-      next_D = (avg_D * N * (N + 1) * static_cast<uint64_t>(T) * 99) / (200 * L);
+      next_D = (avg_D * N * (N + 1) * T * 99) / (200 * L);
     }
-  
+
     // Optional. Make all insignificant digits zero for easy reading.
     i = 1000000000;
     while (i > 1) {
@@ -854,22 +855,7 @@ namespace CryptoNote {
       next_D = 100000;
     }
 
-    next_D = std::max<difficulty_type>(1, next_D);
-
-    logger(TRACE) << "nextDifficultyV5:"
-               << " isTestnet=" << isTestnet()
-               << " nextHeight=" << nextHeight
-               << " topIndex=" << height
-               << " upgradeHeightV5=" << upgradeHeightV5
-               << " blockMajorVersion=" << static_cast<int>(blockMajorVersion)
-               << " timestamps=" << timestamps.size()
-               << " cumulativeDifficulties=" << cumulativeDifficulties.size()
-               << " N=" << N
-               << " avg_D=" << avg_D
-               << " L=" << L
-               << " next_D=" << next_D;
-
-    return next_D;
+    return std::max<difficulty_type>(1, next_D);
   }
 
   bool Currency::checkProofOfWorkV1(Crypto::cn_context& context, const Block& block, difficulty_type currentDiffic,
