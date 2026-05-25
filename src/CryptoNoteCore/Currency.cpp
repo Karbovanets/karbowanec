@@ -95,7 +95,7 @@ namespace CryptoNote {
         m_upgradeHeightV4 = 70;
       }
       if (m_upgradeHeightV5 == parameters::UPGRADE_HEIGHT_V5) {
-        m_upgradeHeightV5 = 80;
+        m_upgradeHeightV5 = 380;
       }
       if (m_upgradeHeightV6 == parameters::UPGRADE_HEIGHT_V6) {
         m_upgradeHeightV6 = 400;
