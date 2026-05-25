@@ -19,6 +19,7 @@
 
 #include "Currency.h"
 #include "Denominations.h"
+#include <algorithm>
 #include <cctype>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/math/special_functions/round.hpp>
@@ -723,21 +724,32 @@ namespace CryptoNote {
 
     // begin reset difficulty for new epoch
 
-    height--; // there's difference between karbo1 and karbo2 here (height vs top block index)
+    if (height > 0) {
+      height--; // there's difference between karbo1 and karbo2 here (height vs top block index)
+    }
 
-    if (height == upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5)) {
-    return cumulativeDifficulties[0] / height / RESET_WORK_FACTOR_V5;
+    const uint32_t upgradeHeightV5 = upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5);
+    if (height == upgradeHeightV5) {
+      const difficulty_type resetDifficulty = height == 0 ? 1 : cumulativeDifficulties[0] / height / RESET_WORK_FACTOR_V5;
+      return std::max<difficulty_type>(1, resetDifficulty);
     }
     uint32_t count = (uint32_t)difficultyBlocksCountByBlockVersion(blockMajorVersion) - 1;
-    if (height > upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5) && height < CryptoNote::parameters::UPGRADE_HEIGHT_V5 + count) {
-      uint32_t offset = count - (height - upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5));
-      timestamps.erase(timestamps.begin(), timestamps.begin() + offset);
-      cumulativeDifficulties.erase(cumulativeDifficulties.begin(), cumulativeDifficulties.begin() + offset);
+    if (height > upgradeHeightV5 && height < upgradeHeightV5 + count) {
+      uint32_t offset = count - (height - upgradeHeightV5);
+      uint32_t maxOffset = timestamps.size() > 2 ? static_cast<uint32_t>(timestamps.size() - 2) : 0;
+      offset = std::min(offset, maxOffset);
+      if (offset > 0) {
+        timestamps.erase(timestamps.begin(), timestamps.begin() + offset);
+        cumulativeDifficulties.erase(cumulativeDifficulties.begin(), cumulativeDifficulties.begin() + offset);
+      }
     }
 
     // end reset difficulty for new epoch
 
     assert(timestamps.size() == cumulativeDifficulties.size());
+    if (cumulativeDifficulties.size() <= 1) {
+      return 1;
+    }
 
     const int64_t T = static_cast<int64_t>(m_difficultyTarget);
     uint64_t N = std::min<uint64_t>(difficultyBlocksCount4(), cumulativeDifficulties.size() - 1); // adjust for new epoch difficulty reset, N should be by 1 block smaller
