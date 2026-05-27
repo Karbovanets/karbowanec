@@ -158,6 +158,19 @@ bool isTransparentNonCanonicalCtAmount(const TransactionOutputInformation& outpu
          !is_valid_decomposed_amount(output.amount);
 }
 
+bool isCoinbaseOutput(const TransactionOutputInformation& output,
+                      const ITransfersContainer* container,
+                      const Currency& currency) {
+  if (output.type == TransactionTypes::OutputType::Confidential || container == nullptr) {
+    return false;
+  }
+
+  TransactionInformation txInfo;
+  return container->getTransactionInformation(output.transactionHash, txInfo) &&
+         txInfo.totalAmountIn == 0 &&
+         txInfo.blockHeight >= currency.upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5);
+}
+
 }
 
 namespace CryptoNote {
@@ -2879,6 +2892,7 @@ uint64_t WalletGreen::selectTransfers(
   std::vector<OutputData> outputs;
   std::vector<size_t> dustOutputs;
   std::vector<size_t> walletOuts;
+  std::vector<size_t> coinbaseOutputs;
   std::vector<size_t> nonCanonicalOutputs;
   for (auto walletIt = wallets.begin(); walletIt != wallets.end(); ++walletIt) {
     for (auto outIt = walletIt->outs.begin(); outIt != walletIt->outs.end(); ++outIt) {
@@ -2898,6 +2912,14 @@ uint64_t WalletGreen::selectTransfers(
 
       outputs.emplace_back(std::move(data));
       const size_t outputIndex = outputs.size() - 1;
+
+      if (includeNonCanonical && dust &&
+          isCoinbaseOutput(outputs[outputIndex].output,
+                           walletIt->wallet == nullptr ? nullptr : walletIt->wallet->container,
+                           m_currency)) {
+        coinbaseOutputs.push_back(outputIndex);
+        continue;
+      }
 
       if (isTransparentNonCanonicalCtAmount(outputs[outputIndex].output)) {
         nonCanonicalOutputs.push_back(outputIndex);
@@ -2926,22 +2948,60 @@ uint64_t WalletGreen::selectTransfers(
     return true;
   };
 
-  // Phase 1: prefer canonical / mixable inputs.
-  ShuffleGenerator<size_t> indexGenerator(walletOuts.size());
-  while (foundMoney < neededMoney &&
-         selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS &&
-         !indexGenerator.empty()) {
-    selectOutput(walletOuts[indexGenerator()]);
+  // In CT mode, a user-selected anonymity 0 is primarily for mined coinbase
+  // outputs, which can be spent as ring-size-1 KeyInputs. Prefer those first
+  // so large miner wallets do not pull in decoy-requiring inputs prematurely.
+  if (!coinbaseOutputs.empty()) {
+    std::sort(coinbaseOutputs.begin(), coinbaseOutputs.end(),
+              [&outputs](size_t a, size_t b) {
+                return outputs[a].spendAmount > outputs[b].spendAmount;
+              });
+    for (size_t idx : coinbaseOutputs) {
+      if (foundMoney >= neededMoney ||
+          selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
+        break;
+      }
+      selectOutput(idx);
+    }
   }
 
-  if (dust && !dustOutputs.empty() &&
-      selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS) {
-    ShuffleGenerator<size_t> dustIndexGenerator(dustOutputs.size());
-    do {
-      selectOutput(dustOutputs[dustIndexGenerator()]);
-    } while (foundMoney < neededMoney &&
-             selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS &&
-             !dustIndexGenerator.empty());
+  if (includeNonCanonical && dust && foundMoney < neededMoney) {
+    auto selectLargestFirst = [&](std::vector<size_t>& indexes) {
+      std::sort(indexes.begin(), indexes.end(),
+                [&outputs](size_t a, size_t b) {
+                  return outputs[a].spendAmount > outputs[b].spendAmount;
+                });
+      for (size_t idx : indexes) {
+        if (foundMoney >= neededMoney ||
+            selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
+          break;
+        }
+        selectOutput(idx);
+      }
+    };
+
+    selectLargestFirst(walletOuts);
+    selectLargestFirst(dustOutputs);
+  }
+
+  // Phase 1: prefer canonical / mixable inputs.
+  if (!(includeNonCanonical && dust)) {
+    ShuffleGenerator<size_t> indexGenerator(walletOuts.size());
+    while (foundMoney < neededMoney &&
+           selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS &&
+           !indexGenerator.empty()) {
+      selectOutput(walletOuts[indexGenerator()]);
+    }
+
+    if (dust && !dustOutputs.empty() &&
+        selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS) {
+      ShuffleGenerator<size_t> dustIndexGenerator(dustOutputs.size());
+      do {
+        selectOutput(dustOutputs[dustIndexGenerator()]);
+      } while (foundMoney < neededMoney &&
+               selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS &&
+               !dustIndexGenerator.empty());
+    }
   }
 
   // Phase 2: if a shortfall remains, fall back to non-canonical inputs (sub-floor

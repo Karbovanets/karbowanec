@@ -933,6 +933,7 @@ uint64_t WalletTransactionSender::selectTransfersToSend(
   std::vector<size_t> unusedTransfers;
   std::vector<size_t> unusedDust;
   std::vector<size_t> unusedUnmixable;
+  std::vector<size_t> coinbaseOutputs;
   std::vector<size_t> nonCanonicalOutputs;
 
   std::vector<TransactionOutputInformation> outputs;
@@ -955,6 +956,12 @@ uint64_t WalletTransactionSender::selectTransfersToSend(
 
     const uint64_t spendableAmount = resolveSpendableAmount(out);
     spendableAmounts[i] = spendableAmount;
+
+    if (includeNonCanonical && addUnmixable && isCoinbaseOutput(out)) {
+      coinbaseOutputs.push_back(i);
+      continue;
+    }
+
     if (isTransparentNonCanonicalCtAmount(out)) {
       nonCanonicalOutputs.push_back(i);
       if (includeNonCanonical) {
@@ -985,17 +992,56 @@ uint64_t WalletTransactionSender::selectTransfersToSend(
   };
   std::mt19937 urng = Random::generator();
 
-  // Phase 1: prefer canonical / mixable inputs.
-  while (foundMoney < neededMoney &&
-         selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS &&
-         (!unusedTransfers.empty() || !unusedDust.empty() || (addUnmixable && !unusedUnmixable.empty()))) {
-    size_t idx;
-    if (addUnmixable && !unusedUnmixable.empty()) {
-      idx = popRandomValue(urng, unusedUnmixable);
-    } else {
-      idx = !unusedTransfers.empty() ? popRandomValue(urng, unusedTransfers) : popRandomValue(urng, unusedDust);
+  // In CT mode, a user-selected anonymity 0 is primarily for mined coinbase
+  // outputs, which can be spent as ring-size-1 KeyInputs. Prefer those first
+  // so large miner wallets do not pull in decoy-requiring inputs prematurely.
+  if (!coinbaseOutputs.empty()) {
+    std::sort(coinbaseOutputs.begin(), coinbaseOutputs.end(),
+              [&spendableAmounts](size_t a, size_t b) {
+                return spendableAmounts[a] > spendableAmounts[b];
+              });
+    for (size_t idx : coinbaseOutputs) {
+      if (foundMoney >= neededMoney ||
+          selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
+        break;
+      }
+      selectOutput(idx);
     }
-    selectOutput(idx);
+  }
+
+  if (includeNonCanonical && addUnmixable && foundMoney < neededMoney) {
+    auto selectLargestFirst = [&](std::vector<size_t>& indexes) {
+      std::sort(indexes.begin(), indexes.end(),
+                [&spendableAmounts](size_t a, size_t b) {
+                  return spendableAmounts[a] > spendableAmounts[b];
+                });
+      for (size_t idx : indexes) {
+        if (foundMoney >= neededMoney ||
+            selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
+          break;
+        }
+        selectOutput(idx);
+      }
+    };
+
+    selectLargestFirst(unusedTransfers);
+    selectLargestFirst(unusedDust);
+    selectLargestFirst(unusedUnmixable);
+  }
+
+  // Phase 1: prefer canonical / mixable inputs.
+  if (!(includeNonCanonical && addUnmixable)) {
+    while (foundMoney < neededMoney &&
+           selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS &&
+           (!unusedTransfers.empty() || !unusedDust.empty() || (addUnmixable && !unusedUnmixable.empty()))) {
+      size_t idx;
+      if (addUnmixable && !unusedUnmixable.empty()) {
+        idx = popRandomValue(urng, unusedUnmixable);
+      } else {
+        idx = !unusedTransfers.empty() ? popRandomValue(urng, unusedTransfers) : popRandomValue(urng, unusedDust);
+      }
+      selectOutput(idx);
+    }
   }
 
   // Phase 2: if a shortfall remains, fall back to non-canonical inputs (sub-floor
