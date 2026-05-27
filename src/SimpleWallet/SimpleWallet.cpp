@@ -243,13 +243,15 @@ struct TransferCommand {
   }
 
   bool validateMixin(LoggerRef& logger) const {
+    // fake_outs_count is the internal decoy count (= ring size - 1); errors
+    // are surfaced in ring-size terms to match the user-facing -m convention.
     if (fake_outs_count < m_currency.minMixin() && fake_outs_count != 0) {
-      logger(ERROR, BRIGHT_RED) << "mixIn should be equal to or bigger than " << m_currency.minMixin();
+      logger(ERROR, BRIGHT_RED) << "Ring size must be at least " << (m_currency.minMixin() + 1);
       return false;
     }
 
     if (fake_outs_count > m_currency.maxMixin()) {
-      logger(ERROR, BRIGHT_RED) << "mixIn should be equal to or less than " << m_currency.maxMixin();
+      logger(ERROR, BRIGHT_RED) << "Ring size must be at most " << (m_currency.maxMixin() + 1);
       return false;
     }
 
@@ -288,12 +290,48 @@ struct TransferCommand {
               return false;
             }
           } else if (arg == "-m") {
-            if (!Common::fromString(value, fake_outs_count)) {
-              logger(ERROR, BRIGHT_RED) << "mixin_count should be non-negative integer, got " << value;
+            // -m is the ring size (total members, real + decoys). Internally
+            // stored as decoys = ringSize - 1 to match the legacy sender's
+            // fake_outs_count convention. Liberal acceptance: snap small or
+            // off-grid values up to the nearest valid ring rather than erroring.
+            // V5+ coinbase inputs are auto-spent at ring 1 by the sender per
+            // consensus rules, regardless of -m — no need to surface that here.
+            uint64_t ringSize = 0;
+            if (!Common::fromString(value, ringSize)) {
+              logger(ERROR, BRIGHT_RED) << "ring_size should be a non-negative integer, got " << value;
               return false;
             }
-            if (!validateMixin(logger)) {
-              return false;
+            const bool ctActive = m_node.getLastLocalBlockHeaderInfo().majorVersion
+                                  >= CryptoNote::BLOCK_MAJOR_VERSION_6;
+            if (ringSize == 0) {
+              fake_outs_count = 0;
+            } else {
+              const uint64_t requestedRing = ringSize;
+              if (ctActive) {
+                // Triptych supports only ring sizes {4, 8, 16}.
+                if (ringSize > 16) {
+                  logger(ERROR, BRIGHT_RED) << "Ring size " << ringSize
+                    << " exceeds CT maximum (16). CT accepts ring sizes 4, 8, or 16.";
+                  return false;
+                }
+                if (ringSize <= 4)      ringSize = 4;
+                else if (ringSize <= 8) ringSize = 8;
+                else                    ringSize = 16;
+              } else {
+                // Pre-CT minimum ring is minMixin + 1 (= 3 by default). Snap
+                // up rather than error so old -m 1/2 typos don't fail.
+                if (ringSize <= m_currency.minMixin()) {
+                  ringSize = m_currency.minMixin() + 1;
+                }
+              }
+              fake_outs_count = static_cast<size_t>(ringSize - 1);
+              if (!validateMixin(logger)) {
+                return false;
+              }
+              if (requestedRing != ringSize) {
+                logger(INFO, BRIGHT_YELLOW)
+                  << "Ring size adjusted: " << requestedRing << " -> " << ringSize << ".";
+              }
             }
           } else {
             logger(ERROR, BRIGHT_RED) << "Unknown transfer option: " << arg;
@@ -690,16 +728,16 @@ simple_wallet::simple_wallet(System::Dispatcher& dispatcher, const CryptoNote::C
   m_consoleHandler.setHandler("outputs", std::bind(&simple_wallet::show_unlocked_outputs_count, this, std::placeholders::_1), "Show the number of unlocked outputs available for a transaction");
   m_consoleHandler.setHandler("bc_height", std::bind(&simple_wallet::show_blockchain_height, this, std::placeholders::_1), "Show blockchain height");
   m_consoleHandler.setHandler("transfer", std::bind(&simple_wallet::transfer, this, std::placeholders::_1),
-    "transfer <addr_1> <amount_1> [<addr_2> <amount_2> ... <addr_N> <amount_N>] [-p payment_id] [-f fee] [-m mixin_count]"
+    "transfer <addr_1> <amount_1> [<addr_2> <amount_2> ... <addr_N> <amount_N>] [-p payment_id] [-f fee] [-m ring_size]"
     " - Transfer <amount_1>,... <amount_N> to <address_1>,... <address_N>, respectively. "
-    "CT transactions accept mixin 3 / 7 / 15 (ring size 4 / 8 / 16); any other value rounds up to the next supported size. "
-    "<mixin_count> defaults to 15 (ring 16) and can be overridden with -m.");
+    "<ring_size> is the total number of ring members (real + decoys). CT accepts 4, 8, or 16 "
+    "(other values round up). Default 16. Coinbase inputs always spend at ring 1.");
   m_consoleHandler.setHandler("dust_sweep", std::bind(&simple_wallet::dust_sweep, this, std::placeholders::_1),
     "dust_sweep [max_inputs] - Consolidate non-aligned transparent outputs to your wallet address");
   m_consoleHandler.setHandler("prepare", std::bind(&simple_wallet::prepare_tx, this, std::placeholders::_1),
-    "Prepare raw transaction in hex format but do not relay, e.g. for manual relay <addr_1> <amount_1> ... <addr_N> <amount_N> [-p payment_id] [-f fee] [-m mixin_count]"
+    "Prepare raw transaction in hex format but do not relay, e.g. for manual relay <addr_1> <amount_1> ... <addr_N> <amount_N> [-p payment_id] [-f fee] [-m ring_size]"
     " - Transfer <amount_1>,... <amount_N> to <address_1>,... <address_N>, respectively. "
-    "CT mixin 3 / 7 / 15 (ring size 4 / 8 / 16); other values round up.");
+    "<ring_size> is the total number of ring members; CT accepts 4, 8, or 16 (other values round up).");
   m_consoleHandler.setHandler("set_log", std::bind(&simple_wallet::set_log, this, std::placeholders::_1), "set_log <level> - Change current log level, <level> is a number 0-4");
   m_consoleHandler.setHandler("address", std::bind(&simple_wallet::print_address, this, std::placeholders::_1), "Show current wallet public address");
   m_consoleHandler.setHandler("save_address", std::bind(&simple_wallet::save_address_to_file, this, std::placeholders::_1), "Save current wallet public address to file");

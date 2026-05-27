@@ -581,17 +581,18 @@ void doTransfer(std::string address, uint64_t amount, uint64_t fee,
                     std::cout << "Try lowering the amount you are sending "
                               << "in one transaction." << std::endl;
 
-                    /* If a mixin of zero is allowed, or we are below the
-                       fork height when it's banned, ask them to resend with
-                       zero */
+                    /* If a ring size of 1 (no mixing) is allowed, or we are
+                       below the fork height when it's banned, ask them to
+                       resend with no mixing. (Note: under CT the wallet
+                       still enforces a minimum ring of 4 internally.) */
                     if (!WalletConfig::mixinZeroDisabled ||
                          height < WalletConfig::mixinZeroDisabledHeight)
                     {
-                        std::cout << "Alternatively, you can set the mixin "
-                                  << "count to 0." << std::endl;
+                        std::cout << "Alternatively, you can disable mixing "
+                                  << "(ring size 1)." << std::endl;
 
-                        if(confirm("Retry transaction with mixin of 0? "
-                                   "This will compromise privacy."))
+                        if(confirm("Retry transaction with no mixing (ring "
+                                   "size 1)? This will compromise privacy."))
                         {
                             p.mixIn = 0;
                             retried = true;

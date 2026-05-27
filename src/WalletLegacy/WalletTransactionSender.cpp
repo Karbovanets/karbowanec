@@ -780,8 +780,9 @@ void WalletTransactionSender::prepareInputs(
 
     // Cross-bucket mixing decoys: append up to CT_MIXING_DECOYS_PER_INPUT
     // members from a different bucket. Best-effort: drops duplicates and the
-    // real-output collision case, and silently proceeds with a smaller ring
-    // if the daemon couldn't supply enough.
+    // real-output collision case. If the daemon couldn't supply enough, the
+    // back-fill loop below tops the ring back up from native outs so we never
+    // hand Triptych a non-{4,8,16} ring.
     if (requestedMixing > 0 && i < mixingOuts.size() && !mixingOuts[i].outs.empty()) {
       auto mixOuts = mixingOuts[i].outs; // copy: don't disturb caller
       std::sort(mixOuts.begin(), mixOuts.end(),
@@ -818,6 +819,36 @@ void WalletTransactionSender::prepareInputs(
         go.amount = mixDecoyBucket;
         inp.keyInfo.outputs.push_back(std::move(go));
         ++mixedAdded;
+      }
+    }
+
+    // Back-fill: if cross-bucket mixing fell short (best-effort by design),
+    // top the ring up with additional native decoys to reach inputMixin.
+    // Triptych enforces exact ring sizes {4, 8, 16}; checkIfEnoughMixins has
+    // already guaranteed outs[i].outs.size() >= inputMixin + 1, so we always
+    // have enough native material to draw on.
+    if (inputMixin != 0 && i < outs.size() && inp.keyInfo.outputs.size() < inputMixin) {
+      const uint64_t decoyBucket = outs[i].amount;
+      for (auto& daemon_oe : outs[i].outs) {
+        if (inp.keyInfo.outputs.size() >= inputMixin) break;
+        if (td.globalOutputIndex == daemon_oe.global_amount_index) continue;
+        bool duplicate = false;
+        for (const auto& existing : inp.keyInfo.outputs) {
+          if (existing.amount == decoyBucket && existing.outputIndex == daemon_oe.global_amount_index) {
+            duplicate = true;
+            break;
+          }
+        }
+        if (duplicate) continue;
+        TransactionTypes::GlobalOutput go;
+        go.outputIndex = static_cast<uint32_t>(daemon_oe.global_amount_index);
+        go.targetKey = daemon_oe.out_key;
+        go.commitment = daemon_oe.commitment;
+        go.blockHeight = daemon_oe.block_height;
+        go.isCoinbase = daemon_oe.is_coinbase != 0;
+        go.isConfidential = daemon_oe.output_type == static_cast<uint8_t>(TransactionTypes::OutputType::Confidential);
+        go.amount = decoyBucket;
+        inp.keyInfo.outputs.push_back(std::move(go));
       }
     }
 

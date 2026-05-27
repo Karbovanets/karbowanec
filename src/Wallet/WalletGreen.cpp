@@ -3105,8 +3105,8 @@ void WalletGreen::prepareInputs(
 
     // Mixing-bucket decoys (best-effort): append up to CT_MIXING_DECOYS_PER_INPUT
     // members from a *different* bucket than the real spend's. If the daemon
-    // couldn't supply enough, we proceed with a smaller ring; the validator
-    // requires only that the ring size be >= CT_MIN_RING_SIZE.
+    // couldn't supply enough, the back-fill loop below tops the ring back up
+    // from native outs so Triptych always sees a {4,8,16} ring.
     if (requestedMixing > 0 && i < mixingResult.size() && !mixingResult[i].outs.empty()) {
       // Copy out — mixingResult is const so we can't sort in place.
       auto mixOuts = mixingResult[i].outs;
@@ -3145,6 +3145,36 @@ void WalletGreen::prepareInputs(
         globalOutput.amount = mixDecoyBucket;
         keyInfo.outputs.push_back(std::move(globalOutput));
         ++mixedAdded;
+      }
+    }
+
+    // Back-fill: if cross-bucket mixing fell short (best-effort by design),
+    // top the ring up with additional native decoys to reach inputMixin.
+    // Triptych enforces exact ring sizes {4, 8, 16}; checkIfEnoughMixins has
+    // already guaranteed mixinResult[i].outs.size() >= inputMixin + 1, so we
+    // always have enough native material to draw on.
+    if (inputMixin != 0 && i < mixinResult.size() && keyInfo.outputs.size() < inputMixin) {
+      const uint64_t decoyBucket = mixinResult[i].amount;
+      for (auto& fakeOut : mixinResult[i].outs) {
+        if (keyInfo.outputs.size() >= inputMixin) break;
+        if (input.out.globalOutputIndex == fakeOut.global_amount_index) continue;
+        bool duplicate = false;
+        for (const auto& existing : keyInfo.outputs) {
+          if (existing.amount == decoyBucket && existing.outputIndex == fakeOut.global_amount_index) {
+            duplicate = true;
+            break;
+          }
+        }
+        if (duplicate) continue;
+        TransactionTypes::GlobalOutput globalOutput;
+        globalOutput.outputIndex = static_cast<uint32_t>(fakeOut.global_amount_index);
+        globalOutput.targetKey = reinterpret_cast<const PublicKey&>(fakeOut.out_key);
+        globalOutput.commitment = fakeOut.commitment;
+        globalOutput.blockHeight = fakeOut.block_height;
+        globalOutput.isCoinbase = fakeOut.is_coinbase != 0;
+        globalOutput.isConfidential = fakeOut.output_type == static_cast<uint8_t>(TransactionTypes::OutputType::Confidential);
+        globalOutput.amount = decoyBucket;
+        keyInfo.outputs.push_back(std::move(globalOutput));
       }
     }
 
