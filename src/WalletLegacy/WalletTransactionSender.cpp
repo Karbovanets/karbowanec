@@ -102,11 +102,6 @@ bool isPurgeableCtDust(const TransactionOutputInformation& output, uint64_t spen
          spendAmount < CryptoNote::MIN_CT_DENOMINATION;
 }
 
-bool isSameOutput(const TransactionOutputInformation& lhs, const TransactionOutputInformation& rhs) {
-  return lhs.transactionHash == rhs.transactionHash &&
-         lhs.outputInTransaction == rhs.outputInTransaction;
-}
-
 // chooseCtMixingBuckets leaves mixingBuckets[i] = 0 for inputs that skip
 // cross-bucket mixing (e.g. ring-size-1 coinbase). The daemon's
 // getRandomOutsByAmounts treats amount=0 as an empty bucket and logs an
@@ -181,51 +176,6 @@ bool WalletTransactionSender::isCoinbaseOutput(const TransactionOutputInformatio
   return m_transferDetails.getTransactionInformation(output.transactionHash, txInfo) &&
          txInfo.totalAmountIn == 0 &&
          txInfo.blockHeight >= m_currency.upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5);
-}
-
-void WalletTransactionSender::appendPurgeableCtDust(
-    std::list<TransactionOutputInformation>& selectedTransfers,
-    uint64_t& foundMoney) const {
-  if (selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
-    return;
-  }
-
-  std::vector<TransactionOutputInformation> outputs;
-  m_transferDetails.getOutputs(outputs, ITransfersContainer::IncludeDefault);
-
-  std::vector<size_t> purgeableDust;
-  std::vector<uint64_t> spendableAmounts(outputs.size(), 0);
-  for (size_t i = 0; i < outputs.size(); ++i) {
-    const auto& out = outputs[i];
-    if (m_transactionsCache.isUsed(out)) {
-      continue;
-    }
-    if (std::any_of(selectedTransfers.begin(), selectedTransfers.end(),
-        [&out](const TransactionOutputInformation& selected) { return isSameOutput(out, selected); })) {
-      continue;
-    }
-
-    const uint64_t spendableAmount = resolveSpendableAmount(out);
-    if (!isPurgeableCtDust(out, spendableAmount)) {
-      continue;
-    }
-
-    spendableAmounts[i] = spendableAmount;
-    purgeableDust.push_back(i);
-  }
-
-  std::sort(purgeableDust.begin(), purgeableDust.end(),
-            [&spendableAmounts](size_t a, size_t b) {
-              return spendableAmounts[a] < spendableAmounts[b];
-            });
-
-  for (size_t idx : purgeableDust) {
-    if (selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
-      break;
-    }
-    selectedTransfers.push_back(outputs[idx]);
-    foundMoney += spendableAmounts[idx];
-  }
 }
 
 std::vector<uint64_t> WalletTransactionSender::chooseInputMixins(
@@ -354,10 +304,6 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::makeSendRequest(Transact
       useCT);
   }
 
-  if (useCT && context->foundMoney >= neededMoney) {
-    appendPurgeableCtDust(context->selectedTransfers, context->foundMoney);
-  }
-
   throwIf(context->foundMoney < neededMoney, error::WRONG_AMOUNT);
 
   transactionId = m_transactionsCache.addNewTransaction(neededMoney, fee, extra, transfers, unlockTimestamp);
@@ -406,10 +352,6 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
        context->dustPolicy.dustThreshold,
        context->selectedTransfers,
        useCT);
-  }
-
-  if (useCT && context->foundMoney >= neededMoney) {
-    appendPurgeableCtDust(context->selectedTransfers, context->foundMoney);
   }
 
   throwIf(context->foundMoney < neededMoney, error::WRONG_AMOUNT);
