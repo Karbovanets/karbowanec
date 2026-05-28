@@ -320,11 +320,22 @@ protected:
     uint64_t dustThreshold,
     std::vector<WalletOuts>&& wallets,
     std::vector<OutputToTransfer>& selectedTransfers,
-    bool includeNonCanonical = false);
+    bool includeNonCanonical = false,
+    std::vector<OutputToTransfer>* sweptDust = nullptr);
 
   bool isCoinbaseOutput(const OutputToTransfer& output) const;
+  // Opportunistic mixin>0 dust sweep: drops tagged swept dust whose amount
+  // bucket couldn't supply a full ring of decoys, rebuilding the parallel
+  // per-input vectors. Required inputs are never touched, so funding stays
+  // satisfied.
+  void pruneUnmixableSweptDust(const std::vector<OutputToTransfer>& sweptDust,
+    std::vector<OutputToTransfer>& selectedTransfers,
+    std::vector<uint64_t>& inputMixins,
+    std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult,
+    uint64_t& foundMoney) const;
   std::vector<uint64_t> chooseInputMixins(const std::vector<OutputToTransfer>& selectedTransfers,
-    uint64_t requestedMixin, bool useCT) const;
+    uint64_t requestedMixin, bool useCT,
+    const std::vector<OutputToTransfer>& sweptDust = {}) const;
 
   std::vector<ReceiverAmounts> splitDestinations(const std::vector<WalletTransfer>& destinations,
     uint64_t dustThreshold, const Currency& currency);

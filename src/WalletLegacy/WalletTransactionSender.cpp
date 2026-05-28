@@ -102,6 +102,23 @@ bool isPurgeableCtDust(const TransactionOutputInformation& output, uint64_t spen
          spendAmount < CryptoNote::MIN_CT_DENOMINATION;
 }
 
+bool isSameOutput(const TransactionOutputInformation& lhs, const TransactionOutputInformation& rhs) {
+  return lhs.transactionHash == rhs.transactionHash &&
+         lhs.outputInTransaction == rhs.outputInTransaction;
+}
+
+bool isInOutputList(const TransactionOutputInformation& out,
+                    const std::list<TransactionOutputInformation>& list) {
+  return std::any_of(list.begin(), list.end(),
+    [&out](const TransactionOutputInformation& other) { return isSameOutput(out, other); });
+}
+
+// Upper bound on opportunistic mixable-dust inputs appended to a single
+// mixin>0 send. Each carries a full ring payload, so we keep this modest to
+// avoid pushing a routine send past the transaction-size limit. Dust beyond
+// this is cleaned up over subsequent sends or via the explicit dust_sweep.
+const size_t MAX_MIXABLE_DUST_SWEEP_PER_TX = 8;
+
 // chooseCtMixingBuckets leaves mixingBuckets[i] = 0 for inputs that skip
 // cross-bucket mixing (e.g. ring-size-1 coinbase). The daemon's
 // getRandomOutsByAmounts treats amount=0 as an empty bucket and logs an
@@ -178,10 +195,100 @@ bool WalletTransactionSender::isCoinbaseOutput(const TransactionOutputInformatio
          txInfo.blockHeight >= m_currency.upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5);
 }
 
+void WalletTransactionSender::appendMixableDustSweep(std::shared_ptr<SendTransactionContext> context) const {
+  // Opportunistic dust cleanup for mixin>0 sends. We append every purgeable
+  // sub-floor dust output not already selected and tag it in sweptDust. Each
+  // tagged piece will be given a real ring by chooseInputMixins and then
+  // either mixed (if its bucket has decoys, typical on a mature mainnet) or
+  // dropped by pruneUnmixableSweptDust (typical on a sparse testnet). Bounded
+  // so a dust-heavy wallet can't balloon a routine send past the tx-size
+  // limit — each mixed input carries a full Triptych/ring-sig payload.
+  const size_t inputCap = std::min<size_t>(
+    CryptoNote::parameters::CT_MAX_INPUTS,
+    context->selectedTransfers.size() + MAX_MIXABLE_DUST_SWEEP_PER_TX);
+  if (context->selectedTransfers.size() >= inputCap) {
+    return;
+  }
+
+  std::vector<TransactionOutputInformation> outputs;
+  m_transferDetails.getOutputs(outputs, ITransfersContainer::IncludeDefault);
+
+  std::vector<std::pair<size_t, uint64_t>> candidates; // (index, spendable)
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    const auto& out = outputs[i];
+    if (m_transactionsCache.isUsed(out)) continue;
+    if (isInOutputList(out, context->selectedTransfers)) continue;
+    const uint64_t spendable = resolveSpendableAmount(out);
+    if (!isPurgeableCtDust(out, spendable)) continue;
+    candidates.emplace_back(i, spendable);
+  }
+
+  // Largest dust first: clears the most value per added input.
+  std::sort(candidates.begin(), candidates.end(),
+            [](const std::pair<size_t, uint64_t>& a, const std::pair<size_t, uint64_t>& b) {
+              return a.second > b.second;
+            });
+
+  for (const auto& c : candidates) {
+    if (context->selectedTransfers.size() >= inputCap) break;
+    context->selectedTransfers.push_back(outputs[c.first]);
+    context->sweptDust.push_back(outputs[c.first]);
+    context->foundMoney += c.second;
+  }
+}
+
+void WalletTransactionSender::pruneUnmixableSweptDust(std::shared_ptr<SendTransactionContext> context) const {
+  if (context->sweptDust.empty()) return;
+
+  // Decide which input slots to keep. A tagged swept-dust slot that requested
+  // a ring (inputMixin>0) but whose bucket couldn't supply enough decoys is
+  // dropped — it was optional excess, so funding stays satisfied. Required
+  // inputs (untagged, or ring-1 dust/coinbase) are always kept.
+  std::vector<bool> keep(context->inputMixins.size(), true);
+  bool anyPruned = false;
+  size_t i = 0;
+  for (auto it = context->selectedTransfers.begin();
+       it != context->selectedTransfers.end() && i < context->inputMixins.size(); ++it, ++i) {
+    const bool swept = isInOutputList(*it, context->sweptDust);
+    const bool requestedRing = context->inputMixins[i] > 0;
+    const bool enoughDecoys = i < context->outs.size() &&
+      context->outs[i].outs.size() >= context->inputMixins[i] + 1;
+    if (swept && requestedRing && !enoughDecoys) {
+      keep[i] = false;
+      anyPruned = true;
+    }
+  }
+  if (!anyPruned) return;
+
+  std::list<TransactionOutputInformation> newSelected;
+  std::vector<uint64_t> newMixins;
+  std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount> newOuts;
+  std::vector<uint64_t> newBuckets;
+  uint64_t newFound = 0;
+  i = 0;
+  for (auto it = context->selectedTransfers.begin(); it != context->selectedTransfers.end(); ++it, ++i) {
+    if (i < keep.size() && !keep[i]) {
+      continue;
+    }
+    newSelected.push_back(*it);
+    newFound += resolveSpendableAmount(*it);
+    if (i < context->inputMixins.size())   newMixins.push_back(context->inputMixins[i]);
+    if (i < context->outs.size())          newOuts.push_back(context->outs[i]);
+    if (i < context->mixingBuckets.size()) newBuckets.push_back(context->mixingBuckets[i]);
+  }
+
+  context->selectedTransfers = std::move(newSelected);
+  context->inputMixins = std::move(newMixins);
+  context->outs = std::move(newOuts);
+  context->mixingBuckets = std::move(newBuckets);
+  context->foundMoney = newFound;
+}
+
 std::vector<uint64_t> WalletTransactionSender::chooseInputMixins(
   const std::list<TransactionOutputInformation>& selectedTransfers,
   uint64_t requestedMixin,
-  bool useCT) const {
+  bool useCT,
+  const std::list<TransactionOutputInformation>& sweptDust) const {
 
   std::vector<uint64_t> inputMixins(selectedTransfers.size(), requestedMixin);
   if (!useCT) {
@@ -208,8 +315,14 @@ std::vector<uint64_t> WalletTransactionSender::chooseInputMixins(
 
   size_t i = 0;
   for (const auto& output : selectedTransfers) {
-    if (isCoinbaseOutput(output) || isPurgeableCtDust(output, resolveSpendableAmount(output))) {
+    if (isCoinbaseOutput(output)) {
+      // Coinbase always spends at ring 1 via v2 KeyInput.
       inputMixins[i++] = 0;
+    } else if (isPurgeableCtDust(output, resolveSpendableAmount(output))) {
+      // Sub-floor dust. Tagged opportunistic-sweep dust attempts a real ring
+      // so it can be mixed (pruneUnmixableSweptDust drops it later if its
+      // bucket lacks decoys). Required dust (untagged) stays at ring 1.
+      inputMixins[i++] = isInOutputList(output, sweptDust) ? roundedMixin : 0;
     } else {
       inputMixins[i++] = roundedMixin;
     }
@@ -306,10 +419,18 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::makeSendRequest(Transact
 
   throwIf(context->foundMoney < neededMoney, error::WRONG_AMOUNT);
 
+  // Opportunistic mixable-dust sweep: only on auto-selected mixin>0 CT sends
+  // (explicit-output sends control their own inputs; mixin==0 is handled by
+  // selectTransfersToSend's ring-1 sweep). Tagged dust is pruned later if its
+  // bucket can't supply decoys, so this never jeopardises funding.
+  if (useCT && mixIn != 0 && selectedOuts.empty()) {
+    appendMixableDustSweep(context);
+  }
+
   transactionId = m_transactionsCache.addNewTransaction(neededMoney, fee, extra, transfers, unlockTimestamp);
   context->transactionId = transactionId;
   context->mixIn = mixIn;
-  context->inputMixins = chooseInputMixins(context->selectedTransfers, mixIn, useCT);
+  context->inputMixins = chooseInputMixins(context->selectedTransfers, mixIn, useCT, context->sweptDust);
   // CT cross-bucket mixing: per-input alternative-bucket assignment. Empty
   // when CT is off or the ring is below CT_MIN_RING_SIZE_FOR_MIXING.
   context->mixingBuckets = chooseCtMixingBuckets(context->selectedTransfers, context->inputMixins, useCT);
@@ -356,11 +477,16 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
 
   throwIf(context->foundMoney < neededMoney, error::WRONG_AMOUNT);
 
+  // Opportunistic mixable-dust sweep (see makeSendRequest for rationale).
+  if (useCT && mixIn != 0 && selectedOuts.empty()) {
+    appendMixableDustSweep(context);
+  }
+
   // add tx to wallet cache to prevent reuse of outputs used in this tx
   transactionId = m_transactionsCache.addNewTransaction(neededMoney, fee, extra, transfers, unlockTimestamp);
   context->transactionId = transactionId;
   context->mixIn = mixIn;
-  context->inputMixins = chooseInputMixins(context->selectedTransfers, mixIn, useCT);
+  context->inputMixins = chooseInputMixins(context->selectedTransfers, mixIn, useCT, context->sweptDust);
   context->mixingBuckets = chooseCtMixingBuckets(context->selectedTransfers, context->inputMixins, useCT);
 
   if (hasMixinInputs(context->inputMixins)) {
@@ -385,6 +511,10 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
     });
 
     queryAmountsWaitFuture.get();
+
+    // Drop tagged swept dust whose bucket couldn't supply a full ring before
+    // the strict required-input check below.
+    pruneUnmixableSweptDust(context);
 
     checkIfEnoughMixins(context->outs, context->inputMixins);
 
@@ -484,6 +614,11 @@ void WalletTransactionSender::sendTransactionRandomOutsByAmount(std::shared_ptr<
     events.push_back(makeCompleteEvent(m_transactionsCache, context->transactionId, ec));
     return;
   }
+
+  // Drop tagged swept dust whose bucket couldn't supply a full ring before
+  // the strict required-input check below. Optional excess only, so funding
+  // stays satisfied.
+  pruneUnmixableSweptDust(context);
 
   try {
     checkIfEnoughMixins(context->outs, context->inputMixins);

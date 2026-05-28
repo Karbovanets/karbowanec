@@ -43,6 +43,12 @@ struct SendTransactionContext
   std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount> outs;
   uint64_t foundMoney;
   std::list<TransactionOutputInformation> selectedTransfers;
+  // Optional sub-floor dust appended on a mixin>0 send for opportunistic
+  // cleanup. These are tagged so chooseInputMixins gives them a real ring
+  // (so they can mix) and pruneUnmixableSweptDust can drop the ones whose
+  // amount bucket can't supply a full ring of decoys — without ever
+  // dropping a required input. Empty on mixin==0 / explicit-output sends.
+  std::list<TransactionOutputInformation> sweptDust;
   TxDustPolicy dustPolicy;
   uint64_t mixIn;
   std::vector<uint64_t> inputMixins;
