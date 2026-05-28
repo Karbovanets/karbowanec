@@ -158,6 +158,12 @@ bool isTransparentNonCanonicalCtAmount(const TransactionOutputInformation& outpu
          !is_valid_decomposed_amount(output.amount);
 }
 
+bool isPurgeableCtDust(const TransactionOutputInformation& output, uint64_t spendAmount) {
+  return output.type != TransactionTypes::OutputType::Confidential &&
+         spendAmount > 0 &&
+         spendAmount < CryptoNote::MIN_CT_DENOMINATION;
+}
+
 bool isCoinbaseOutput(const TransactionOutputInformation& output,
                       const ITransfersContainer* container,
                       const Currency& currency) {
@@ -3021,6 +3027,27 @@ uint64_t WalletGreen::selectTransfers(
       if (foundMoney >= neededMoney ||
           selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
         break;
+      }
+      selectOutput(idx);
+    }
+  }
+
+  // Phase 3: once funded, opportunistically purge tiny transparent dust in CT
+  // anonymity-0 sends. These sub-floor pieces cannot become CT outputs directly;
+  // selecting them either folds them into the fee or rolls them into canonical
+  // CT change while removing the original dusty outputs from the wallet.
+  if (includeNonCanonical && dust && foundMoney >= neededMoney && !nonCanonicalOutputs.empty() &&
+      selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS) {
+    std::sort(nonCanonicalOutputs.begin(), nonCanonicalOutputs.end(),
+              [&outputs](size_t a, size_t b) {
+                return outputs[a].spendAmount < outputs[b].spendAmount;
+              });
+    for (size_t idx : nonCanonicalOutputs) {
+      if (selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
+        break;
+      }
+      if (!isPurgeableCtDust(outputs[idx].output, outputs[idx].spendAmount)) {
+        continue;
       }
       selectOutput(idx);
     }

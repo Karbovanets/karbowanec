@@ -96,6 +96,12 @@ bool isTransparentNonCanonicalCtAmount(const TransactionOutputInformation& outpu
          !is_valid_decomposed_amount(output.amount);
 }
 
+bool isPurgeableCtDust(const TransactionOutputInformation& output, uint64_t spendAmount) {
+  return output.type != TransactionTypes::OutputType::Confidential &&
+         spendAmount > 0 &&
+         spendAmount < CryptoNote::MIN_CT_DENOMINATION;
+}
+
 // chooseCtMixingBuckets leaves mixingBuckets[i] = 0 for inputs that skip
 // cross-bucket mixing (e.g. ring-size-1 coinbase). The daemon's
 // getRandomOutsByAmounts treats amount=0 as an empty bucket and logs an
@@ -1081,6 +1087,26 @@ uint64_t WalletTransactionSender::selectTransfersToSend(
       if (foundMoney >= neededMoney ||
           selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
         break;
+      }
+      selectOutput(idx);
+    }
+  }
+
+  // Once funded, CT anonymity-0 sends may pull in sub-floor transparent dust.
+  // That removes dust from the wallet and lets the CT builder either absorb it
+  // into the fee or roll it into canonical CT change.
+  if (includeNonCanonical && addUnmixable && foundMoney >= neededMoney && !nonCanonicalOutputs.empty() &&
+      selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS) {
+    std::sort(nonCanonicalOutputs.begin(), nonCanonicalOutputs.end(),
+              [&spendableAmounts](size_t a, size_t b) {
+                return spendableAmounts[a] < spendableAmounts[b];
+              });
+    for (size_t idx : nonCanonicalOutputs) {
+      if (selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
+        break;
+      }
+      if (!isPurgeableCtDust(outputs[idx], spendableAmounts[idx])) {
+        continue;
       }
       selectOutput(idx);
     }
