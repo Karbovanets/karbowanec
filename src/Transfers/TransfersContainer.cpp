@@ -20,6 +20,7 @@
 #include "IWalletLegacy.h"
 #include "Common/StdInputStream.h"
 #include "Common/StdOutputStream.h"
+#include "CryptoNoteConfig.h"
 #include "CryptoNoteCore/CryptoNoteBasicImpl.h"
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "Serialization/BinaryInputStreamSerializer.h"
@@ -32,7 +33,10 @@ using namespace Logging;
 
 namespace CryptoNote {
 
-void serialize(TransactionInformation& ti, CryptoNote::ISerializer& s) {
+// Version 3 added the explicit `fee` and `isBase` fields. Containers written by
+// older code (version <= 2) don't carry them; on load they default to 0/false
+// and are refilled on the next rescan (only the rescan path consumes them).
+static void serializeTransactionInformation(TransactionInformation& ti, uint32_t version, CryptoNote::ISerializer& s) {
   s(ti.transactionHash, "");
   s(ti.publicKey, "");
   serializeBlockHeight(s, ti.blockHeight, "");
@@ -42,9 +46,13 @@ void serialize(TransactionInformation& ti, CryptoNote::ISerializer& s) {
   s(ti.totalAmountOut, "");
   s(ti.extra, "");
   s(ti.paymentId, "");
+  if (version >= 3) {
+    s(ti.fee, "");
+    s(ti.isBase, "");
+  }
 }
 
-const uint32_t TRANSFERS_CONTAINER_STORAGE_VERSION = 2;
+const uint32_t TRANSFERS_CONTAINER_STORAGE_VERSION = 3;
 
 namespace {
   template<typename TIterator>
@@ -218,6 +226,23 @@ void TransfersContainer::addTransaction(const TransactionBlockInfo& block, const
   txInfo.totalAmountIn = tx.getInputTotalAmount();
   txInfo.totalAmountOut = tx.getOutputTotalAmount();
   txInfo.extra = tx.getExtra();
+
+  // Coinbase detection: a coinbase tx carries a single BaseInput (Generating).
+  // Don't rely on "totalAmountIn == 0" — that is also true for fully-confidential
+  // CT spends, whose transparent input total is zero.
+  txInfo.isBase = tx.getInputCount() > 0 && tx.getInputType(0) == TransactionTypes::InputType::Generating;
+
+  // Fee: CT (v2) amounts are blinded, so totalAmountIn/Out can't yield the fee;
+  // take the explicit plaintext fee from the prefix. v1 txs derive it from the
+  // transparent in - out (0 for coinbase).
+  TransactionPrefix prefix = tx.getTransactionPrefix();
+  if (txInfo.isBase) {
+    txInfo.fee = 0;
+  } else if (prefix.version == TRANSACTION_VERSION_CT) {
+    txInfo.fee = prefix.fee;
+  } else {
+    txInfo.fee = txInfo.totalAmountIn >= txInfo.totalAmountOut ? txInfo.totalAmountIn - txInfo.totalAmountOut : 0;
+  }
 
   if (!tx.getPaymentId(txInfo.paymentId)) {
     txInfo.paymentId = NULL_HASH;
@@ -922,7 +947,12 @@ void TransfersContainer::save(std::ostream& os) {
   s(const_cast<uint32_t&>(TRANSFERS_CONTAINER_STORAGE_VERSION), "version");
 
   s(m_currentHeight, "height");
-  writeSequence<TransactionInformation>(m_transactions.begin(), m_transactions.end(), "transactions", s);
+  size_t txCount = m_transactions.size();
+  s.beginArray(txCount, "transactions");
+  for (auto it = m_transactions.begin(); it != m_transactions.end(); ++it) {
+    serializeTransactionInformation(const_cast<TransactionInformation&>(*it), TRANSFERS_CONTAINER_STORAGE_VERSION, s);
+  }
+  s.endArray();
   writeSequence<TransactionOutputInformationEx>(m_unconfirmedTransfers.begin(), m_unconfirmedTransfers.end(), "unconfirmedTransfers", s);
   writeSequence<TransactionOutputInformationEx>(m_availableTransfers.begin(), m_availableTransfers.end(), "availableTransfers", s);
   writeSequence<SpentTransactionOutput>(m_spentTransfers.begin(), m_spentTransfers.end(), "spentTransfers", s);
@@ -949,7 +979,15 @@ void TransfersContainer::load(std::istream& in) {
   SpentTransfersMultiIndex spentTransfers;
 
   s(currentHeight, "height");
-  readSequence<TransactionInformation>(std::inserter(transactions, transactions.end()), "transactions", s);
+  size_t txCount = 0;
+  if (s.beginArray(txCount, "transactions")) {
+    while (txCount--) {
+      TransactionInformation ti;
+      serializeTransactionInformation(ti, version, s);
+      transactions.insert(std::move(ti));
+    }
+    s.endArray();
+  }
   readSequence<TransactionOutputInformationEx>(std::inserter(unconfirmedTransfers, unconfirmedTransfers.end()), "unconfirmedTransfers", s);
   readSequence<TransactionOutputInformationEx>(std::inserter(availableTransfers, availableTransfers.end()), "availableTransfers", s);
   readSequence<SpentTransactionOutput>(std::inserter(spentTransfers, spentTransfers.end()), "spentTransfers", s);
