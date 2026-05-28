@@ -63,6 +63,34 @@ namespace {
 
 const uint64_t ACCOUNT_CREATE_TIME_ACCURACY = 24 * 60 * 60;
 
+uint32_t actualBalanceFlags(bool forceLegacyTxs) {
+  return forceLegacyTxs ? CryptoNote::ITransfersContainer::IncludeKeyUnlocked :
+    CryptoNote::ITransfersContainer::IncludeDefault;
+}
+
+uint32_t pendingBalanceFlags(bool forceLegacyTxs) {
+  return forceLegacyTxs ? CryptoNote::ITransfersContainer::IncludeKeyNotUnlocked :
+    CryptoNote::ITransfersContainer::IncludeAllLocked;
+}
+
+uint64_t safeSubtract(uint64_t minuend, uint64_t subtrahend) {
+  return minuend > subtrahend ? minuend - subtrahend : 0;
+}
+
+uint64_t changeAmount(const CryptoNote::WalletUserTransactionsCache& transactionsCache) {
+  return safeSubtract(transactionsCache.unconfrimedOutsAmount(), transactionsCache.unconfirmedTransactionsAmount());
+}
+
+uint64_t calculateTotalBalance(const CryptoNote::ITransfersContainer& transferDetails,
+    const CryptoNote::WalletUserTransactionsCache& transactionsCache) {
+  uint64_t actual = safeSubtract(
+    transferDetails.balance(CryptoNote::ITransfersContainer::IncludeDefault),
+    transactionsCache.unconfrimedOutsAmount());
+  uint64_t pending = transferDetails.balance(CryptoNote::ITransfersContainer::IncludeAllLocked) +
+    changeAmount(transactionsCache);
+  return actual + pending;
+}
+
 void throwNotDefined() {
   throw std::runtime_error("The behavior is not defined!");
 }
@@ -145,6 +173,7 @@ WalletLegacy::WalletLegacy(const CryptoNote::Currency& currency, INode& node, Lo
   m_isStopping(false),
   m_lastNotifiedActualBalance(0),
   m_lastNotifiedPendingBalance(0),
+  m_lastNotifiedTotalBalance(0),
   m_lastNotifiedUnmixableBalance(0),
   m_blockchainSync(node, m_logger.getLogger(), currency.genesisBlockHash()),
   m_transfersSync(currency, m_logger.getLogger(), m_blockchainSync, node),
@@ -427,6 +456,7 @@ void WalletLegacy::shutdown() {
     m_transactionsCache.reset();
     m_lastNotifiedActualBalance = 0;
     m_lastNotifiedPendingBalance = 0;
+    m_lastNotifiedTotalBalance = 0;
     m_lastNotifiedUnmixableBalance = 0;
   }
 }
@@ -558,16 +588,24 @@ uint64_t WalletLegacy::actualBalance() {
   std::unique_lock<std::mutex> lock(m_cacheMutex);
   throwIfNotInitialised();
 
-  return m_transferDetails->balance(ITransfersContainer::IncludeDefault) -
-    m_transactionsCache.unconfrimedOutsAmount();
+  uint64_t balance = m_transferDetails->balance(actualBalanceFlags(m_forceLegacyTxs));
+  uint64_t unconfirmedOuts = m_transactionsCache.unconfrimedOutsAmount();
+  return safeSubtract(balance, unconfirmedOuts);
 }
 
 uint64_t WalletLegacy::pendingBalance() {
   std::unique_lock<std::mutex> lock(m_cacheMutex);
   throwIfNotInitialised();
 
-  uint64_t change = m_transactionsCache.unconfrimedOutsAmount() - m_transactionsCache.unconfirmedTransactionsAmount();
-  return m_transferDetails->balance(ITransfersContainer::IncludeAllLocked) + change;
+  uint64_t change = changeAmount(m_transactionsCache);
+  return m_transferDetails->balance(pendingBalanceFlags(m_forceLegacyTxs)) + change;
+}
+
+uint64_t WalletLegacy::totalBalance() {
+  std::unique_lock<std::mutex> lock(m_cacheMutex);
+  throwIfNotInitialised();
+
+  return calculateTotalBalance(*m_transferDetails, m_transactionsCache);
 }
 
 uint64_t WalletLegacy::unmixableBalance() {
@@ -575,7 +613,7 @@ uint64_t WalletLegacy::unmixableBalance() {
   throwIfNotInitialised();
 
   std::vector<TransactionOutputInformation> outputs;
-  m_transferDetails->getOutputs(outputs, ITransfersContainer::IncludeDefault);
+  m_transferDetails->getOutputs(outputs, actualBalanceFlags(m_forceLegacyTxs));
 
   uint64_t money = 0;
 
@@ -876,6 +914,13 @@ void WalletLegacy::notifyIfBalanceChanged() {
 
   if (prevPending != pending) {
     m_observerManager.notify(&IWalletLegacyObserver::pendingBalanceUpdated, pending);
+  }
+
+  auto total = totalBalance();
+  auto prevTotal = m_lastNotifiedTotalBalance.exchange(total);
+
+  if (prevTotal != total) {
+    m_observerManager.notify(&IWalletLegacyObserver::totalBalanceUpdated, total);
   }
 
   auto unmixable = unmixableBalance();

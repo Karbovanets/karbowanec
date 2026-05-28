@@ -68,6 +68,22 @@ std::shared_ptr<WalletLegacyEvent> makeCompleteEvent(WalletUserTransactionsCache
   return std::make_shared<WalletSendTransactionCompletedEvent>(transactionId, ec);
 }
 
+uint64_t safeSubtract(uint64_t minuend, uint64_t subtrahend) {
+  return minuend > subtrahend ? minuend - subtrahend : 0;
+}
+
+uint64_t changeAmount(const WalletUserTransactionsCache& transactionsCache) {
+  return safeSubtract(transactionsCache.unconfrimedOutsAmount(), transactionsCache.unconfirmedTransactionsAmount());
+}
+
+uint64_t calculateTotalBalance(const ITransfersContainer& transferDetails, const WalletUserTransactionsCache& transactionsCache) {
+  uint64_t actual = safeSubtract(
+    transferDetails.balance(ITransfersContainer::IncludeDefault),
+    transactionsCache.unconfrimedOutsAmount());
+  uint64_t pending = transferDetails.balance(ITransfersContainer::IncludeAllLocked) + changeAmount(transactionsCache);
+  return actual + pending;
+}
+
 // A transparent output is "non-canonical" relative to the v2 CT path if its
 // amount can't be expressed cleanly as a canonical CN denomination — either
 // because it's sub-cent / not 0.01-aligned (e.g. a 0.001 KRB dust piece), or
@@ -889,13 +905,17 @@ void WalletTransactionSender::prepareInputs(
 
 void WalletTransactionSender::notifyBalanceChanged(std::deque<std::shared_ptr<WalletLegacyEvent>>& events) {
   uint64_t unconfirmedOutsAmount = m_transactionsCache.unconfrimedOutsAmount();
-  uint64_t change = unconfirmedOutsAmount - m_transactionsCache.unconfirmedTransactionsAmount();
+  uint64_t change = changeAmount(m_transactionsCache);
 
-  uint64_t actualBalance = m_transferDetails.balance(ITransfersContainer::IncludeDefault) - unconfirmedOutsAmount;
-  uint64_t pendingBalance = m_transferDetails.balance(ITransfersContainer::IncludeAllLocked) + change;
+  uint32_t actualFlags = m_forceLegacy ? ITransfersContainer::IncludeKeyUnlocked : ITransfersContainer::IncludeDefault;
+  uint32_t pendingFlags = m_forceLegacy ? ITransfersContainer::IncludeKeyNotUnlocked : ITransfersContainer::IncludeAllLocked;
+  uint64_t balance = m_transferDetails.balance(actualFlags);
+  uint64_t actualBalance = safeSubtract(balance, unconfirmedOutsAmount);
+  uint64_t pendingBalance = m_transferDetails.balance(pendingFlags) + change;
 
   events.push_back(std::make_shared<WalletActualBalanceUpdatedEvent>(actualBalance));
   events.push_back(std::make_shared<WalletPendingBalanceUpdatedEvent>(pendingBalance));
+  events.push_back(std::make_shared<WalletTotalBalanceUpdatedEvent>(calculateTotalBalance(m_transferDetails, m_transactionsCache)));
 }
 
 namespace {

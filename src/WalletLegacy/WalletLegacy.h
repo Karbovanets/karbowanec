@@ -96,6 +96,7 @@ public:
 
   virtual uint64_t actualBalance() override;
   virtual uint64_t pendingBalance() override;
+  virtual uint64_t totalBalance() override;
   virtual uint64_t unmixableBalance() override;
 
   virtual size_t getTransactionCount() override;
@@ -182,6 +183,7 @@ private:
 
   std::atomic<uint64_t> m_lastNotifiedActualBalance;
   std::atomic<uint64_t> m_lastNotifiedPendingBalance;
+  std::atomic<uint64_t> m_lastNotifiedTotalBalance;
   std::atomic<uint64_t> m_lastNotifiedUnmixableBalance;
 
   BlockchainSynchronizer m_blockchainSync;

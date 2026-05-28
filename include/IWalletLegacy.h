@@ -92,6 +92,7 @@ public:
   virtual void synchronizationCompleted(std::error_code result) {}
   virtual void actualBalanceUpdated(uint64_t actualBalance) {}
   virtual void pendingBalanceUpdated(uint64_t pendingBalance) {}
+  virtual void totalBalanceUpdated(uint64_t totalBalance) {}
   virtual void unmixableBalanceUpdated(uint64_t unmixableBalance) {}
   virtual void externalTransactionCreated(TransactionId transactionId) {}
   virtual void sendTransactionCompleted(TransactionId transactionId, std::error_code result) {}
@@ -122,6 +123,7 @@ public:
 
   virtual uint64_t actualBalance() = 0;
   virtual uint64_t pendingBalance() = 0;
+  virtual uint64_t totalBalance() = 0;
   virtual uint64_t unmixableBalance() = 0;
 
   virtual size_t getTransactionCount() = 0;

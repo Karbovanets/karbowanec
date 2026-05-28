@@ -41,11 +41,13 @@ using CryptoNote::ISerializer;
     {
       uint64_t locked_amount;
       uint64_t available_balance;
+      uint64_t total_balance;
 
       void serialize(ISerializer& s)
       {
         KV_MEMBER(locked_amount)
         KV_MEMBER(available_balance)
+        KV_MEMBER(total_balance)
       }
     };
   };

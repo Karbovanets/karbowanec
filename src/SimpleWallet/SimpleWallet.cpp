@@ -2180,7 +2180,7 @@ bool simple_wallet::show_balance(const std::vector<std::string>& args/* = std::v
   const uint32_t walletHeight = m_node->getLastLocalBlockHeight();
   success_msg_writer() << "available: " << m_currency.formatAmount(m_wallet->actualBalance(), walletHeight);
   success_msg_writer() << "pending: " << m_currency.formatAmount(m_wallet->pendingBalance(), walletHeight);
-  success_msg_writer() << "total balance: " << m_currency.formatAmount(m_wallet->actualBalance() + m_wallet->pendingBalance(), walletHeight);
+  success_msg_writer() << "total balance: " << m_currency.formatAmount(m_wallet->totalBalance(), walletHeight);
 
   // Sub-MIN_CT outputs are spendable as transparent inputs but cannot become CT outputs;
   // when sending CT they will be absorbed into transaction fees.
@@ -2927,7 +2927,8 @@ int main(int argc, char* argv[]) {
 
       const uint32_t walletHeight = node->getLastLocalBlockHeight();
       logger(INFO) << "available balance: " << currency.formatAmount(wallet->actualBalance(), walletHeight)
-                   << ", locked amount: " << currency.formatAmount(wallet->pendingBalance(), walletHeight);
+                   << ", locked amount: " << currency.formatAmount(wallet->pendingBalance(), walletHeight)
+                   << ", total balance: " << currency.formatAmount(wallet->totalBalance(), walletHeight);
 
       logger(INFO, BRIGHT_GREEN) << "Loaded ok";
     } catch (const std::exception& e)  {
