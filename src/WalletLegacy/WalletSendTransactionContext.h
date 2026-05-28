@@ -44,10 +44,10 @@ struct SendTransactionContext
   uint64_t foundMoney;
   std::list<TransactionOutputInformation> selectedTransfers;
   // Optional sub-floor dust appended on a mixin>0 send for opportunistic
-  // cleanup. These are tagged so chooseInputMixins gives them a real ring
-  // (so they can mix) and pruneUnmixableSweptDust can drop the ones whose
-  // amount bucket can't supply a full ring of decoys — without ever
-  // dropping a required input. Empty on mixin==0 / explicit-output sends.
+  // cleanup. Tagged so adaptTransparentRings can tell optional dust (droppable
+  // when its bucket can't reach CT_MIN_RING_SIZE) from required inputs (which
+  // are only ring-adapted, never dropped). Empty on mixin==0 / explicit-output
+  // sends.
   std::list<TransactionOutputInformation> sweptDust;
   TxDustPolicy dustPolicy;
   uint64_t mixIn;

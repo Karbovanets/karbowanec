@@ -1666,15 +1666,16 @@ void WalletGreen::prepareTransaction(std::vector<WalletOuts>&& wallets,
 
   typedef CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount outs_for_amount;
   std::vector<outs_for_amount> mixinResult;
-  std::vector<uint64_t> inputMixins = chooseInputMixins(selectedTransfers, mixIn, useCT, sweptDust);
+  std::vector<uint64_t> inputMixins = chooseInputMixins(selectedTransfers, mixIn, useCT);
 
   if (std::any_of(inputMixins.begin(), inputMixins.end(), [](uint64_t inputMixin) { return inputMixin != 0; })) {
     requestMixinOuts(selectedTransfers, inputMixins, mixinResult);
-    // Shrink swept dust rings to the decoys their buckets returned (dropping
-    // any that can't reach CT_MIN_RING_SIZE), then enforce the strict decoy
-    // check on the survivors. Adapting/dropping only affects optional excess,
-    // so funding stays satisfied.
-    adaptSweptDustRings(sweptDust, selectedTransfers, inputMixins, mixinResult, foundMoney);
+    // Shrink transparent input rings to the decoys their buckets returned (and
+    // drop optional swept dust that can't reach CT_MIN_RING_SIZE), then enforce
+    // the strict decoy check, which now only gates confidential (Triptych)
+    // inputs. Transparent inputs always fit after adapting; dropping affects
+    // only optional excess, so funding stays satisfied.
+    adaptTransparentRings(sweptDust, selectedTransfers, inputMixins, mixinResult, foundMoney);
     checkIfEnoughMixins(mixinResult, inputMixins);
   }
 
@@ -1809,8 +1810,7 @@ bool WalletGreen::isCoinbaseOutput(const OutputToTransfer& output) const {
 std::vector<uint64_t> WalletGreen::chooseInputMixins(
   const std::vector<OutputToTransfer>& selectedTransfers,
   uint64_t requestedMixin,
-  bool useCT,
-  const std::vector<OutputToTransfer>& sweptDust) const {
+  bool useCT) const {
 
   std::vector<uint64_t> inputMixins(selectedTransfers.size(), requestedMixin);
   if (!useCT) {
@@ -1838,55 +1838,49 @@ std::vector<uint64_t> WalletGreen::chooseInputMixins(
   const uint64_t roundedMixin = roundUpToTriptychMixin(normalMixin);
 
   for (size_t i = 0; i < selectedTransfers.size(); ++i) {
-    if (isCoinbaseOutput(selectedTransfers[i])) {
-      // Coinbase always spends at ring 1 via v2 KeyInput.
-      inputMixins[i] = 0;
-    } else if (isPurgeableCtDust(selectedTransfers[i].out, selectedTransfers[i].out.amount)) {
-      // Sub-floor dust. Tagged opportunistic-sweep dust attempts a real ring
-      // so it can be mixed (pruneUnmixableSweptDust drops it later if its
-      // bucket lacks decoys). Required dust (untagged) stays at ring 1.
-      const bool swept = std::any_of(sweptDust.begin(), sweptDust.end(),
-        [&](const OutputToTransfer& d) { return isSameOutput(selectedTransfers[i].out, d.out); });
-      inputMixins[i] = swept ? roundedMixin : 0;
-    } else {
-      inputMixins[i] = roundedMixin;
-    }
+    // Coinbase spends at ring 1 (v2 KeyInput, single-member). Every other
+    // input requests the rounded ring; adaptTransparentRings later shrinks
+    // transparent inputs to the decoys actually available (and drops optional
+    // swept dust that can't reach CT_MIN_RING_SIZE), while confidential inputs
+    // keep their strict Triptych ring.
+    inputMixins[i] = isCoinbaseOutput(selectedTransfers[i]) ? 0 : roundedMixin;
   }
 
   return inputMixins;
 }
 
-void WalletGreen::adaptSweptDustRings(
+void WalletGreen::adaptTransparentRings(
   const std::vector<OutputToTransfer>& sweptDust,
   std::vector<OutputToTransfer>& selectedTransfers,
   std::vector<uint64_t>& inputMixins,
   std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult,
   uint64_t& foundMoney) const {
 
-  if (sweptDust.empty()) {
-    return;
-  }
-
-  // Transparent dust spends through a v2 KeyInput (legacy ring signature),
-  // which accepts any ring size. Shrink each swept-dust input's ring to the
-  // decoys its bucket returned; drop only pieces that can't reach
-  // CT_MIN_RING_SIZE so we never reveal dust in a sub-floor-privacy ring.
+  // Transparent inputs spend through a v2 KeyInput (legacy ring signature),
+  // which accepts ANY ring size. When a bucket can't supply the requested
+  // decoys we shrink that input's ring to what the daemon returned (down to
+  // ring 1) rather than failing the send — the CT outputs still hide amounts,
+  // and a shielded-in transparent input's amount is public anyway. Confidential
+  // (Triptych) inputs are left strict; checkIfEnoughMixins enforces them.
+  // Optional swept dust is the one input that can be dropped instead of
+  // adapted to a tiny ring: it isn't needed to fund the spend, so when it
+  // can't reach CT_MIN_RING_SIZE we leave it in the wallet.
   const uint64_t minMixin = CryptoNote::parameters::CT_MIN_RING_SIZE - 1;
   std::vector<bool> keep(selectedTransfers.size(), true);
   bool anyPruned = false;
   for (size_t i = 0; i < selectedTransfers.size() && i < inputMixins.size(); ++i) {
-    if (inputMixins[i] == 0) continue;  // ring-1 coinbase / required dust
-    const bool swept = std::any_of(sweptDust.begin(), sweptDust.end(),
-      [&](const OutputToTransfer& d) { return isSameOutput(selectedTransfers[i].out, d.out); });
-    if (!swept) continue;               // required canonical input
+    if (inputMixins[i] == 0) continue;  // coinbase ring-1
+    if (selectedTransfers[i].out.type == TransactionTypes::OutputType::Confidential) continue; // strict Triptych
     const size_t available = i < mixinResult.size() ? mixinResult[i].outs.size() : 0;
     const uint64_t maxMixin = available > 0 ? static_cast<uint64_t>(available - 1) : 0;
     const uint64_t newMixin = std::min<uint64_t>(inputMixins[i], maxMixin);
-    if (newMixin >= minMixin) {
-      inputMixins[i] = newMixin;        // adapt ring down to what's available
-    } else {
-      keep[i] = false;                  // can't reach CT_MIN_RING_SIZE — drop
+    const bool swept = std::any_of(sweptDust.begin(), sweptDust.end(),
+      [&](const OutputToTransfer& d) { return isSameOutput(selectedTransfers[i].out, d.out); });
+    if (swept && newMixin < minMixin) {
+      keep[i] = false;                  // optional dust that can't reach CT_MIN ring — leave it in the wallet
       anyPruned = true;
+    } else {
+      inputMixins[i] = newMixin;        // adapt ring down to what's available (required inputs may reach ring 1)
     }
   }
   if (!anyPruned) {
@@ -2835,7 +2829,7 @@ void WalletGreen::requestMixinOuts(
   }
 
   // NB: the strict per-input decoy check (checkIfEnoughMixins) is now performed
-  // by the caller, after pruneUnmixableSweptDust has dropped any optional swept
+  // by the caller, after adaptTransparentRings has shrunk/dropped any optional swept
   // dust whose bucket couldn't supply a full ring. Calling it here would abort
   // the whole send on a dust shortfall instead of letting the prune handle it.
   m_logger(DEBUGGING) << "Random outputs received";
