@@ -173,7 +173,7 @@ bool isCoinbaseOutput(const TransactionOutputInformation& output,
 
   TransactionInformation txInfo;
   return container->getTransactionInformation(output.transactionHash, txInfo) &&
-         txInfo.totalAmountIn == 0 &&
+         txInfo.isBase &&
          txInfo.blockHeight >= currency.upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5);
 }
 
@@ -1781,7 +1781,7 @@ bool WalletGreen::isCoinbaseOutput(const OutputToTransfer& output) const {
 
   TransactionInformation txInfo;
   return output.wallet->container->getTransactionInformation(output.out.transactionHash, txInfo) &&
-         txInfo.totalAmountIn == 0 &&
+         txInfo.isBase &&
          txInfo.blockHeight >= m_currency.upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5);
 }
 
@@ -2233,9 +2233,8 @@ bool WalletGreen::updateWalletTransactionInfo(size_t transactionId, const Crypto
       updated = true;
     }
 
-    bool isBase = info.totalAmountIn == 0;
-    if (transaction.isBase != isBase) {
-      transaction.isBase = isBase;
+    if (transaction.isBase != info.isBase) {
+      transaction.isBase = info.isBase;
       updated = true;
     }
   });
@@ -2260,12 +2259,8 @@ size_t WalletGreen::insertBlockchainTransaction(const TransactionInformation& in
   tx.timestamp = info.timestamp;
   tx.blockHeight = info.blockHeight;
   tx.hash = info.transactionHash;
-  tx.isBase = info.totalAmountIn == 0;
-  if (tx.isBase) {
-    tx.fee = 0;
-  } else {
-    tx.fee = info.totalAmountIn - info.totalAmountOut;
-  }
+  tx.isBase = info.isBase;
+  tx.fee = info.fee;
 
   tx.unlockTime = info.unlockTime;
   tx.extra.assign(reinterpret_cast<const char*>(info.extra.data()), info.extra.size());
@@ -3156,7 +3151,7 @@ void WalletGreen::prepareInputs(
     bool haveTxInfo = input.wallet != nullptr &&
       input.wallet->container != nullptr &&
       input.wallet->container->getTransactionInformation(input.out.transactionHash, txInfo);
-    const bool realIsCoinbase = haveTxInfo && txInfo.totalAmountIn == 0;
+    const bool realIsCoinbase = haveTxInfo && txInfo.isBase;
     const uint32_t realBlockHeight = haveTxInfo ? txInfo.blockHeight : 0;
 
     // Determine whether this input has a mixing bucket allocated. If yes,

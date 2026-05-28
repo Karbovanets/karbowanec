@@ -174,7 +174,7 @@ bool WalletTransactionSender::isCoinbaseOutput(const TransactionOutputInformatio
 
   TransactionInformation txInfo;
   return m_transferDetails.getTransactionInformation(output.transactionHash, txInfo) &&
-         txInfo.totalAmountIn == 0 &&
+         txInfo.isBase &&
          txInfo.blockHeight >= m_currency.upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5);
 }
 
@@ -764,7 +764,7 @@ void WalletTransactionSender::prepareInputs(
 
     TransactionInformation txInfo;
     bool haveTxInfo = m_transferDetails.getTransactionInformation(td.transactionHash, txInfo);
-    const bool realIsCoinbase = haveTxInfo && txInfo.totalAmountIn == 0;
+    const bool realIsCoinbase = haveTxInfo && txInfo.isBase;
     const uint32_t realBlockHeight = haveTxInfo ? txInfo.blockHeight : 0;
 
     // Reserve some ring slots for cross-bucket mixing decoys when this input
