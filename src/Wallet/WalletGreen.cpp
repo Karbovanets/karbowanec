@@ -1670,10 +1670,11 @@ void WalletGreen::prepareTransaction(std::vector<WalletOuts>&& wallets,
 
   if (std::any_of(inputMixins.begin(), inputMixins.end(), [](uint64_t inputMixin) { return inputMixin != 0; })) {
     requestMixinOuts(selectedTransfers, inputMixins, mixinResult);
-    // Drop swept dust whose bucket couldn't supply a full ring, then enforce
-    // the strict decoy check on the surviving (required) inputs. Pruning only
-    // removes optional excess, so funding stays satisfied.
-    pruneUnmixableSweptDust(sweptDust, selectedTransfers, inputMixins, mixinResult, foundMoney);
+    // Shrink swept dust rings to the decoys their buckets returned (dropping
+    // any that can't reach CT_MIN_RING_SIZE), then enforce the strict decoy
+    // check on the survivors. Adapting/dropping only affects optional excess,
+    // so funding stays satisfied.
+    adaptSweptDustRings(sweptDust, selectedTransfers, inputMixins, mixinResult, foundMoney);
     checkIfEnoughMixins(mixinResult, inputMixins);
   }
 
@@ -1855,7 +1856,7 @@ std::vector<uint64_t> WalletGreen::chooseInputMixins(
   return inputMixins;
 }
 
-void WalletGreen::pruneUnmixableSweptDust(
+void WalletGreen::adaptSweptDustRings(
   const std::vector<OutputToTransfer>& sweptDust,
   std::vector<OutputToTransfer>& selectedTransfers,
   std::vector<uint64_t>& inputMixins,
@@ -1866,16 +1867,25 @@ void WalletGreen::pruneUnmixableSweptDust(
     return;
   }
 
+  // Transparent dust spends through a v2 KeyInput (legacy ring signature),
+  // which accepts any ring size. Shrink each swept-dust input's ring to the
+  // decoys its bucket returned; drop only pieces that can't reach
+  // CT_MIN_RING_SIZE so we never reveal dust in a sub-floor-privacy ring.
+  const uint64_t minMixin = CryptoNote::parameters::CT_MIN_RING_SIZE - 1;
   std::vector<bool> keep(selectedTransfers.size(), true);
   bool anyPruned = false;
   for (size_t i = 0; i < selectedTransfers.size() && i < inputMixins.size(); ++i) {
+    if (inputMixins[i] == 0) continue;  // ring-1 coinbase / required dust
     const bool swept = std::any_of(sweptDust.begin(), sweptDust.end(),
       [&](const OutputToTransfer& d) { return isSameOutput(selectedTransfers[i].out, d.out); });
-    const bool requestedRing = inputMixins[i] > 0;
-    const bool enoughDecoys = i < mixinResult.size() &&
-      mixinResult[i].outs.size() >= inputMixins[i] + 1;
-    if (swept && requestedRing && !enoughDecoys) {
-      keep[i] = false;
+    if (!swept) continue;               // required canonical input
+    const size_t available = i < mixinResult.size() ? mixinResult[i].outs.size() : 0;
+    const uint64_t maxMixin = available > 0 ? static_cast<uint64_t>(available - 1) : 0;
+    const uint64_t newMixin = std::min<uint64_t>(inputMixins[i], maxMixin);
+    if (newMixin >= minMixin) {
+      inputMixins[i] = newMixin;        // adapt ring down to what's available
+    } else {
+      keep[i] = false;                  // can't reach CT_MIN_RING_SIZE — drop
       anyPruned = true;
     }
   }

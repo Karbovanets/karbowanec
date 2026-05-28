@@ -77,10 +77,11 @@ private:
   // Opportunistic dust sweep on mixin>0 sends: appends purgeable sub-floor
   // dust (tagged in context->sweptDust) so it can be mixed and cleaned up.
   void appendMixableDustSweep(std::shared_ptr<SendTransactionContext> context) const;
-  // Drops tagged swept dust whose amount bucket couldn't supply a full ring
-  // of decoys, rebuilding the parallel per-input vectors. Never touches
-  // required inputs, so funding stays satisfied.
-  void pruneUnmixableSweptDust(std::shared_ptr<SendTransactionContext> context) const;
+  // Shrinks each tagged swept-dust input's ring to the decoys its bucket
+  // actually returned (transparent dust uses a KeyInput, so any ring size is
+  // valid), dropping only pieces that can't reach CT_MIN_RING_SIZE. Rebuilds
+  // the parallel per-input vectors; never touches required inputs.
+  void adaptSweptDustRings(std::shared_ptr<SendTransactionContext> context) const;
   std::vector<uint64_t> chooseInputMixins(const std::list<TransactionOutputInformation>& selectedTransfers, uint64_t requestedMixin, bool useCT, const std::list<TransactionOutputInformation>& sweptDust = {}) const;
   bool hasMixinInputs(const std::vector<uint64_t>& inputMixins) const;
   uint64_t maxInputMixin(const std::vector<uint64_t>& inputMixins) const;

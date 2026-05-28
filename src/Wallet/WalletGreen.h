@@ -324,11 +324,12 @@ protected:
     std::vector<OutputToTransfer>* sweptDust = nullptr);
 
   bool isCoinbaseOutput(const OutputToTransfer& output) const;
-  // Opportunistic mixin>0 dust sweep: drops tagged swept dust whose amount
-  // bucket couldn't supply a full ring of decoys, rebuilding the parallel
-  // per-input vectors. Required inputs are never touched, so funding stays
-  // satisfied.
-  void pruneUnmixableSweptDust(const std::vector<OutputToTransfer>& sweptDust,
+  // Opportunistic mixin>0 dust sweep: shrinks each tagged swept-dust input's
+  // ring to the decoys its bucket returned (transparent dust uses a KeyInput,
+  // so any ring size is valid), dropping only pieces that can't reach
+  // CT_MIN_RING_SIZE. Rebuilds the parallel per-input vectors; never touches
+  // required inputs, so funding stays satisfied.
+  void adaptSweptDustRings(const std::vector<OutputToTransfer>& sweptDust,
     std::vector<OutputToTransfer>& selectedTransfers,
     std::vector<uint64_t>& inputMixins,
     std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult,
