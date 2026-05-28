@@ -3033,10 +3033,14 @@ uint64_t WalletGreen::selectTransfers(
   }
 
   // Phase 3: once funded, opportunistically purge tiny transparent dust in CT
-  // sends. These sub-floor pieces cannot become CT outputs directly;
+  // anonymity-0 sends. These sub-floor pieces cannot become CT outputs directly;
   // selecting them either folds them into the fee or rolls them into canonical
   // CT change while removing the original dusty outputs from the wallet.
-  if (includeNonCanonical && foundMoney >= neededMoney && !nonCanonicalOutputs.empty() &&
+  // Gated on dust (anonymity 0): the user has already waived privacy, so
+  // revealing extra transparent dust via ring-1 KeyInputs is acceptable. On
+  // mixin>0 sends we never proactively append transparent dust — that would
+  // link those outputs to an otherwise-shielded spend.
+  if (includeNonCanonical && dust && foundMoney >= neededMoney && !nonCanonicalOutputs.empty() &&
       selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS) {
     std::sort(nonCanonicalOutputs.begin(), nonCanonicalOutputs.end(),
               [&outputs](size_t a, size_t b) {

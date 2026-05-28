@@ -1090,10 +1090,15 @@ uint64_t WalletTransactionSender::selectTransfersToSend(
     }
   }
 
-  // Once funded, CT sends may pull in sub-floor transparent dust. That removes
-  // dust from the wallet and lets the CT builder either absorb it into the fee
-  // or roll it into canonical CT change.
-  if (includeNonCanonical && foundMoney >= neededMoney && !nonCanonicalOutputs.empty() &&
+  // Once funded, CT anonymity-0 sends may proactively pull in sub-floor
+  // transparent dust. That removes dust from the wallet and lets the CT
+  // builder either absorb it into the fee or roll it into canonical CT change.
+  // Gated on addUnmixable (mixIn == 0): the user has already waived privacy,
+  // so revealing extra transparent dust via ring-1 KeyInputs is acceptable.
+  // On mixin>0 sends we never proactively append transparent dust — that would
+  // link those outputs to an otherwise-shielded spend. (Dust still gets spent
+  // if genuinely needed to fund the tx; it just isn't swept opportunistically.)
+  if (includeNonCanonical && addUnmixable && foundMoney >= neededMoney && !nonCanonicalOutputs.empty() &&
       selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS) {
     std::sort(nonCanonicalOutputs.begin(), nonCanonicalOutputs.end(),
               [&spendableAmounts](size_t a, size_t b) {
