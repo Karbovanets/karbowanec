@@ -74,6 +74,7 @@ private:
   uint64_t resolveSpendableAmount(const TransactionOutputInformation& output) const;
 
   bool isCoinbaseOutput(const TransactionOutputInformation& output) const;
+  void appendPurgeableCtDust(std::list<TransactionOutputInformation>& selectedTransfers, uint64_t& foundMoney) const;
   std::vector<uint64_t> chooseInputMixins(const std::list<TransactionOutputInformation>& selectedTransfers, uint64_t requestedMixin, bool useCT) const;
   bool hasMixinInputs(const std::vector<uint64_t>& inputMixins) const;
   uint64_t maxInputMixin(const std::vector<uint64_t>& inputMixins) const;

@@ -1816,11 +1816,11 @@ std::vector<uint64_t> WalletGreen::chooseInputMixins(
   const uint64_t roundedMixin = roundUpToTriptychMixin(normalMixin);
 
   for (size_t i = 0; i < selectedTransfers.size(); ++i) {
-    if (isCoinbaseOutput(selectedTransfers[i])) {
-      // Coinbase outputs route through v2 KeyInput (Phase B) at ring size
-      // 1 — the legacy single-member ring signature is a sound DLEQ proof.
-      // Triptych ring 1 is no longer supported (the Schnorr branch didn't
-      // bind the same x in P=xG and I=x·Hp(P)).
+    if (isCoinbaseOutput(selectedTransfers[i]) ||
+        isPurgeableCtDust(selectedTransfers[i].out, selectedTransfers[i].out.amount)) {
+      // Coinbase outputs and purgeable sub-floor transparent dust route
+      // through v2 KeyInput at ring size 1. Dust is swept into extra fee
+      // or canonical CT change instead of being preserved as another dust output.
       inputMixins[i] = 0;
     } else {
       inputMixins[i] = roundedMixin;
@@ -3033,10 +3033,10 @@ uint64_t WalletGreen::selectTransfers(
   }
 
   // Phase 3: once funded, opportunistically purge tiny transparent dust in CT
-  // anonymity-0 sends. These sub-floor pieces cannot become CT outputs directly;
+  // sends. These sub-floor pieces cannot become CT outputs directly;
   // selecting them either folds them into the fee or rolls them into canonical
   // CT change while removing the original dusty outputs from the wallet.
-  if (includeNonCanonical && dust && foundMoney >= neededMoney && !nonCanonicalOutputs.empty() &&
+  if (includeNonCanonical && foundMoney >= neededMoney && !nonCanonicalOutputs.empty() &&
       selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS) {
     std::sort(nonCanonicalOutputs.begin(), nonCanonicalOutputs.end(),
               [&outputs](size_t a, size_t b) {

@@ -102,6 +102,11 @@ bool isPurgeableCtDust(const TransactionOutputInformation& output, uint64_t spen
          spendAmount < CryptoNote::MIN_CT_DENOMINATION;
 }
 
+bool isSameOutput(const TransactionOutputInformation& lhs, const TransactionOutputInformation& rhs) {
+  return lhs.transactionHash == rhs.transactionHash &&
+         lhs.outputInTransaction == rhs.outputInTransaction;
+}
+
 // chooseCtMixingBuckets leaves mixingBuckets[i] = 0 for inputs that skip
 // cross-bucket mixing (e.g. ring-size-1 coinbase). The daemon's
 // getRandomOutsByAmounts treats amount=0 as an empty bucket and logs an
@@ -178,6 +183,51 @@ bool WalletTransactionSender::isCoinbaseOutput(const TransactionOutputInformatio
          txInfo.blockHeight >= m_currency.upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5);
 }
 
+void WalletTransactionSender::appendPurgeableCtDust(
+    std::list<TransactionOutputInformation>& selectedTransfers,
+    uint64_t& foundMoney) const {
+  if (selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
+    return;
+  }
+
+  std::vector<TransactionOutputInformation> outputs;
+  m_transferDetails.getOutputs(outputs, ITransfersContainer::IncludeDefault);
+
+  std::vector<size_t> purgeableDust;
+  std::vector<uint64_t> spendableAmounts(outputs.size(), 0);
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    const auto& out = outputs[i];
+    if (m_transactionsCache.isUsed(out)) {
+      continue;
+    }
+    if (std::any_of(selectedTransfers.begin(), selectedTransfers.end(),
+        [&out](const TransactionOutputInformation& selected) { return isSameOutput(out, selected); })) {
+      continue;
+    }
+
+    const uint64_t spendableAmount = resolveSpendableAmount(out);
+    if (!isPurgeableCtDust(out, spendableAmount)) {
+      continue;
+    }
+
+    spendableAmounts[i] = spendableAmount;
+    purgeableDust.push_back(i);
+  }
+
+  std::sort(purgeableDust.begin(), purgeableDust.end(),
+            [&spendableAmounts](size_t a, size_t b) {
+              return spendableAmounts[a] < spendableAmounts[b];
+            });
+
+  for (size_t idx : purgeableDust) {
+    if (selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
+      break;
+    }
+    selectedTransfers.push_back(outputs[idx]);
+    foundMoney += spendableAmounts[idx];
+  }
+}
+
 std::vector<uint64_t> WalletTransactionSender::chooseInputMixins(
   const std::list<TransactionOutputInformation>& selectedTransfers,
   uint64_t requestedMixin,
@@ -189,11 +239,9 @@ std::vector<uint64_t> WalletTransactionSender::chooseInputMixins(
   }
 
   // Triptych supports ring sizes {4, 8, 16}. Round the requested mixin up
-  // to the next supported ring size. Coinbase outputs use mixin 0 (ring
-  // size 1) — under Phase B those route through v2 KeyInput with a legacy
-  // ring signature (single-member DLEQ, sound). ConfidentialInput slots
-  // never see mixin 0 because their real spend is a ConfidentialOutput,
-  // not a coinbase.
+  // to the next supported ring size. Coinbase outputs and purgeable
+  // sub-floor transparent dust use mixin 0 (ring size 1) through v2
+  // KeyInput; confidential spends never use mixin 0.
   const uint64_t minCtMixin = CryptoNote::parameters::CT_MIN_RING_SIZE - 1;
   const uint64_t maxCtMixin = CryptoNote::parameters::CT_MAX_RING_SIZE - 1;
   const uint64_t normalMixin = std::max<uint64_t>(requestedMixin, minCtMixin);
@@ -210,7 +258,7 @@ std::vector<uint64_t> WalletTransactionSender::chooseInputMixins(
 
   size_t i = 0;
   for (const auto& output : selectedTransfers) {
-    if (isCoinbaseOutput(output)) {
+    if (isCoinbaseOutput(output) || isPurgeableCtDust(output, resolveSpendableAmount(output))) {
       inputMixins[i++] = 0;
     } else {
       inputMixins[i++] = roundedMixin;
@@ -306,6 +354,10 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::makeSendRequest(Transact
       useCT);
   }
 
+  if (useCT && context->foundMoney >= neededMoney) {
+    appendPurgeableCtDust(context->selectedTransfers, context->foundMoney);
+  }
+
   throwIf(context->foundMoney < neededMoney, error::WRONG_AMOUNT);
 
   transactionId = m_transactionsCache.addNewTransaction(neededMoney, fee, extra, transfers, unlockTimestamp);
@@ -354,6 +406,10 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
        context->dustPolicy.dustThreshold,
        context->selectedTransfers,
        useCT);
+  }
+
+  if (useCT && context->foundMoney >= neededMoney) {
+    appendPurgeableCtDust(context->selectedTransfers, context->foundMoney);
   }
 
   throwIf(context->foundMoney < neededMoney, error::WRONG_AMOUNT);
@@ -1092,10 +1148,10 @@ uint64_t WalletTransactionSender::selectTransfersToSend(
     }
   }
 
-  // Once funded, CT anonymity-0 sends may pull in sub-floor transparent dust.
-  // That removes dust from the wallet and lets the CT builder either absorb it
-  // into the fee or roll it into canonical CT change.
-  if (includeNonCanonical && addUnmixable && foundMoney >= neededMoney && !nonCanonicalOutputs.empty() &&
+  // Once funded, CT sends may pull in sub-floor transparent dust. That removes
+  // dust from the wallet and lets the CT builder either absorb it into the fee
+  // or roll it into canonical CT change.
+  if (includeNonCanonical && foundMoney >= neededMoney && !nonCanonicalOutputs.empty() &&
       selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS) {
     std::sort(nonCanonicalOutputs.begin(), nonCanonicalOutputs.end(),
               [&spendableAmounts](size_t a, size_t b) {
