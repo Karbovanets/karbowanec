@@ -2914,9 +2914,9 @@ uint64_t WalletGreen::selectTransfers(
       const size_t outputIndex = outputs.size() - 1;
 
       if (includeNonCanonical && dust &&
-          isCoinbaseOutput(outputs[outputIndex].output,
-                           walletIt->wallet == nullptr ? nullptr : walletIt->wallet->container,
-                           m_currency)) {
+          ::isCoinbaseOutput(outputs[outputIndex].output,
+                             walletIt->wallet == nullptr ? nullptr : walletIt->wallet->container,
+                             m_currency)) {
         coinbaseOutputs.push_back(outputIndex);
         continue;
       }
