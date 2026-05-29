@@ -115,13 +115,168 @@ mistaken belief that Karbo's CT was aiming for Monero parity.
   to fund a CT output. The transparent amount is publicly visible going in;
   the resulting CT output's amount is hidden. This is a normal use case.
 - `CT → CT` is allowed (the common case).
-- `CT → CN/plain` (unshield) is currently restricted; users who need to
-  move CT-held value to a transparent counterparty (atomic swaps, exchange
-  deposits to non-CT-aware addresses) should be supported in a follow-up
-  pass. Reopening this path is consistent with the "hide amounts, not
-  graph" threat model — the unshield necessarily reveals the unshielded
-  amount, but the *prior* CT lifetime kept it hidden, and the user opts
-  into the disclosure at unshield time.
+- `CT → CN/plain` (unshield) is being reopened to support moving CT-held
+  value to a transparent counterparty (atomic-swap redeem, exchange
+  deposits to non-CT-aware addresses). Reopening this path is consistent
+  with the "hide amounts, not graph" threat model — the unshield
+  necessarily reveals the unshielded amount, but the *prior* CT lifetime
+  kept it hidden, and the user opts into the disclosure at unshield time.
+  **Unshield is assigned its own transaction version, `v3`** (the version
+  ladder is `v1 = CN/plain`, `v2 = CT`, `v3 = CT → CN unshield`, `v4 = PQ`;
+  see "Transaction version ladder" below). `v3` is a CT-aware version that
+  permits **mixed outputs** — `ConfidentialOutput` and `KeyOutput` in the
+  same transaction — and so covers pure unshield, **partial unshield** (CT
+  change + plain payout in one tx, for CEX-deposit ergonomics), and shield
+  from one shape. The reason for a version *bump* rather than relaxing `v2`
+  in place is isolation: `v2` stays strictly all-confidential outputs, so the
+  ordinary shielded-payment hot path never reaches the mixed-output /
+  mixed-balance code, and a bug in that new path cannot be triggered by a
+  vanilla shielded send.
+  **The *spend* path is identical to `v2 CT → CT`:** the confidential value
+  being consumed is still spent by a `ConfidentialInput` (same Triptych
+  proof, same key image `I = x·H_p(P)`), and mixed *inputs* (`KeyInput` +
+  `ConfidentialInput`) already exist in `v2`, so `v3` inherits input handling
+  verbatim. The one genuinely new consensus surface is the **plain-output
+  term in the balance kernel** — see "v3 unshield: scope and the balance
+  kernel" below. The key-image invariant in the next subsection holds
+  identically across `v1`/`v2`/`v3`.
+  Detailed working notes (swap construction, adversarial test set) live in
+  `karbo-swaps-and-ct-to-cn.md`.
+
+### Transaction version ladder
+
+| Version | Meaning | Status |
+|---------|---------|--------|
+| `v1` | CN / plain transparent (`CURRENT_TRANSACTION_VERSION`) | shipped |
+| `v2` | CT — confidential outputs, Triptych spends (`TRANSACTION_VERSION_CT`) | shipped (dev/ct) |
+| `v3` | CT → CN unshield (confidential input → transparent output) | planned |
+| `v4` | PQ Phase 1 (`TRANSACTION_VERSION_PQ`, post-quantum family) | planned |
+
+`v1` and `v2` are the only values defined in `src/CryptoNoteConfig.h` today.
+`v3` (unshield) and `v4` (PQ) are reserved by this ladder for their
+respective follow-up passes. Note these are *transaction* versions and are
+orthogonal to the *block-major* fork versions (CT activates at block-major
+`v6`, PQ-plain at `v7`).
+
+### v3 unshield: scope and the balance kernel
+
+The mechanical `v3` plumbing is small (admit version 3; relax the
+output-uniformity check to allow `KeyOutput` alongside `ConfidentialOutput`;
+index plain outputs in the normal global-output index so they're later
+spendable as ordinary transparent ring-1 outputs; apply the fee as a plain
+`·H` term once). The **audit centerpiece** is the balance kernel's new
+plain-output term. General form (handles all four directions — shield,
+unshield, partial, CT→CT):
+
+```
+Σ(plain_in)·H + Σ(pseudo-in_CT) − Σ(conf-out) − (Σ plain_out)·H − fee·H  ≟  Commit(0)
+```
+
+Plain inputs and plain outputs touch the **H axis only** (zero blinding on
+G). **Critical invariant:** any G-component leaking from a "plain"
+input/output is an inflation bug. Supply accounting stays as today, computed
+from visible amounts only: `Δconfidential_supply = plain_in − plain_out −
+fee`; hidden CT in/out values cancel in the pool; underflow (debit > pool) is
+a hard reject. GK/range-proof count must equal `count(ConfidentialOutput)`
+and **must accept 0** (a pure unshield has no confidential outputs).
+
+**Verified against current code (this is genuinely new for v3):**
+- `check_outs_valid` ([CryptoNoteFormatUtils.cpp:194](../src/CryptoNoteCore/CryptoNoteFormatUtils.cpp))
+  currently *rejects* any non-`ConfidentialOutput` in a `v2` CT tx, so the
+  balance kernel ([Blockchain.cpp:2968](../src/CryptoNoteCore/Blockchain.cpp))
+  safely does `boost::get<ConfidentialOutput>` on every output. The
+  `−(Σ plain_out)·H` term has therefore **never run in production** — it is
+  the spend-from-nothing surface and must be reviewed as if it were the only
+  thing in the PR.
+- Mixed *inputs* already work in `v2`: the kernel's input loop handles
+  `KeyInput` via `transparent_amount_to_commitment(amount)` (= `amount·H`,
+  blinding 0) at [Blockchain.cpp:2954](../src/CryptoNoteCore/Blockchain.cpp).
+  So "mixed inputs are nothing new for v3" is true — but it rests on the
+  key-image invariant below (TODO-1/TODO-2 in the working notes), which is
+  now confirmed.
+- *Minor cleanup for the implementer:* the comment at
+  [Core.cpp:455](../src/CryptoNoteCore/Core.cpp) refers to "transparent
+  change/unshield from a CT tx" and `MIN_CT_DENOMINATION` enforcement on "v2
+  mixed outputs," but `check_outs_valid` rejects plain outputs in `v2` — so
+  that path is aspirational/unreachable today. Reconcile it when `v3` lands.
+
+Adversarial tests the kernel work must include: pure unshield (0 CT out, 0 GK
+proofs); partial unshield (exercises both kernel terms); the
+**inflate-the-change** vector (honest `plain_out`, exited value hidden in an
+inflated confidential "change" commitment — the kernel must force the change
+value via the equation and reject); sign-flipped plain term; fee
+double-counted; `Σ plain_out` overflow (checked add, no asserts on the
+consensus path); `confidential_supply` underflow; overstated `plain_in` vs
+referenced amount; and a round-trip confirming a `v3` `KeyOutput` is later
+spendable as a normal `v1` ring-1 transparent spend (closes the loop to swap
+funding).
+
+### Key-image invariant across shield boundaries (double-spend safety)
+
+Spending the same output **must** produce the same key image regardless of
+which transaction form consumes it. This is what makes shield boundaries
+safe: a holder cannot spend an output once via one form and again via
+another, because the consensus spent-key set would collide.
+
+The invariant rests on four properties, all of which hold in the current
+code and **must be preserved by the CT→CN unshield work**:
+
+1. **One canonical spend path per output type.** A transparent `KeyOutput`
+   is consumable only by a `KeyInput`; a `ConfidentialOutput` is consumable
+   only by a `ConfidentialInput`. The two never overlap: confidential
+   outputs are registered in the global output index under the sentinel
+   bucket `CT_CONFIDENTIAL_OUTPUT_AMOUNT` (`UINT64_MAX`), transparent
+   outputs under their real amount bucket, and a `KeyInput`'s ring resolves
+   only `KeyOutput` targets in its own (`amount != 0`) bucket. The unshield
+   path must **not** introduce a second way to consume a confidential
+   output (e.g. via a plain `KeyInput`); doing so would risk a second,
+   divergent key image for the same output.
+
+2. **Key-image determinism.** The key image is always
+   `I = x · H_p(P)` over the output's one-time public key `P`, computed by
+   the same `generate_key_image` primitive on every path. It depends only
+   on the output keypair `(P, x)` — never on the transaction version, the
+   output side (shield / unshield / CT-to-CT), the ring composition, or the
+   Pedersen commitment. So a `ConfidentialInput` spending output `P` in a
+   `CT → CT` transaction and a `ConfidentialInput` spending the same `P` in
+   a `CT → CN` unshield emit byte-identical key images.
+
+3. **The Triptych spend proof binds the same `x`** in both `P = xG` and
+   `I = x·Hp(P)`, so a holder cannot forge an alternative key image for an
+   output they own. (This is why the ring-size-1 "two independent Schnorr
+   proofs" carve-out was removed — it did not bind the two, allowing fresh
+   key images for the same spend.)
+
+4. **A single, type-agnostic spent-key set.** Consensus records and checks
+   key images from both `KeyInput` and `ConfidentialInput` in one set keyed
+   on the raw 32 key-image bytes, with no discriminator for input type,
+   amount bucket, or transaction version. A `CT → CN` spend therefore
+   collides with a prior `CT → CT` spend of the same output, and the second
+   to be mined is rejected as a double-spend.
+
+For atomic swaps this yields the desired mutual-exclusion property directly:
+the redeem (`CT → CN`) and refund spends of the same locked confidential
+output produce the same key image, so at most one can ever confirm. Note
+that the transparent output *produced* by an unshield is a fresh `KeyOutput`
+with its own one-time key and its own (later) key image — spending it in a
+subsequent plain transaction is a normal, distinct spend, not a re-spend of
+the confidential input.
+
+**This resolves TODO-1 and TODO-2 of the `karbo-swaps-and-ct-to-cn.md`
+working notes** (the consensus-critical checks flagged "run before building
+on the v3 scope"). Verified in code:
+- *Generation* — `generate_key_image(P, x, I)` is the same call with no
+  version branch on every path: legacy `KeyInput`
+  ([CryptoNoteFormatUtils.cpp:60, Transaction.cpp:280](../src/CryptoNoteCore/CryptoNoteFormatUtils.cpp))
+  and CT `ConfidentialInput`
+  ([WalletGreen.cpp:2649 → TransactionBuilder.cpp:300](../src/Wallet/TransactionBuilder.cpp)).
+- *Spent-set* — a single LMDB `spent_keys` table, keyed on the raw image
+  bytes, written and checked for both input variants
+  ([Blockchain.cpp:3857](../src/CryptoNoteCore/Blockchain.cpp); mempool
+  [TransactionPool.cpp:748](../src/CryptoNoteCore/TransactionPool.cpp)).
+- *Triptych linking tag* — the `ConfidentialInput.keyImage` that enters that
+  shared set **is** `x·H_p(P)`; the Triptych proof binds the same `x` and
+  does not fold in the commitment or use a different generator (TODO-2).
 
 ## Consequences for specific protocol choices
 
