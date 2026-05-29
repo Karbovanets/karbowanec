@@ -105,6 +105,17 @@ TransactionPrefix buildPureKeyInputV2Prefix() {
   return p;
 }
 
+// v3 CT->CN unshield shares the v2 CT wire format (explicit fee, same prefix
+// layout). Until Session 2 relaxes outputs, a v3 prefix is structurally a v2
+// CT prefix with version byte 3 — it must round-trip identically.
+TransactionPrefix buildUnshieldV3Prefix() {
+  TransactionPrefix p = buildV2PrefixCommon();
+  p.version = TRANSACTION_VERSION_UNSHIELD;
+  p.inputs.push_back(makeConfidentialInput(0x10));
+  p.inputs.push_back(makeConfidentialInput(0x30));
+  return p;
+}
+
 #define CHECK(cond)                                                            \
   do {                                                                         \
     if (!(cond)) {                                                             \
@@ -147,6 +158,9 @@ int tryRoundtrip(const char* label, const TransactionPrefix& src) {
   CHECK(parsed.items.size() == 1);
   CHECK(parsed.items[0].txPrefixes.size() == 1);
   CHECK(parsed.items[0].txPrefixes[0].txPrefix.unlockTime == kRegressionUnlockTime);
+  // The transaction version must survive the round-trip — covers v3 taking
+  // the CT-family prefix branch (fee field) rather than the v1 layout.
+  CHECK(parsed.items[0].txPrefixes[0].txPrefix.version == src.version);
   std::printf("[%s] OK\n", label);
   return 0;
 }
@@ -156,9 +170,10 @@ int run() {
   rc |= tryRoundtrip("pure-CT v2",        buildPureCtV2Prefix());
   rc |= tryRoundtrip("pure-KeyInput v2",  buildPureKeyInputV2Prefix());
   rc |= tryRoundtrip("mixed v2",          buildMixedV2Prefix());
+  rc |= tryRoundtrip("unshield v3",       buildUnshieldV3Prefix());
   if (rc != 0) return 1;
 
-  std::printf("OK: KV-binary v2 prefix round-trip (pure-CT, pure-KeyInput, mixed)\n");
+  std::printf("OK: KV-binary prefix round-trip (pure-CT, pure-KeyInput, mixed v2, unshield v3)\n");
   return 0;
 }
 

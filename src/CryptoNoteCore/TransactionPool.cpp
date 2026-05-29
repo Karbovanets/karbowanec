@@ -47,7 +47,7 @@ namespace CryptoNote {
 
   namespace {
     bool isTxVersionAllowedForHeight(const Currency& currency, const Transaction& tx, uint32_t height) {
-      if (tx.version != CURRENT_TRANSACTION_VERSION && tx.version != TRANSACTION_VERSION_CT) {
+      if (tx.version != CURRENT_TRANSACTION_VERSION && !isCtFamilyTransactionVersion(tx.version)) {
         return false;
       }
       // Pre-fork: only legacy v1. Post-fork: both v1 plain and v2 CT remain
@@ -55,6 +55,11 @@ namespace CryptoNote {
       // simplewallet --legacy-tx flag).
       if (tx.version == TRANSACTION_VERSION_CT &&
           !currency.isConfidentialTransactionsActivated(height)) {
+        return false;
+      }
+      // v3 CT->CN unshield: gated on its own activation (currently == CT).
+      if (tx.version == TRANSACTION_VERSION_UNSHIELD &&
+          !currency.isUnshieldActivated(height)) {
         return false;
       }
       return true;
@@ -141,7 +146,7 @@ namespace CryptoNote {
       return false;
     }
 
-    const bool isCT = tx.version == TRANSACTION_VERSION_CT;
+    const bool isCT = isCtFamilyTransactionVersion(tx.version);  // CT-family: explicit fee, CT pool delta
     uint64_t fee = 0;
     bool isFusionTransaction = false;
 
@@ -442,7 +447,7 @@ namespace CryptoNote {
         << "max_used_block_id: " << txd.maxUsedBlock.id << std::endl
         << "last_failed_height: " << txd.lastFailedBlock.height << std::endl
         << "last_failed_id: " << txd.lastFailedBlock.id << std::endl
-        << "amount_out: " << (txd.tx.version == TRANSACTION_VERSION_CT
+        << "amount_out: " << (isCtFamilyTransactionVersion(txd.tx.version)
                               ? std::string("hidden")
                               : [&]() {
                                   uint64_t out = 0;
@@ -522,7 +527,7 @@ namespace CryptoNote {
                             << " not included: plain in/out sum overflow";
           continue;
         }
-        const uint64_t tx_fee = (txd.tx.version == TRANSACTION_VERSION_CT)
+        const uint64_t tx_fee = (isCtFamilyTransactionVersion(txd.tx.version))
                                 ? txd.tx.fee
                                 : (plain_in - plain_out);
         if (!computeCtPoolDelta(txd.tx, tx_fee, ct_inflow, ct_outflow)) {

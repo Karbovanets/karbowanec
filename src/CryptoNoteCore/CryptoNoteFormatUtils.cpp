@@ -90,7 +90,7 @@ uint64_t power_integral(uint64_t a, uint64_t b) {
 }
 
 bool get_tx_fee(const Transaction& tx, uint64_t & fee) {
-  if (tx.version == TRANSACTION_VERSION_CT) {
+  if (isCtFamilyTransactionVersion(tx.version)) {
     fee = tx.fee;
     return true;
   }
@@ -172,7 +172,7 @@ uint32_t get_block_height(const Block& b) {
 
 bool check_inputs_types_supported(const TransactionPrefix& tx) {
   for (const auto& in : tx.inputs) {
-    if (tx.version == TRANSACTION_VERSION_CT) {
+    if (isCtFamilyTransactionVersion(tx.version)) {
       // v2 CT allows mixed inputs: KeyInput for transparent shielding into
       // the CT pool, ConfidentialInput for CT-to-CT or transparent-decoy
       // spends. The per-shape validation lives in check_tx_semantic and
@@ -191,8 +191,9 @@ bool check_inputs_types_supported(const TransactionPrefix& tx) {
 }
 
 bool check_outs_valid(const TransactionPrefix& tx, std::string* error) {
-  if (tx.version == TRANSACTION_VERSION_CT) {
+  if (isCtFamilyTransactionVersion(tx.version)) {
     // CT transaction: outputs must be ConfidentialOutput
+    // (v3 unshield relaxes this to allow mixed plain+confidential — Session 2)
     for (const TransactionOutput& out : tx.outputs) {
       if (out.target.type() != typeid(ConfidentialOutput)) {
         if (error) {
@@ -250,13 +251,13 @@ bool check_outs_valid(const TransactionPrefix& tx, std::string* error) {
 
 bool check_money_overflow(const TransactionPrefix &tx) {
   // CT transactions don't use transparent amounts; balance is checked cryptographically
-  if (tx.version == TRANSACTION_VERSION_CT)
+  if (isCtFamilyTransactionVersion(tx.version))
     return true;
   return check_inputs_overflow(tx) && check_outs_overflow(tx);
 }
 
 bool check_inputs_overflow(const TransactionPrefix &tx) {
-  if (tx.version == TRANSACTION_VERSION_CT)
+  if (isCtFamilyTransactionVersion(tx.version))
     return true;
 
   uint64_t money = 0;
@@ -277,7 +278,7 @@ bool check_inputs_overflow(const TransactionPrefix &tx) {
 }
 
 bool check_outs_overflow(const TransactionPrefix& tx) {
-  if (tx.version == TRANSACTION_VERSION_CT)
+  if (isCtFamilyTransactionVersion(tx.version))
     return true;
 
   uint64_t money = 0;

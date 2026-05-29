@@ -232,6 +232,16 @@ constexpr size_t DNS_CHECKPOINT_SIGNERS_COUNT                =
 
 const uint8_t  CURRENT_TRANSACTION_VERSION                   =  1;
 const uint8_t  TRANSACTION_VERSION_CT                        =  2;
+const uint8_t  TRANSACTION_VERSION_UNSHIELD                  =  3;   // CT->CN unshield / mixed outputs (v3)
+// CT-family transaction versions share the v2 wire format (explicit plaintext
+// fee, per-output GK proofs, balance kernel) and the CT validation pipeline.
+// v3 (unshield) extends v2 with mixed plain+confidential outputs; until that
+// relaxation lands it is treated identically to v2. Per-version ACTIVATION is
+// gated in Currency (isConfidentialTransactionsActivated / isUnshieldActivated),
+// not here — this predicate is membership only.
+inline bool isCtFamilyTransactionVersion(uint8_t version) {
+  return version == TRANSACTION_VERSION_CT || version == TRANSACTION_VERSION_UNSHIELD;
+}
 const uint8_t  BLOCK_MAJOR_VERSION_1                         =  1;
 const uint8_t  BLOCK_MAJOR_VERSION_2                         =  2;
 const uint8_t  BLOCK_MAJOR_VERSION_3                         =  3;

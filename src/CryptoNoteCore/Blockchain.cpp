@@ -2225,7 +2225,7 @@ bool Blockchain::checkTransactionInputs(const Transaction& tx,
   }
 
   // CT transactions use a dedicated validation pipeline
-  if (tx.version == CryptoNote::TRANSACTION_VERSION_CT) {
+  if (isCtFamilyTransactionVersion(tx.version)) {
     if (pmax_used_block_height) *pmax_used_block_height = 0;
     Crypto::Hash transactionHash = getObjectHash(tx);
     // Under a confirmed checkpoint the block hash is already trusted by the
@@ -3554,7 +3554,7 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
       // tooling, exchanges, and users who explicitly opt out (e.g. via the
       // simplewallet --legacy-tx flag). Unknown versions are still rejected.
       if (transactions[i].version != CURRENT_TRANSACTION_VERSION &&
-          transactions[i].version != TRANSACTION_VERSION_CT) {
+          !isCtFamilyTransactionVersion(transactions[i].version)) {
         logger(ERROR, BRIGHT_RED) << "Block " << blockHash
           << " contains transaction " << tx_id
           << " with unsupported version " << (int)transactions[i].version << ", rejected";
@@ -3578,11 +3578,21 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
         abortCurrentBlockTxn();
         return false;
       }
+      // v3 CT->CN unshield: gated on its own activation (currently == CT).
+      if (transactions[i].version == TRANSACTION_VERSION_UNSHIELD &&
+          !m_currency.isUnshieldActivated(newHeight)) {
+        logger(ERROR, BRIGHT_RED) << "Block " << blockHash << " at height " << newHeight
+          << " contains unshield (v3) transaction " << tx_id
+          << " before unshield activation, rejected";
+        bvc.m_verification_failed = true;
+        abortCurrentBlockTxn();
+        return false;
+      }
 
       size_t blob_size = toBinaryArray(block.transactions.back().tx).size();
       // CT transactions carry an explicit fee field; transparent txs derive fee from I/O difference.
       const Transaction& curTx = block.transactions.back().tx;
-      uint64_t fee = (transactions[i].version == TRANSACTION_VERSION_CT)
+      uint64_t fee = (isCtFamilyTransactionVersion(transactions[i].version))
                      ? transactions[i].fee
                      : getInputAmount(curTx) - getOutputAmount(curTx);
 

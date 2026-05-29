@@ -142,6 +142,11 @@ public:
   //   - Tests: CurrencyBuilder::upgradeHeightV6(N) override is now respected
   //     by both block version dispatch and the CT tx-version gate.
   bool isConfidentialTransactionsActivated(uint32_t height) const { return height >= m_upgradeHeightV6; }
+  // CT->CN unshield (transaction version 3) activation. v3 requires the CT pool
+  // to be live, so it currently activates together with CT (block major v6).
+  // This is the single seam to repoint at a dedicated height if unshield ever
+  // ships as a separate fork after CT mainnet.
+  bool isUnshieldActivated(uint32_t height) const { return isConfidentialTransactionsActivated(height); }
   // Block major v6+ replaces the legacy dual height/timestamp unlock_time
   // interpretation with a height-only rule capped at
   // CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6, both for accepting new txs and for

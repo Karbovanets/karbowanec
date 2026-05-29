@@ -37,7 +37,8 @@ class Currency;
 //
 // Scope:
 //   * Non-empty inputs and outputs
-//   * Supported version (CURRENT_TRANSACTION_VERSION or TRANSACTION_VERSION_CT)
+//   * Supported version (CURRENT_TRANSACTION_VERSION, or CT-family:
+//     TRANSACTION_VERSION_CT / TRANSACTION_VERSION_UNSHIELD)
 //   * Input variants permitted by version (delegates to check_inputs_types_supported)
 //   * Output shape: KeyOutput amount > 0 and key-on-curve for v1; ConfidentialOutput
 //     with amount field == 0 for v2 CT (delegates to check_outs_valid)

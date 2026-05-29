@@ -254,11 +254,11 @@ namespace CryptoNote {
 void serialize(TransactionPrefix& txP, ISerializer& serializer) {
   serializer(txP.version, "version");
 
-  if (txP.version > CURRENT_TRANSACTION_VERSION && txP.version != TRANSACTION_VERSION_CT) {
+  if (txP.version != CURRENT_TRANSACTION_VERSION && !isCtFamilyTransactionVersion(txP.version)) {
     throw std::runtime_error("Wrong transaction version");
   }
 
-  if (txP.version == TRANSACTION_VERSION_CT) {
+  if (isCtFamilyTransactionVersion(txP.version)) {
     // CT v2 prefix layout: version, unlock_time, fee, vin, vout, extra.
     //
     // unlock_time matches the position v1 uses, so external tooling that
@@ -356,7 +356,7 @@ void serialize(Transaction& tx, ISerializer& serializer) {
     }
   }
 
-  if (tx.version == TRANSACTION_VERSION_CT) {
+  if (isCtFamilyTransactionVersion(tx.version)) {
     // Per-output GK denomination proofs
     size_t proofCount = tx.ctProofs.size();
     if (serializer.type() == ISerializer::OUTPUT) {

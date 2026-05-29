@@ -980,8 +980,17 @@ static void test_tx_version_requirements() {
     FAIL("CURRENT_TRANSACTION_VERSION should be 1");
   if (CryptoNote::TRANSACTION_VERSION_CT != 2)
     FAIL("TRANSACTION_VERSION_CT should be 2");
+  if (CryptoNote::TRANSACTION_VERSION_UNSHIELD != 3)
+    FAIL("TRANSACTION_VERSION_UNSHIELD should be 3");
   if (CryptoNote::BLOCK_MAJOR_VERSION_6 != 6)
     FAIL("BLOCK_MAJOR_VERSION_6 should be 6");
+  // CT-family membership: v2 and v3 share the CT wire format / pipeline; v1 does not.
+  if (!CryptoNote::isCtFamilyTransactionVersion(CryptoNote::TRANSACTION_VERSION_CT))
+    FAIL("v2 CT must be CT-family");
+  if (!CryptoNote::isCtFamilyTransactionVersion(CryptoNote::TRANSACTION_VERSION_UNSHIELD))
+    FAIL("v3 unshield must be CT-family");
+  if (CryptoNote::isCtFamilyTransactionVersion(CryptoNote::CURRENT_TRANSACTION_VERSION))
+    FAIL("v1 plain must NOT be CT-family");
   PASS();
 }
 

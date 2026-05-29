@@ -61,7 +61,7 @@ bool checkTransactionConsensusShape(const Transaction& tx,
 
   // ── 2. Supported version ────────────────────────────────────────────────
   if (tx.version != CURRENT_TRANSACTION_VERSION &&
-      tx.version != TRANSACTION_VERSION_CT) {
+      !isCtFamilyTransactionVersion(tx.version)) {
     setError(error, "unsupported transaction version");
     return false;
   }
@@ -195,7 +195,7 @@ bool checkTransactionConsensusShape(const Transaction& tx,
   // sums fit in uint64_t, so the get_*_money_amount calls cannot return
   // false here — propagate the bool anyway so a future call-order change
   // cannot silently introduce a wrapped sum.
-  if (tx.version != TRANSACTION_VERSION_CT) {
+  if (!isCtFamilyTransactionVersion(tx.version)) {
     uint64_t amount_in = 0;
     uint64_t amount_out = 0;
     if (!get_inputs_money_amount(tx, amount_in) ||
@@ -228,7 +228,7 @@ bool checkTransactionConsensusShape(const Transaction& tx,
   // overly strict for the "hide amounts only" threat model; relaxed to the
   // v6 cap so CT can participate in the same time-lock-based protocols as
   // v6 plain txs do.
-  if (tx.version == TRANSACTION_VERSION_CT) {
+  if (isCtFamilyTransactionVersion(tx.version)) {
     if (tx.unlockTime > CryptoNote::parameters::CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6) {
       setError(error, "CT transaction unlockTime exceeds CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6");
       return false;

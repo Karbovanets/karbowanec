@@ -288,7 +288,7 @@ bool Core::get_stat_info(core_stat_info& st_inf) {
 }
 
 bool Core::check_tx_mixin(const Transaction& tx, const Crypto::Hash& txHash, uint32_t height) {
-  if (tx.version == CryptoNote::TRANSACTION_VERSION_CT) {
+  if (isCtFamilyTransactionVersion(tx.version)) {
     // CT transaction: check ring size of ConfidentialInputs
     for (const auto& txin : tx.inputs) {
       if (txin.type() != typeid(ConfidentialInput)) continue;
@@ -331,7 +331,7 @@ bool Core::check_tx_mixin(const Transaction& tx, const Crypto::Hash& txHash, uin
 }
 
 bool Core::check_tx_fee(const Transaction& tx, const Crypto::Hash& txHash, size_t blobSize, tx_verification_context& tvc, uint32_t height) {
-  if (tx.version == CryptoNote::TRANSACTION_VERSION_CT) {
+  if (isCtFamilyTransactionVersion(tx.version)) {
     // CT transaction: fee is an explicit field, checked against CT fee policy.
     // The tx body itself pays a flat CT_MINIMUM_FEE; only attacker-controlled
     // bloat in tx.extra is charged per byte so that arbitrary-data padding is
@@ -443,7 +443,7 @@ bool Core::check_tx_fee(const Transaction& tx, const Crypto::Hash& txHash, size_
 
 bool Core::check_tx_unmixable(const Transaction& tx, const Crypto::Hash& txHash, uint32_t height) {
   // CT outputs have no transparent amounts; denomination validity is checked via GK proofs
-  if (tx.version == CryptoNote::TRANSACTION_VERSION_CT)
+  if (isCtFamilyTransactionVersion(tx.version))
     return true;
 
   for (const auto& out : tx.outputs) {
@@ -483,7 +483,7 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
   (void)keeped_by_block;  // reserved for future mempool/block carve-outs
 
   // ── Mempool / CT-specific policy beyond the consensus shape ─────────────
-  if (tx.version == CryptoNote::TRANSACTION_VERSION_CT) {
+  if (isCtFamilyTransactionVersion(tx.version)) {
     // CT input/output caps. These are policy parameters the node operator may
     // tighten without forking; the consensus shape helper deliberately does
     // not enforce them so historical alt-chain blocks built when the cap was
@@ -898,7 +898,7 @@ bool Core::parse_tx_from_blob(Transaction& tx, Crypto::Hash& tx_hash, Crypto::Ha
 }
 
 bool Core::check_tx_syntax(const Transaction& tx, const Crypto::Hash& tx_hash, uint32_t height) {
-  if (tx.version != CURRENT_TRANSACTION_VERSION && tx.version != TRANSACTION_VERSION_CT) {
+  if (tx.version != CURRENT_TRANSACTION_VERSION && !isCtFamilyTransactionVersion(tx.version)) {
     logger(ERROR) << "Transaction " << Common::podToHex(tx_hash)
                   << " has unsupported version " << static_cast<int>(tx.version);
     return false;
@@ -910,6 +910,12 @@ bool Core::check_tx_syntax(const Transaction& tx, const Crypto::Hash& tx_hash, u
                   << " arrived before CT activation height "
                   << CryptoNote::parameters::CT_FORK_HEIGHT
                   << " (validation height " << height << ")";
+    return false;
+  }
+  // v3 CT->CN unshield: gated on its own activation (currently == CT).
+  if (tx.version == TRANSACTION_VERSION_UNSHIELD && !m_currency.isUnshieldActivated(height)) {
+    logger(ERROR) << "Unshield (v3) transaction " << Common::podToHex(tx_hash)
+                  << " arrived before unshield activation (validation height " << height << ")";
     return false;
   }
 
