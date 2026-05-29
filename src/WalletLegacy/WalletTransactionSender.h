@@ -35,15 +35,15 @@ namespace CryptoNote {
 class WalletTransactionSender
 {
 public:
-  WalletTransactionSender(const Currency& currency, WalletUserTransactionsCache& transactionsCache, AccountKeys keys, ITransfersContainer& transfersContainer, INode& node);
+  WalletTransactionSender(const Currency& currency, WalletUserTransactionsCache& transactionsCache, AccountKeys keys, ITransfersContainer& transfersContainer, INode& node, bool forceLegacy = false);
 
   void stop();
 
   std::shared_ptr<WalletRequest> makeSendRequest(TransactionId& transactionId, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
-    const std::vector<WalletLegacyTransfer>& transfers, uint64_t fee, const std::string& extra = "", uint64_t mixIn = 0, uint64_t unlockTimestamp = 0);
+    const std::vector<WalletLegacyTransfer>& transfers, uint64_t fee, const std::string& extra = "", uint64_t mixIn = parameters::DEFAULT_TX_MIXIN, uint64_t unlockTimestamp = 0);
 
   std::shared_ptr<WalletRequest> makeSendRequest(TransactionId& transactionId, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
-    const std::vector<WalletLegacyTransfer>& transfers, const std::list<TransactionOutputInformation>& selectedOuts, uint64_t fee, const std::string& extra = "", uint64_t mixIn = 0, uint64_t unlockTimestamp = 0);
+    const std::vector<WalletLegacyTransfer>& transfers, const std::list<TransactionOutputInformation>& selectedOuts, uint64_t fee, const std::string& extra = "", uint64_t mixIn = parameters::DEFAULT_TX_MIXIN, uint64_t unlockTimestamp = 0);
 
   std::string makeRawTransaction(TransactionId& transactionId, std::deque<std::shared_ptr<WalletLegacyEvent>>& events, const std::vector<WalletLegacyTransfer>& transfers, const std::list<CryptoNote::TransactionOutputInformation>& _selectedOuts, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp);
 
@@ -51,12 +51,18 @@ private:
   std::shared_ptr<WalletRequest> makeGetRandomOutsRequest(std::shared_ptr<SendTransactionContext> context);
   std::shared_ptr<WalletRequest> doSendTransaction(std::shared_ptr<SendTransactionContext> context, std::deque<std::shared_ptr<WalletLegacyEvent>>& events);
   void prepareInputs(const std::list<TransactionOutputInformation>& selectedTransfers, std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& outs,
-      std::vector<TxBuildInput>& inputs, uint64_t mixIn);
+      std::vector<TxBuildInput>& inputs, const std::vector<uint64_t>& inputMixins,
+      const std::vector<uint64_t>& mixingBuckets = {},
+      const std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixingOuts = {});
+  std::vector<uint64_t> chooseCtMixingBuckets(const std::list<TransactionOutputInformation>& selectedTransfers,
+      const std::vector<uint64_t>& inputMixins, bool useCT) const;
   void splitDestinations(TransferId firstTransferId, size_t transfersCount, const TxBuildOutput& changeDts,
     const TxDustPolicy& dustPolicy, std::vector<TxBuildOutput>& splittedDests);
   void digitSplitStrategy(TransferId firstTransferId, size_t transfersCount, const TxBuildOutput& change_dst, uint64_t dust_threshold,
     std::vector<TxBuildOutput>& splitted_dsts, uint64_t& dust);
   void sendTransactionRandomOutsByAmount(std::shared_ptr<SendTransactionContext> context, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
+      boost::optional<std::shared_ptr<WalletRequest> >& nextRequest, std::error_code ec);
+  void sendTransactionMixingOutsByAmount(std::shared_ptr<SendTransactionContext> context, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
       boost::optional<std::shared_ptr<WalletRequest> >& nextRequest, std::error_code ec);
   void relayTransactionCallback(std::shared_ptr<SendTransactionContext> context, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
                                 boost::optional<std::shared_ptr<WalletRequest> >& nextRequest, std::error_code ec);
@@ -65,7 +71,28 @@ private:
   void validateTransfersAddresses(const std::vector<WalletLegacyTransfer>& transfers);
   bool validateDestinationAddress(const std::string& address);
 
-  uint64_t selectTransfersToSend(uint64_t neededMoney, bool addUnmixable, uint64_t dust, std::list<TransactionOutputInformation>& selectedTransfers);
+  uint64_t resolveSpendableAmount(const TransactionOutputInformation& output) const;
+
+  bool isCoinbaseOutput(const TransactionOutputInformation& output) const;
+  // Opportunistic dust sweep on mixin>0 sends: appends purgeable sub-floor
+  // dust (tagged in context->sweptDust) so it can be mixed and cleaned up.
+  void appendMixableDustSweep(std::shared_ptr<SendTransactionContext> context) const;
+  // Shrinks each transparent (KeyInput) input's ring to the decoys its bucket
+  // actually returned — any ring size is valid for a KeyInput — so a decoy
+  // shortfall degrades the ring instead of failing the send. Confidential
+  // (Triptych) inputs are left strict. Optional swept dust that can't reach
+  // CT_MIN_RING_SIZE is dropped (rebuilding the parallel per-input vectors)
+  // rather than included as a revealed input; required inputs are never dropped.
+  void adaptTransparentRings(std::shared_ptr<SendTransactionContext> context) const;
+  std::vector<uint64_t> chooseInputMixins(const std::list<TransactionOutputInformation>& selectedTransfers, uint64_t requestedMixin, bool useCT) const;
+  bool hasMixinInputs(const std::vector<uint64_t>& inputMixins) const;
+  uint64_t maxInputMixin(const std::vector<uint64_t>& inputMixins) const;
+  void checkIfEnoughMixins(const std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& outs,
+    const std::vector<uint64_t>& inputMixins) const;
+
+  uint64_t selectTransfersToSend(uint64_t neededMoney, bool addUnmixable, uint64_t dust,
+    std::list<TransactionOutputInformation>& selectedTransfers,
+    bool includeNonCanonical = false);
 
   const Currency& m_currency;
   AccountKeys m_keys;
@@ -76,6 +103,11 @@ private:
   ITransfersContainer& m_transferDetails;
 
   INode& m_node;
+
+  // When true, force v1 plain transactions even when CT is active on the
+  // chain. Set via simplewallet --legacy-tx; intended for users who deliberately
+  // opt out of confidential transactions (e.g. tooling, exchanges, audits).
+  bool m_forceLegacy;
 };
 
 } /* namespace CryptoNote */

@@ -41,11 +41,13 @@ using CryptoNote::ISerializer;
     {
       uint64_t locked_amount;
       uint64_t available_balance;
+      uint64_t total_balance;
 
       void serialize(ISerializer& s)
       {
         KV_MEMBER(locked_amount)
         KV_MEMBER(available_balance)
+        KV_MEMBER(total_balance)
       }
     };
   };
@@ -69,7 +71,7 @@ using CryptoNote::ISerializer;
     {
       std::list<transfer_destination> destinations;
       uint64_t fee = CryptoNote::parameters::MINIMUM_FEE_V2;
-      uint64_t mixin = 0;
+      uint64_t mixin = CryptoNote::parameters::DEFAULT_TX_MIXIN;
       uint64_t unlock_time = 0;
       std::string payment_id;
       std::string extra;
@@ -93,6 +95,37 @@ using CryptoNote::ISerializer;
       {
         KV_MEMBER(tx_hash)
         KV_MEMBER(tx_key)
+      }
+    };
+  };
+
+  /* Command: dust_sweep */
+  struct COMMAND_RPC_DUST_SWEEP
+  {
+    struct request
+    {
+      uint64_t fee = CryptoNote::parameters::MINIMUM_FEE_V2;
+      size_t max_inputs = CryptoNote::parameters::CT_MAX_INPUTS;
+
+      void serialize(ISerializer& s)
+      {
+        KV_MEMBER(fee)
+        KV_MEMBER(max_inputs)
+      }
+    };
+    struct response
+    {
+      std::string tx_hash;
+      std::string tx_key;
+      uint64_t swept_amount;
+      size_t input_count;
+
+      void serialize(ISerializer& s)
+      {
+        KV_MEMBER(tx_hash)
+        KV_MEMBER(tx_key)
+        KV_MEMBER(swept_amount)
+        KV_MEMBER(input_count)
       }
     };
   };

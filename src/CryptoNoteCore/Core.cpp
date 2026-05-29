@@ -23,6 +23,7 @@
 #include <boost/utility/value_init.hpp>
 #include <boost/range/combine.hpp>
 #include "../CryptoNoteConfig.h"
+#include "Denominations.h"
 #include "../Common/CommandLine.h"
 #include "../Common/Util.h"
 #include "../Common/Math.h"
@@ -36,6 +37,7 @@
 #include "CryptoNoteStatInfo.h"
 #include "Miner.h"
 #include "TransactionExtra.h"
+#include "TransactionValidation.h"
 #include "IBlock.h"
 
 #undef ERROR
@@ -286,6 +288,28 @@ bool Core::get_stat_info(core_stat_info& st_inf) {
 }
 
 bool Core::check_tx_mixin(const Transaction& tx, const Crypto::Hash& txHash, uint32_t height) {
+  if (tx.version == CryptoNote::TRANSACTION_VERSION_CT) {
+    // CT transaction: check ring size of ConfidentialInputs
+    for (const auto& txin : tx.inputs) {
+      if (txin.type() != typeid(ConfidentialInput)) continue;
+      const auto& ci = boost::get<ConfidentialInput>(txin);
+      size_t ringSize = ci.ringPubkeys.size();
+      if (ringSize != 1 && ringSize < CryptoNote::parameters::CT_MIN_RING_SIZE) {
+        logger(ERROR) << "CT transaction " << Common::podToHex(txHash) << " has ring size " << ringSize
+                      << " below minimum " << CryptoNote::parameters::CT_MIN_RING_SIZE << ", rejected";
+        return false;
+      }
+      if (ringSize > CryptoNote::parameters::CT_MAX_RING_SIZE) {
+        logger(ERROR) << "CT transaction " << Common::podToHex(txHash) << " has ring size " << ringSize
+                      << " above maximum " << CryptoNote::parameters::CT_MAX_RING_SIZE << ", rejected";
+        return false;
+      }
+    }
+    return true;
+  }
+
+  const uint8_t blockMajorVersion = m_blockchain.getBlockMajorVersionForHeight(height);
+
   size_t inputIndex = 0;
   for (const auto& txin : tx.inputs) {
     assert(inputIndex < tx.signatures.size());
@@ -296,7 +320,7 @@ bool Core::check_tx_mixin(const Transaction& tx, const Crypto::Hash& txHash, uin
         logger(ERROR) << "Transaction " << Common::podToHex(txHash) << " has too large mixIn count, rejected";
         return false;
       }
-      if (getCurrentBlockMajorVersion() >= BLOCK_MAJOR_VERSION_4 && txMixin < m_currency.minMixin() && txMixin != 1) {
+      if (blockMajorVersion >= BLOCK_MAJOR_VERSION_4 && txMixin < m_currency.minMixin() && txMixin != 1) {
         logger(ERROR) << "Transaction " << Common::podToHex(txHash) << " has mixIn count below the required minimum, rejected";
         return false;
       }
@@ -307,13 +331,53 @@ bool Core::check_tx_mixin(const Transaction& tx, const Crypto::Hash& txHash, uin
 }
 
 bool Core::check_tx_fee(const Transaction& tx, const Crypto::Hash& txHash, size_t blobSize, tx_verification_context& tvc, uint32_t height) {
+  if (tx.version == CryptoNote::TRANSACTION_VERSION_CT) {
+    // CT transaction: fee is an explicit field, checked against CT fee policy.
+    // The tx body itself pays a flat CT_MINIMUM_FEE; only attacker-controlled
+    // bloat in tx.extra is charged per byte so that arbitrary-data padding is
+    // not free. Mirrors the legacy V4_3+ rule, applied to extra only.
+    uint64_t fee = tx.fee;
+    if (fee < CryptoNote::parameters::CT_MINIMUM_FEE) {
+      tvc.m_verification_failed = true;
+      tvc.m_tx_fee_too_small = true;
+      logger(DEBUGGING) << "CT transaction " << Common::podToHex(txHash) << " fee " << fee
+                        << " below minimum " << CryptoNote::parameters::CT_MINIMUM_FEE;
+      return false;
+    }
+    if (fee > CryptoNote::parameters::CT_MAXIMUM_FEE) {
+      tvc.m_verification_failed = true;
+      logger(ERROR) << "CT transaction " << Common::podToHex(txHash) << " fee " << fee
+                    << " above maximum " << CryptoNote::parameters::CT_MAXIMUM_FEE;
+      return false;
+    }
+    const uint64_t extraSize = static_cast<uint64_t>(tx.extra.size());
+    const uint64_t feeForExtra = m_currency.getFeePerByte(extraSize,
+                                   CryptoNote::parameters::CT_MINIMUM_FEE);
+    const uint64_t requiredFee = CryptoNote::parameters::CT_MINIMUM_FEE + feeForExtra;
+    if (fee < requiredFee) {
+      tvc.m_verification_failed = true;
+      tvc.m_tx_fee_too_small = true;
+      logger(DEBUGGING) << "CT transaction " << Common::podToHex(txHash) << " fee " << fee
+                        << " below required " << requiredFee
+                        << " (extra " << extraSize << " bytes, surcharge " << feeForExtra << ")";
+      return false;
+    }
+    return true;
+  }
+
   uint64_t inputs_amount = 0;
-  if (!get_inputs_money_amount(tx, inputs_amount)) {
+  uint64_t outputs_amount = 0;
+  // check_tx_fee runs before check_tx_semantic on the handleIncomingTransaction
+  // path, so check_money_overflow has not validated the sums yet. Both helpers
+  // return false on uint64_t overflow — fail the tx fast so the wrapped fee
+  // below can't slip past the policy check.
+  if (!get_inputs_money_amount(tx, inputs_amount) ||
+      !get_outs_money_amount(tx, outputs_amount)) {
+    logger(DEBUGGING) << "tx amounts overflow uint64_t, rejected for tx id= "
+                      << Common::podToHex(txHash);
     tvc.m_verification_failed = true;
     return false;
   }
-
-  uint64_t outputs_amount = get_outs_money_amount(tx);
 
   if (outputs_amount > inputs_amount) {
     logger(DEBUGGING) << "transaction use more money then it has: use " << m_currency.formatAmount(outputs_amount) <<
@@ -333,7 +397,7 @@ bool Core::check_tx_fee(const Transaction& tx, const Crypto::Hash& txHash, size_
       enough = false;
     }
     else if (height > CryptoNote::parameters::UPGRADE_HEIGHT_V4 && height < CryptoNote::parameters::UPGRADE_HEIGHT_V4_3) {
-      if (fee < (min - (min * 20 / 100))) {      
+      if (fee < (min - (min * 20 / 100))) {
         enough = false;
       }
       else {
@@ -367,8 +431,8 @@ bool Core::check_tx_fee(const Transaction& tx, const Crypto::Hash& txHash, size_
     if (!enough) {
       tvc.m_verification_failed = true;
       tvc.m_tx_fee_too_small = true;
-      logger(DEBUGGING) << "The fee for transaction " 
-                        << Common::podToHex(txHash) 
+      logger(DEBUGGING) << "The fee for transaction "
+                        << Common::podToHex(txHash)
                         << " is insufficient and it is not a fusion transaction";
       return false;
     }
@@ -378,68 +442,118 @@ bool Core::check_tx_fee(const Transaction& tx, const Crypto::Hash& txHash, size_
 }
 
 bool Core::check_tx_unmixable(const Transaction& tx, const Crypto::Hash& txHash, uint32_t height) {
+  // CT outputs have no transparent amounts; denomination validity is checked via GK proofs
+  if (tx.version == CryptoNote::TRANSACTION_VERSION_CT)
+    return true;
+
   for (const auto& out : tx.outputs) {
     if (height >= CryptoNote::parameters::UPGRADE_HEIGHT_V4_2 && !is_valid_decomposed_amount(out.amount)) {
       logger(ERROR) << "Invalid decomposed output amount " << out.amount << " for tx id= " << Common::podToHex(txHash);
       return false;
     }
   }
+  // MIN_CT_DENOMINATION alignment is only meaningful for v2 mixed outputs that
+  // interact with the CT pool (transparent change/unshield from a CT tx).
+  // checkConfidentialTransaction enforces it on those. Legacy v1 plain txs keep
+  // the original CN {1,2,5}*10^k decomposition unchanged so --legacy-tx mode
+  // and pre-CT wallets continue to work after the CT fork.
   return true;
 }
 
 bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, bool keeped_by_block) {
-  if (!tx.inputs.size()) {
-    logger(ERROR) << "tx with empty inputs, rejected for tx id= " << Common::podToHex(txHash);
-    return false;
+  // Consensus-shaped invariants — must hold identically on every code path
+  // (mempool admission, block import, alt-chain reorg, checkpoint replay).
+  // Delegated to the shared TransactionValidation module so the block-import path
+  // (Blockchain::checkTransactionInputs) and this mempool-admission path
+  // cannot drift. Anything that used to live inline here and is now in the
+  // shared validator: empty-side reject, supported version, input/output
+  // variant shape, check_outs_valid (incl. CT amount==0), check_money_overflow,
+  // signatures.size()==inputs.size(), per-input authorization variant match,
+  // KeyInput outputIndexes structure + ring-sig count, ConfidentialInput
+  // ring-size consistency + Triptych proof slot, intra-tx keyimage uniqueness,
+  // v1 plain amount_in >= amount_out, CT unlockTime within v6 cap.
+  {
+    std::string shapeErr;
+    if (!checkTransactionConsensusShape(tx, /*blockHeight=*/0u, m_currency, &shapeErr)) {
+      logger(ERROR) << "tx fails consensus shape: " << shapeErr
+                    << " (tx id= " << Common::podToHex(txHash) << ")";
+      return false;
+    }
   }
+  (void)keeped_by_block;  // reserved for future mempool/block carve-outs
 
-  if (tx.inputs.size() != tx.signatures.size()) {
-    logger(ERROR) << "tx signatures size doesn't match inputs size, rejected for tx id= " << Common::podToHex(txHash);
-    return false;
-  }
+  // ── Mempool / CT-specific policy beyond the consensus shape ─────────────
+  if (tx.version == CryptoNote::TRANSACTION_VERSION_CT) {
+    // CT input/output caps. These are policy parameters the node operator may
+    // tighten without forking; the consensus shape helper deliberately does
+    // not enforce them so historical alt-chain blocks built when the cap was
+    // higher still verify cleanly. If a cap is ever *tightened* and applied
+    // to historical data, it MUST move to a height-gated rule inside
+    // TransactionValidation rather than be enforced uniformly here.
+    if (tx.inputs.size() > CryptoNote::parameters::CT_MAX_INPUTS) {
+      logger(ERROR) << "CT tx has too many inputs (" << tx.inputs.size() << "), rejected for tx id= " << Common::podToHex(txHash);
+      return false;
+    }
+    if (tx.outputs.size() > CryptoNote::parameters::CT_MAX_OUTPUTS) {
+      logger(ERROR) << "CT tx has too many outputs (" << tx.outputs.size() << "), rejected for tx id= " << Common::podToHex(txHash);
+      return false;
+    }
 
-  for (size_t i = 0; i < tx.inputs.size(); ++i) {
-    if (tx.inputs[i].type() == typeid(KeyInput)) {
-      if (boost::get<KeyInput>(tx.inputs[i]).outputIndexes.size() != tx.signatures[i].size()) {
-        logger(ERROR) << "tx signatures count doesn't match outputIndexes count for input " 
-          << i << ", rejected for tx id= " << Common::podToHex(txHash);
+    // ctProofs slot count: tightly coupled with the CT verifier and
+    // Triptych proof-shape gate below, so kept here next to them. The CT
+    // crypto module relies on this count downstream.
+    if (tx.ctProofs.size() != tx.outputs.size()) {
+      logger(ERROR) << "CT tx ctProofs count mismatch, rejected for tx id= " << Common::podToHex(txHash);
+      return false;
+    }
+
+    // Per-input checks beyond the consensus shape: KeyInput.amount > 0 (the
+    // amount selects the ring bucket in the legacy v1 indexes; a zero-amount
+    // ring lookup would silently return nothing), and Triptych proof shape
+    // versus ring size for ConfidentialInput. Both are CT-specific policy
+    // rather than universal structure, so they stay here rather than in the
+    // shared shape validator.
+    for (size_t i = 0; i < tx.inputs.size(); ++i) {
+      if (tx.inputs[i].type() == typeid(KeyInput)) {
+        const auto& ki = boost::get<KeyInput>(tx.inputs[i]);
+        if (ki.amount == 0) {
+          logger(ERROR) << "CT tx KeyInput " << i << " has zero amount, rejected for tx id= "
+                        << Common::podToHex(txHash);
+          return false;
+        }
+        continue;
+      }
+      // ConfidentialInput (the only other variant after consensus-shape pass).
+      const auto& ci = boost::get<ConfidentialInput>(tx.inputs[i]);
+      const auto& s  = ctInputSig(tx.signatures[i]);
+      // Triptych proof shape must match the ring size:
+      //   ring_size = 4  → bits = 2, q_len = 2
+      //   ring_size = 8  → bits = 3, q_len = 3
+      //   ring_size = 16 → bits = 4, q_len = 4
+      // The serializer pins n ∈ {2, 3, 4} on each proof; here we cross-
+      // check it against the actual ring size of this input. The deep
+      // verifier (Blockchain::checkConfidentialTransaction) repeats this
+      // check too, but doing it at semantic-check time fails the mempool
+      // admission path earlier on malformed shapes.
+      const size_t rs = ci.ringMembers.size();
+      const size_t expected_bits = (rs == 4)  ? 2 :
+                                   (rs == 8)  ? 3 :
+                                   (rs == 16) ? 4 : SIZE_MAX;
+      const size_t expected_q    = expected_bits;
+      if (expected_bits == SIZE_MAX ||
+          s.I_bits.size() != expected_bits || s.A.size()   != expected_bits ||
+          s.B.size()      != expected_bits || s.Q_P.size() != expected_q    ||
+          s.Q_M.size()    != expected_q    || s.Q_U.size() != expected_q    ||
+          s.z.size()      != expected_bits || s.za.size()  != expected_bits ||
+          s.zb.size()     != expected_bits) {
+        logger(ERROR) << "CT tx input " << i << " Triptych proof shape mismatch with ring size, rejected for tx id= "
+                      << Common::podToHex(txHash);
         return false;
       }
     }
   }
 
-  if (!check_inputs_types_supported(tx)) {
-    logger(ERROR) << "unsupported input types for tx id= " << Common::podToHex(txHash);
-    return false;
-  }
-
-  std::string errmsg;
-  if (!check_outs_valid(tx, &errmsg)) {
-    logger(ERROR) << "tx with invalid outputs, rejected for tx id= " << Common::podToHex(txHash) << ": " << errmsg;
-    return false;
-  }
-
-  if (!check_money_overflow(tx)) {
-    logger(ERROR) << "tx have money overflow, rejected for tx id= " << Common::podToHex(txHash);
-    return false;
-  }
-
-  uint64_t amount_in = 0;
-  get_inputs_money_amount(tx, amount_in);
-  uint64_t amount_out = get_outs_money_amount(tx);
-
-  if (amount_in < amount_out) {
-    logger(ERROR) << "tx with wrong amounts: ins " << amount_in << ", outs " << amount_out << ", rejected for tx id= " << Common::podToHex(txHash);
-    return false;
-  }
-
-  //check if tx use different key images
-  if (!check_tx_inputs_keyimages_diff(tx)) {
-    logger(ERROR) << "tx has a few inputs with identical keyimages";
-    return false;
-  }
-
-  // Validate account registration tx extra
+  // Account-registration well-formedness: node-local policy, not consensus.
   {
     TransactionExtraAccountRegistration reg;
     if (getAccountRegistrationFromExtra(tx.extra, reg)) {
@@ -453,33 +567,6 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
   return true;
 }
 
-bool Core::check_tx_inputs_keyimages_diff(const Transaction& tx) {
-  std::unordered_set<Crypto::KeyImage> ki;
-  std::set<std::pair<uint64_t, uint32_t>> outputsUsage;
-  for (const auto& input : tx.inputs) {
-    if (input.type() == typeid(KeyInput)) {
-      const KeyInput& in = boost::get<KeyInput>(input);
-      if (!ki.insert(in.keyImage).second) {
-        logger(ERROR) << "Transaction has identical key images";
-          return false;
-      }
-
-      if (in.outputIndexes.empty()) {
-        logger(ERROR) << "Transaction's input uses empty output";
-        return false;
-      }
-
-      // outputIndexes are packed here, first is absolute, others are offsets to previous,
-      // so first can be zero, others can't
-      if (std::find(++std::begin(in.outputIndexes), std::end(in.outputIndexes), 0) != std::end(in.outputIndexes)) {
-        logger(ERROR) << "Transaction has identical output indexes";
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 size_t Core::getBlockchainTotalTransactions() {
   return m_blockchain.getTotalTransactions();
 }
@@ -489,8 +576,10 @@ size_t Core::getBlockchainTotalTransactions() {
 //  return m_blockchain.get_outs(amount, pkeys);
 //}
 
-bool Core::add_new_tx(const Transaction& tx, const Crypto::Hash& tx_hash, size_t blob_size, tx_verification_context& tvc, bool keeped_by_block) {
-  //Locking on m_mempool and m_blockchain closes possibility to add tx to memory pool which is already in blockchain 
+bool Core::add_new_tx(const Transaction& tx, const Crypto::Hash& tx_hash, size_t blob_size,
+                      tx_verification_context& tvc, bool keeped_by_block,
+                      TxValidationContext validationContext) {
+  //Locking on m_mempool and m_blockchain closes possibility to add tx to memory pool which is already in blockchain
   std::lock_guard<decltype(m_mempool)> lk(m_mempool);
   LockedBlockchainStorage lbs(m_blockchain);
 
@@ -504,7 +593,7 @@ bool Core::add_new_tx(const Transaction& tx, const Crypto::Hash& tx_hash, size_t
     return true;
   }
 
-  return m_mempool.add_tx(tx, tx_hash, blob_size, tvc, keeped_by_block);
+  return m_mempool.add_tx(tx, tx_hash, blob_size, tvc, keeped_by_block, validationContext);
 }
 
 bool Core::get_block_template(Block& b, const AccountKeys& acc, difficulty_type& diffic, uint32_t& height, const BinaryArray& ex_nonce) {
@@ -534,7 +623,7 @@ bool Core::get_block_template(Block& b, const AccountKeys& acc, difficulty_type&
       }
 
       b.parentBlock.majorVersion = BLOCK_MAJOR_VERSION_1;
-      b.parentBlock.majorVersion = BLOCK_MINOR_VERSION_0;
+      b.parentBlock.minorVersion = BLOCK_MINOR_VERSION_0;
       b.parentBlock.transactionCount = 1;
       TransactionExtraMergeMiningTag mm_tag = boost::value_initialized<decltype(mm_tag)>();
 
@@ -808,7 +897,26 @@ bool Core::parse_tx_from_blob(Transaction& tx, Crypto::Hash& tx_hash, Crypto::Ha
   return parseAndValidateTransactionFromBinaryArray(blob, tx, tx_hash, tx_prefix_hash);
 }
 
-bool Core::check_tx_syntax(const Transaction& tx, const Crypto::Hash& tx_hash) {
+bool Core::check_tx_syntax(const Transaction& tx, const Crypto::Hash& tx_hash, uint32_t height) {
+  if (tx.version != CURRENT_TRANSACTION_VERSION && tx.version != TRANSACTION_VERSION_CT) {
+    logger(ERROR) << "Transaction " << Common::podToHex(tx_hash)
+                  << " has unsupported version " << static_cast<int>(tx.version);
+    return false;
+  }
+
+  const bool ctActivated = m_currency.isConfidentialTransactionsActivated(height);
+  if (tx.version == TRANSACTION_VERSION_CT && !ctActivated) {
+    logger(ERROR) << "CT transaction " << Common::podToHex(tx_hash)
+                  << " arrived before CT activation height "
+                  << CryptoNote::parameters::CT_FORK_HEIGHT
+                  << " (validation height " << height << ")";
+    return false;
+  }
+
+  // Both versions remain valid post-fork: wallets default to CT, but v1 plain
+  // is still accepted so opt-out users (e.g. simplewallet --legacy-tx) and
+  // existing tooling/exchanges can keep sending transparent transactions.
+
   return true;
 }
 
@@ -1076,8 +1184,12 @@ bool Core::getAlreadyGeneratedCoins(const Crypto::Hash& hash, uint64_t& generate
 }
 
 bool Core::getBlockReward(uint8_t blockMajorVersion, size_t medianSize, size_t currentBlockSize, uint64_t alreadyGeneratedCoins, uint64_t fee,
-                          uint64_t& reward, int64_t& emissionChange) {
-  return m_currency.getBlockReward(blockMajorVersion, medianSize, currentBlockSize, alreadyGeneratedCoins, fee, reward, emissionChange);
+                          uint64_t& reward, int64_t& emissionChange, uint32_t height) {
+  return m_currency.getBlockReward(blockMajorVersion, medianSize, currentBlockSize, alreadyGeneratedCoins, fee, reward, emissionChange, height);
+}
+
+bool Core::scanCtInputRingForIndices(const ConfidentialInput& cin, std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) {
+  return m_blockchain.scanCtInputRingForIndexes(cin, outputReferences);
 }
 
 bool Core::scanOutputkeysForIndices(const KeyInput& txInToKey, std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) {
@@ -1236,6 +1348,22 @@ uint64_t Core::getTotalGeneratedAmount() {
   return m_blockchain.getCoinsInCirculation();
 }
 
+uint64_t Core::getConfidentialSupply() {
+  return m_blockchain.getConfidentialSupply();
+}
+
+uint64_t Core::getPqPlainSupply() {
+  return m_blockchain.getPqPlainSupply();
+}
+
+bool Core::getConfidentialSupplyAtBlock(const Crypto::Hash& blockHash, uint64_t& supply) {
+  return m_blockchain.getConfidentialSupplyAtBlock(blockHash, supply);
+}
+
+bool Core::getPqPlainSupplyAtBlock(const Crypto::Hash& blockHash, uint64_t& supply) {
+  return m_blockchain.getPqPlainSupplyAtBlock(blockHash, supply);
+}
+
 uint8_t Core::getBlockMajorVersionForHeight(uint32_t height) const {
   return m_blockchain.getBlockMajorVersionForHeight(height);
 }
@@ -1251,20 +1379,44 @@ bool Core::getPaymentId(const Transaction& transaction, Crypto::Hash& paymentId)
 }
 
 bool Core::handleIncomingTransaction(const Transaction& tx, const Crypto::Hash& txHash, size_t blobSize, tx_verification_context& tvc, bool keptByBlock, uint32_t height) {
-  if (!check_tx_syntax(tx, txHash)) {
+  if (!check_tx_syntax(tx, txHash, height)) {
     logger(INFO) << "WRONG TRANSACTION BLOB, Failed to check tx " << txHash << " syntax, rejected";
     tvc.m_verification_failed = true;
     return false;
   }
 
-  // is in checkpoint zone
-  if (!m_blockchain.isInCheckpointZone(getCurrentBlockchainHeight())) {
+  // Classify the validation context. For txs delivered inside a block, use the
+  // block's own height (not the current chain tip) to decide checkpoint
+  // coverage - the chain tip can race ahead of the block we're streaming in
+  // and the historical block is what the checkpoint actually authorizes.
+  //
+  // CheckpointedBlock requires a trusted checkpoint zone: the binary's
+  // CHECKPOINTS table, an operator-supplied file, or a DNS checkpoint whose
+  // signature verifies against DNS_CHECKPOINT_SIGNERS. Unsigned or malformed
+  // DNS records are rejected by the checkpoint loader. A trusted checkpoint
+  // deliberately authorizes the CT structural-only fast path for historical
+  // sync; users who want full local validation can start with
+  // --without-checkpoints.
+  TxValidationContext validationContext;
+  if (!keptByBlock) {
+    validationContext = TxValidationContext::Mempool;
+  } else if (m_blockchain.isInHardcodedCheckpointZone(height)) {
+    validationContext = TxValidationContext::CheckpointedBlock;
+  } else {
+    validationContext = TxValidationContext::Block;
+  }
+
+  // Policy checks (fee, mixin, unmixable) reflect current network policy and
+  // shouldn't be re-applied to historical txs under checkpoint - they can
+  // legitimately diverge from what was accepted in their original context.
+  const bool enforcePolicyChecks = validationContext != TxValidationContext::CheckpointedBlock;
+  if (enforcePolicyChecks) {
     if (blobSize > m_currency.maxTransactionSizeLimit() && getCurrentBlockMajorVersion() >= BLOCK_MAJOR_VERSION_4) {
       logger(INFO) << "Transaction verification failed: too big size " << blobSize << " of transaction " << txHash << ", rejected";
       tvc.m_verification_failed = true;
       return false;
     }
-  
+
     if (!check_tx_fee(tx, txHash, blobSize, tvc, height)) {
       tvc.m_verification_failed = true;
       return false;
@@ -1282,6 +1434,23 @@ bool Core::handleIncomingTransaction(const Transaction& tx, const Crypto::Hash& 
       return false;
     }
 
+    // v6+: drop the legacy dual height/timestamp unlock_time interpretation.
+    // New txs must use a height ≤ CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6, or 0.
+    // The same cap applies uniformly to both v1 plain txs and v2 CT txs
+    // post-fork. CT structural validation (checkTransactionConsensusShape)
+    // enforces the same bound; this check is the height-aware policy
+    // tier and the CT consensus tier is the byte-level structural tier.
+    // See CT-DESIGN.md for why CT honors the v6 cap rather than being
+    // pinned at unlock_time == 0 like the original Karbo CT draft.
+    if (m_currency.isUnlockTimeCappedAt(height) &&
+        tx.unlockTime > CryptoNote::parameters::CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6) {
+      logger(ERROR) << "Transaction verification failed: unlock_time " << tx.unlockTime
+                    << " exceeds v6 cap " << CryptoNote::parameters::CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6
+                    << " for transaction " << txHash << ", rejected";
+      tvc.m_verification_failed = true;
+      return false;
+    }
+
   }
 
   if (!check_tx_semantic(tx, txHash, keptByBlock)) {
@@ -1290,7 +1459,7 @@ bool Core::handleIncomingTransaction(const Transaction& tx, const Crypto::Hash& 
     return false;
   }
 
-  bool r = add_new_tx(tx, txHash, blobSize, tvc, keptByBlock);
+  bool r = add_new_tx(tx, txHash, blobSize, tvc, keptByBlock, validationContext);
   if (tvc.m_verification_failed) {
     if (!tvc.m_tx_fee_too_small) {
       logger(ERROR) << "Transaction verification failed: " << txHash;
@@ -1335,10 +1504,14 @@ std::unique_ptr<IBlock> Core::getBlock(const Crypto::Hash& blockId) {
 bool Core::getMixin(const Transaction& transaction, uint64_t& mixin) {
   mixin = 0;
   for (const TransactionInput& txin : transaction.inputs) {
-    if (txin.type() != typeid(KeyInput)) {
+    uint64_t currentMixin = 0;
+    if (txin.type() == typeid(KeyInput)) {
+      currentMixin = boost::get<KeyInput>(txin).outputIndexes.size();
+    } else if (txin.type() == typeid(ConfidentialInput)) {
+      currentMixin = boost::get<ConfidentialInput>(txin).ringPubkeys.size();
+    } else {
       continue;
     }
-    uint64_t currentMixin = boost::get<KeyInput>(txin).outputIndexes.size();
     if (currentMixin > mixin) {
       mixin = currentMixin;
     }

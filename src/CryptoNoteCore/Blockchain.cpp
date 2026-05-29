@@ -25,6 +25,8 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <unordered_map>
+#include <unordered_set>
 #include <boost/foreach.hpp>
 #include "Common/Math.h"
 #include "Common/int-util.h"
@@ -34,9 +36,17 @@
 #include "Rpc/CoreRpcServerCommandsDefinitions.h"
 #include "Serialization/BinarySerializationTools.h"
 #include "CryptoNoteTools.h"
+#include "CryptoNoteFormatUtils.h"
+#include "TransactionValidation.h"
 #include "TransactionExtra.h"
 
 #include "../crypto/hash.h"
+#include "../crypto/pedersen.h"
+#include "../crypto/gk_proof.h"
+#include "../crypto/triptych.h"
+#include "../crypto/transaction_balance.h"
+#include "../crypto/crypto-ops.h"
+#include "../CryptoNoteConfig.h"
 
 using namespace Logging;
 using namespace Common;
@@ -79,6 +89,7 @@ Blockchain::Blockchain(const Currency& currency, tx_memory_pool& tx_pool,
     m_upgradeDetectorV4(currency, m_blockView, BLOCK_MAJOR_VERSION_4, logger),
     m_upgradeDetectorV5(currency, m_blockView, BLOCK_MAJOR_VERSION_5, logger),
     m_upgradeDetectorV6(currency, m_blockView, BLOCK_MAJOR_VERSION_6, logger),
+    m_upgradeDetectorV7(currency, m_blockView, BLOCK_MAJOR_VERSION_7, logger),
     m_checkpoints(logger, rejectDeepReorgDepth),
     m_no_blobs(noBlobs)
 {
@@ -96,11 +107,13 @@ bool Blockchain::removeObserver(IBlockchainStorageObserver* observer) {
 
 // ─── ITransactionValidator ───────────────────────────────────────────────────
 
-bool Blockchain::checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock) {
-  return checkTransactionInputs(tx, maxUsedBlock.height, maxUsedBlock.id);
+bool Blockchain::checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock,
+                                        TxValidationContext context) {
+  return checkTransactionInputs(tx, maxUsedBlock.height, maxUsedBlock.id, context);
 }
 
-bool Blockchain::checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock, BlockInfo& lastFailed) {
+bool Blockchain::checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock,
+                                        BlockInfo& lastFailed, TxValidationContext context) {
   BlockInfo tail;
 
   if (maxUsedBlock.empty()) {
@@ -108,7 +121,7 @@ bool Blockchain::checkTransactionInputs(const CryptoNote::Transaction& tx, Block
         getBlockIdByHeight(lastFailed.height) == lastFailed.id) {
       return false;
     }
-    if (!checkTransactionInputs(tx, maxUsedBlock.height, maxUsedBlock.id, &tail)) {
+    if (!checkTransactionInputs(tx, maxUsedBlock.height, maxUsedBlock.id, context, &tail)) {
       lastFailed = tail;
       return false;
     }
@@ -121,7 +134,7 @@ bool Blockchain::checkTransactionInputs(const CryptoNote::Transaction& tx, Block
         return false;
       }
     }
-    if (!checkTransactionInputs(tx, maxUsedBlock.height, maxUsedBlock.id, &tail)) {
+    if (!checkTransactionInputs(tx, maxUsedBlock.height, maxUsedBlock.id, context, &tail)) {
       lastFailed = tail;
       return false;
     }
@@ -445,7 +458,8 @@ bool Blockchain::init(const std::string& config_folder, bool load_existing) {
   }
 
   if (!m_upgradeDetectorV2.init() || !m_upgradeDetectorV3.init() ||
-      !m_upgradeDetectorV4.init() || !m_upgradeDetectorV5.init() || !m_upgradeDetectorV6.init()) {
+      !m_upgradeDetectorV4.init() || !m_upgradeDetectorV5.init() ||
+      !m_upgradeDetectorV6.init() || !m_upgradeDetectorV7.init()) {
     logger(ERROR, BRIGHT_RED) << "Failed to initialize upgrade detector.";
   }
 
@@ -473,10 +487,12 @@ bool Blockchain::init(const std::string& config_folder, bool load_existing) {
   else if (checkAndRollback(m_upgradeDetectorV4)) {}
   else if (checkAndRollback(m_upgradeDetectorV5)) {}
   else if (checkAndRollback(m_upgradeDetectorV6)) {}
+  else if (checkAndRollback(m_upgradeDetectorV7)) {}
 
   if (reinitUpgradeDetectors &&
       (!m_upgradeDetectorV2.init() || !m_upgradeDetectorV3.init() ||
-       !m_upgradeDetectorV4.init() || !m_upgradeDetectorV5.init() || !m_upgradeDetectorV6.init())) {
+       !m_upgradeDetectorV4.init() || !m_upgradeDetectorV5.init() ||
+       !m_upgradeDetectorV6.init() || !m_upgradeDetectorV7.init())) {
     logger(ERROR, BRIGHT_RED) << "Failed to initialize upgrade detector";
     return false;
   }
@@ -740,8 +756,42 @@ uint64_t Blockchain::getCoinsInCirculation(uint32_t height) {
   return meta.alreadyGeneratedCoins;
 }
 
+uint64_t Blockchain::getConfidentialSupply() {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  uint32_t h = m_db.getChainHeight();
+  if (h == 0) return 0;
+  DbBlockMeta meta{};
+  m_db.getBlockMeta(h - 1, meta);
+  return meta.confidentialSupply;
+}
+
+uint64_t Blockchain::getConfidentialSupply(uint32_t height) {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  DbBlockMeta meta{};
+  m_db.getBlockMeta(height, meta);
+  return meta.confidentialSupply;
+}
+
+uint64_t Blockchain::getPqPlainSupply() {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  uint32_t h = m_db.getChainHeight();
+  if (h == 0) return 0;
+  DbBlockMeta meta{};
+  m_db.getBlockMeta(h - 1, meta);
+  return meta.pqPlainSupply;
+}
+
+uint64_t Blockchain::getPqPlainSupply(uint32_t height) {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  DbBlockMeta meta{};
+  m_db.getBlockMeta(height, meta);
+  return meta.pqPlainSupply;
+}
+
 uint8_t Blockchain::getBlockMajorVersionForHeight(uint32_t height) const {
-  if (height > m_upgradeDetectorV6.upgradeHeight()) {
+  if (height > m_upgradeDetectorV7.upgradeHeight()) {
+    return m_upgradeDetectorV7.targetVersion();
+  } else if (height > m_upgradeDetectorV6.upgradeHeight()) {
     return m_upgradeDetectorV6.targetVersion();
   } else if (height > m_upgradeDetectorV5.upgradeHeight()) {
     return m_upgradeDetectorV5.targetVersion();
@@ -974,6 +1024,11 @@ bool Blockchain::getBlockLongHash(Crypto::cn_context& context, const Block& b, C
   // directly from the block template instead of getCurrentBlockchainHeight().
   const uint32_t currentHeight = boost::get<BaseInput>(b.baseTransaction.inputs[0]).blockIndex;
   const uint32_t unlockWindow = static_cast<uint32_t>(m_currency.minedMoneyUnlockWindow());
+  if (currentHeight <= unlockWindow + 1) {
+    logger(ERROR, BRIGHT_RED) << "[POW] block height " << currentHeight
+      << " too low for v5+ PoW (unlockWindow=" << unlockWindow << ")";
+    return false;
+  }
   const uint32_t maxHeight = currentHeight - 1 - unlockWindow;
 
 #define ITER 128
@@ -1290,7 +1345,7 @@ bool Blockchain::validate_miner_transaction(const Block& b, uint32_t height,
 
   auto blockMajorVersion = getBlockMajorVersionForHeight(height);
   if (!m_currency.getBlockReward(blockMajorVersion, blocksSizeMedian, cumulativeBlockSize,
-                                  alreadyGeneratedCoins, fee, reward, emissionChange)) {
+                                  alreadyGeneratedCoins, fee, reward, emissionChange, height)) {
     logger(INFO, BRIGHT_WHITE) << "block size " << cumulativeBlockSize
       << " is bigger than allowed for this blockchain";
     return false;
@@ -1396,8 +1451,30 @@ bool Blockchain::switch_to_alternative_blockchain(const std::list<Crypto::Hash>&
   for (auto alt_ch_iter = alt_chain.begin(); alt_ch_iter != alt_chain.end(); alt_ch_iter++) {
     const auto& ch_ent_h = *alt_ch_iter;
     block_verification_context bvc = boost::value_initialized<block_verification_context>();
-    const Block& b = m_alternative_chains[ch_ent_h].bl;
-    bool r = pushBlock(b, get_block_hash(b), bvc);
+    const BlockEntry& alt_bei = m_alternative_chains[ch_ent_h];
+    const Block& b = alt_bei.bl;
+    // Replay using the transaction bodies we snapshotted at alt-block-accept
+    // time. The (Block, vector<Transaction>, hash, bvc) overload does NOT
+    // touch the mempool, so reorg success no longer depends on whether the
+    // pool still happens to cache these bodies. After a successful push we
+    // also take-and-discard each hash from the pool to mirror the cleanup
+    // that the load-from-pool path used to do implicitly.
+    std::vector<Transaction> alt_txs;
+    alt_txs.reserve(alt_bei.transactions.size());
+    for (const auto& te : alt_bei.transactions) {
+      alt_txs.push_back(te.tx);
+    }
+    const Crypto::Hash bh = get_block_hash(b);
+    bool r = pushBlock(b, alt_txs, bh, bvc);
+    if (r && bvc.m_added_to_main_chain) {
+      // Best-effort pool cleanup; the tx may or may not still be present and
+      // either outcome is fine — what matters is that it's not left in the
+      // mempool now that it has been committed to LMDB.
+      Transaction discarded; size_t discardedSize; uint64_t discardedFee;
+      for (const Crypto::Hash& txh : b.transactionHashes) {
+        (void)m_tx_pool.take_tx(txh, discarded, discardedSize, discardedFee);
+      }
+    }
     if (!r || !bvc.m_added_to_main_chain) {
       logger(INFO, BRIGHT_WHITE) << "Failed to switch to alternative blockchain";
       rollback_blockchain_switching(disconnected_chain, split_height);
@@ -1616,6 +1693,52 @@ bool Blockchain::handle_alternative_block(const Block& b, const Crypto::Hash& id
     }
     bei.cumulative_difficulty += current_diff;
 
+    // Snapshot the non-coinbase transaction bodies from the mempool into the
+    // alt block entry. Without this, switch_to_alternative_blockchain replays
+    // alt blocks via pushBlock(b, hash, bvc) → loadTransactions() → take_tx(),
+    // which depends on the local mempool still holding every referenced tx at
+    // reorg time. Alt blocks may sit in m_alternative_chains for a long time
+    // before they win on cumulative difficulty, and during that window the
+    // pool can churn (TTL eviction, restart, mined-block clearance) — a valid
+    // CT alt chain could then fail to switch in just because this node no
+    // longer happens to cache the bodies. Capture them now while the protocol
+    // layer has just admitted them, so reorg success depends on validated
+    // alt-chain data rather than local pool state.
+    //
+    // getTransaction() copies (does not consume) the body. If the tx is not in
+    // the pool, fall back to the current main chain: competing branches may
+    // legitimately include the same tx that our active branch has already
+    // mined, and Core::add_new_tx() deliberately keeps such txs out of the
+    // mempool. If any referenced tx is missing from both stores, reject the alt
+    // block; we cannot validate or replay it later from incomplete state.
+    bei.transactions.clear();
+    bei.transactions.reserve(b.transactionHashes.size());
+    for (const Crypto::Hash& txh : b.transactionHashes) {
+      Transaction tx;
+      if (!m_tx_pool.getTransaction(txh, tx)) {
+        uint32_t block = 0;
+        uint16_t txSlot = 0;
+        if (!m_db.getTxIndex(txh, block, txSlot)) {
+          logger(INFO, BRIGHT_RED) << "Alt block " << id << " references tx " << txh
+            << " not in pool or current chain; cannot snapshot, rejecting alt block.";
+          bvc.m_verification_failed = true;
+          return false;
+        }
+
+        try {
+          tx = transactionByIndex({block, txSlot}).tx;
+        } catch (const std::exception& e) {
+          logger(INFO, BRIGHT_RED) << "Alt block " << id << " references tx " << txh
+            << " indexed in current chain but unreadable: " << e.what();
+          bvc.m_verification_failed = true;
+          return false;
+        }
+      }
+      TransactionEntry te;
+      te.tx = std::move(tx);
+      bei.transactions.push_back(std::move(te));
+    }
+
     auto i_res = m_alternative_chains.insert(blocks_ext_by_hash::value_type(id, bei));
     if (!i_res.second) {
       logger(ERROR, BRIGHT_RED) << "insertion of new alternative block returned as it already exist";
@@ -1802,7 +1925,10 @@ bool Blockchain::add_out_to_get_random_outs(uint64_t amount, size_t globalIdx,
       << outIdx << " more than transaction outputs = " << te.tx.outputs.size();
     return false;
   }
-  if (!(te.tx.outputs[outIdx].target.type() == typeid(KeyOutput))) {
+  const auto& target = te.tx.outputs[outIdx].target;
+  const bool isKeyOutput = target.type() == typeid(KeyOutput);
+  const bool isConfidentialOutput = target.type() == typeid(ConfidentialOutput);
+  if (!isKeyOutput && !isConfidentialOutput) {
     logger(ERROR, BRIGHT_RED) << "unknown tx out type";
     return false;
   }
@@ -1814,7 +1940,23 @@ bool Blockchain::add_out_to_get_random_outs(uint64_t amount, size_t globalIdx,
     *result_outs.outs.insert(result_outs.outs.end(),
                               COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry());
   oen.global_amount_index = static_cast<uint32_t>(globalIdx);
-  oen.out_key = boost::get<KeyOutput>(te.tx.outputs[outIdx].target).key;
+  if (isKeyOutput) {
+    oen.out_key = boost::get<KeyOutput>(target).key;
+    if (!Crypto::transparent_amount_to_commitment(te.tx.outputs[outIdx].amount, oen.commitment)) {
+      logger(ERROR, BRIGHT_RED) << "internal error: failed to build transparent commitment for amount="
+        << te.tx.outputs[outIdx].amount << " globalIdx=" << globalIdx;
+      result_outs.outs.pop_back();
+      return false;
+    }
+    oen.output_type = static_cast<uint8_t>(TransactionTypes::OutputType::Key);
+  } else {
+    const auto& cout = boost::get<ConfidentialOutput>(target);
+    oen.out_key = cout.targetKey;
+    oen.commitment = cout.commitment;
+    oen.output_type = static_cast<uint8_t>(TransactionTypes::OutputType::Confidential);
+  }
+  oen.block_height = block;
+  oen.is_coinbase = (txSlot == 0) ? 1 : 0;
   return true;
 }
 
@@ -2024,11 +2166,12 @@ bool Blockchain::getTransactionOutputGlobalIndexes(const Crypto::Hash& tx_id,
 // ─── Transaction input validation ────────────────────────────────────────────
 
 bool Blockchain::checkTransactionInputs(const Transaction& tx, uint32_t& max_used_block_height,
-                                         Crypto::Hash& max_used_block_id, BlockInfo* tail) {
+                                         Crypto::Hash& max_used_block_id,
+                                         TxValidationContext context, BlockInfo* tail) {
   std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
   if (tail) tail->id = getTailId(tail->height);
 
-  bool res = checkTransactionInputs(tx, &max_used_block_height);
+  bool res = checkTransactionInputs(tx, context, &max_used_block_height);
   if (!res) return false;
 
   uint32_t chainHeight = m_db.getChainHeight();
@@ -2049,12 +2192,57 @@ bool Blockchain::haveTransactionKeyImagesAsSpent(const Transaction& tx) {
       if (have_tx_keyimg_as_spent(boost::get<KeyInput>(in).keyImage)) {
         return true;
       }
+    } else if (in.type() == typeid(ConfidentialInput)) {
+      if (have_tx_keyimg_as_spent(boost::get<ConfidentialInput>(in).keyImage)) {
+        return true;
+      }
     }
   }
   return false;
 }
 
-bool Blockchain::checkTransactionInputs(const Transaction& tx, uint32_t* pmax_used_block_height) {
+bool Blockchain::checkTransactionInputs(const Transaction& tx,
+                                        TxValidationContext context,
+                                        uint32_t* pmax_used_block_height) {
+  // Consensus-shaped invariants — must hold identically on every code path
+  // (mempool admission via Core::check_tx_semantic, block import, alt-chain
+  // reorg, checkpointed-block replay). Delegated to the shared
+  // TransactionValidation module so this dispatcher and check_tx_semantic
+  // cannot drift. Anything that used to be mirrored inline here and is now
+  // upstream: empty-side reject, supported version, input/output variant
+  // shape, check_outs_valid (incl. CT amount==0), check_money_overflow,
+  // signatures.size()==inputs.size(), per-input authorization variant match,
+  // KeyInput outputIndexes structure + ring-sig count, ConfidentialInput
+  // ring-size consistency + Triptych proof slot, intra-tx keyimage
+  // uniqueness, v1 plain amount_in >= amount_out, CT unlockTime within v6 cap.
+  {
+    std::string shapeErr;
+    if (!checkTransactionConsensusShape(tx, /*blockHeight=*/0u, m_currency, &shapeErr)) {
+      logger(ERROR) << "tx fails consensus shape: " << shapeErr
+                    << " in tx " << getObjectHash(tx);
+      return false;
+    }
+  }
+
+  // CT transactions use a dedicated validation pipeline
+  if (tx.version == CryptoNote::TRANSACTION_VERSION_CT) {
+    if (pmax_used_block_height) *pmax_used_block_height = 0;
+    Crypto::Hash transactionHash = getObjectHash(tx);
+    // Under a confirmed checkpoint the block hash is already trusted by the
+    // network. Run only cheap structural checks so historical CT blocks can
+    // stream through the pool/index path without re-verifying Triptych, GK and
+    // balance kernels.
+    if (context == TxValidationContext::CheckpointedBlock) {
+      return checkConfidentialTransactionStructure(tx, transactionHash);
+    }
+    return checkConfidentialTransaction(tx, transactionHash, pmax_used_block_height);
+  }
+
+  // Transparent path. The legacy checkpoint short-circuit for per-input ring
+  // signature checks lives inside the prefix-hash overload below; the context
+  // doesn't change its behavior because non-CT validation already takes the
+  // cheap path under checkpoint via `isInCheckpointZone(...)` there.
+  (void)context;
   Crypto::Hash tx_prefix_hash = getObjectHash(*static_cast<const TransactionPrefix*>(&tx));
   return checkTransactionInputs(tx, tx_prefix_hash, pmax_used_block_height);
 }
@@ -2078,7 +2266,7 @@ bool Blockchain::checkTransactionInputs(const Transaction& tx, const Crypto::Has
         return false;
       }
       if (!isInCheckpointZone(getCurrentBlockchainHeight())) {
-        if (!check_tx_input(in_to_key, tx_prefix_hash, tx.signatures[inputIndex], pmax_used_block_height)) {
+        if (!check_tx_input(in_to_key, tx_prefix_hash, keyInputSig(tx.signatures[inputIndex]), pmax_used_block_height)) {
           logger(INFO, BRIGHT_WHITE) << "Failed to check input in transaction " << transactionHash;
           return false;
         }
@@ -2094,13 +2282,23 @@ bool Blockchain::checkTransactionInputs(const Transaction& tx, const Crypto::Has
 }
 
 bool Blockchain::is_tx_spendtime_unlocked(uint64_t unlock_time) {
+  const uint32_t currentHeight = getCurrentBlockchainHeight();
+  if (m_currency.isUnlockTimeCappedAt(currentHeight)) {
+    // v6+ consensus: height-only, capped. Any unlock_time above the cap was
+    // set under the legacy dual-interpretation rules (e.g. a Unix timestamp
+    // mistakenly placed in unlock_time) and is treated as unlocked here so
+    // the underlying output becomes spendable again.
+    if (unlock_time == 0) return true;
+    if (unlock_time > CryptoNote::parameters::CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6) return true;
+    return currentHeight - 1 + m_currency.lockedTxAllowedDeltaBlocks() >= unlock_time;
+  }
   if (unlock_time < m_currency.maxBlockHeight()) {
-    if (getCurrentBlockchainHeight() - 1 + m_currency.lockedTxAllowedDeltaBlocks() >= unlock_time)
+    if (currentHeight - 1 + m_currency.lockedTxAllowedDeltaBlocks() >= unlock_time)
       return true;
     else
       return false;
   } else {
-    const uint64_t lastBlockTimestamp = getBlockTimestamp(getCurrentBlockchainHeight() - 1);
+    const uint64_t lastBlockTimestamp = getBlockTimestamp(currentHeight - 1);
     if (lastBlockTimestamp + m_currency.lockedTxAllowedDeltaSeconds() >= unlock_time)
       return true;
     else
@@ -2110,6 +2308,11 @@ bool Blockchain::is_tx_spendtime_unlocked(uint64_t unlock_time) {
 }
 
 bool Blockchain::is_tx_spendtime_unlocked(uint64_t unlock_time, uint32_t height) {
+  if (m_currency.isUnlockTimeCappedAt(height)) {
+    if (unlock_time == 0) return true;
+    if (unlock_time > CryptoNote::parameters::CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6) return true;
+    return height - 1 + m_currency.lockedTxAllowedDeltaBlocks() >= unlock_time;
+  }
   if (unlock_time < m_currency.maxBlockHeight()) {
     if (height - 1 + m_currency.lockedTxAllowedDeltaBlocks() >= unlock_time)
       return true;
@@ -2119,7 +2322,8 @@ bool Blockchain::is_tx_spendtime_unlocked(uint64_t unlock_time, uint32_t height)
 
 bool Blockchain::check_tx_input(const KeyInput& txin, const Crypto::Hash& tx_prefix_hash,
                                   const std::vector<Crypto::Signature>& sig,
-                                  uint32_t* pmax_related_block_height) {
+                                  uint32_t* pmax_related_block_height,
+                                  bool forceFullRingSigCheck) {
   std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
   struct outputs_visitor {
@@ -2182,7 +2386,16 @@ bool Blockchain::check_tx_input(const KeyInput& txin, const Crypto::Hash& tx_pre
     return false;
   }
 
-  if (isInCheckpointZone(getCurrentBlockchainHeight())) return true;
+  // Legacy checkpoint-zone fast path: under a confirmed checkpoint we trust
+  // the network's verdict on the ring signature and skip the verification.
+  // Disabled when the caller demands a full check (in particular, the CT
+  // shield-in path passes forceFullRingSigCheck=true so a poisoned
+  // checkpoint cannot let a fake transparent claim mint a balanced CT
+  // output — the resulting confidentialSupply inflation is not recoverable
+  // the way a stale legacy ring sig is). See the comment on the .h
+  // declaration for the full rationale.
+  if (!forceFullRingSigCheck && isInCheckpointZone(getCurrentBlockchainHeight()))
+    return true;
 
   bool check_tx_ring_signature = Crypto::check_ring_signature(
     tx_prefix_hash, txin.keyImage, output_keys, sig.data());
@@ -2190,6 +2403,791 @@ bool Blockchain::check_tx_input(const KeyInput& txin, const Crypto::Hash& tx_pre
     logger(ERROR) << "Failed to check ring signature for keyImage: " << txin.keyImage;
   }
   return check_tx_ring_signature;
+}
+
+// ─── Confidential Transaction Validation Pipeline (spec Section 15) ──────────
+
+bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypto::Hash& txHash,
+                                              uint32_t* pmax_used_block_height) {
+  using namespace CryptoNote::parameters;
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+
+  // Version, empty-side, and output-variant invariants are now enforced
+  // upstream by checkTransactionConsensusShape (called from both
+  // checkTransactionInputs and Core::check_tx_semantic). By the time we
+  // reach here every output is guaranteed to be a ConfidentialOutput with
+  // amount == 0; this validator only needs to run the curve-level checks
+  // that require crypto context.
+
+  // Use the prefix hash for Fiat-Shamir binding. Proof response fields (Triptych, GK, kernel)
+  // are in the Transaction body, not the prefix, so the prefix hash naturally excludes them.
+  const Crypto::Hash ct_signing_hash = getObjectHash(*static_cast<const TransactionPrefix*>(&tx));
+
+  // Step 2: For each output: verify subgroup membership of commitment C and
+  // of the stealth public key. Output variant is guaranteed ConfidentialOutput
+  // by the shape helper.
+  for (size_t i = 0; i < tx.outputs.size(); ++i) {
+    const auto& cout = boost::get<ConfidentialOutput>(tx.outputs[i].target);
+
+    // Verify targetKey is a valid prime-order CT public key (stealth address)
+    if (!Crypto::ct_public_key_valid(cout.targetKey)) {
+      logger(ERROR) << "CT validation: output " << i << " targetKey is not a valid CT public key in tx " << txHash;
+      return false;
+    }
+
+    if (!Crypto::point_valid_for_pedersen(cout.commitment)) {
+      logger(ERROR) << "CT validation: output " << i << " commitment fails subgroup check in tx " << txHash;
+      return false;
+    }
+  }
+
+  // Verify proof/signature count matches input/output count.
+  if (tx.ctProofs.size() != tx.outputs.size()) {
+    logger(ERROR) << "CT validation: ctProofs count " << tx.ctProofs.size()
+                  << " != outputs count " << tx.outputs.size() << " in tx " << txHash;
+    return false;
+  }
+  // Wire deserialization enforces tx.signatures.size() == tx.inputs.size(),
+  // but this validator also runs on internally-constructed transactions
+  // (block-template assembly, RPC submitrawtransaction reconstruction, test
+  // fixtures, alt-block reorgs) that never went through CryptoNoteSerialization.
+  // Check explicitly so the per-input loop below cannot index past
+  // tx.signatures.
+  if (tx.signatures.size() != tx.inputs.size()) {
+    logger(ERROR) << "CT validation: signatures count " << tx.signatures.size()
+                  << " != inputs count " << tx.inputs.size() << " in tx " << txHash;
+    return false;
+  }
+
+  // Step 3: For all outputs: verify GK denomination membership proofs in
+  // one batched call. Reconstruct each on-wire CTOutputProof into a
+  // Crypto::GKProof first (point decode + scalar copy); any output that
+  // fails to decode is rejected up-front the same way as the per-output
+  // path. Then run a single gk_verify_batch over all outputs.
+  //
+  // On a batched failure we fall back to per-output gk_verify to pinpoint
+  // *which* output is bad — this only fires on rejection, so the happy
+  // path stays purely batched.
+  std::vector<Crypto::EllipticCurvePoint> gkCommitments;
+  std::vector<Crypto::GKProof>            gkProofs;
+  gkCommitments.reserve(tx.outputs.size());
+  gkProofs.reserve(tx.outputs.size());
+
+  for (size_t i = 0; i < tx.outputs.size(); ++i) {
+    const auto& cout = boost::get<ConfidentialOutput>(tx.outputs[i].target);
+    const auto& gkp = tx.ctProofs[i];
+    Crypto::GKProof proof;
+    for (size_t j = 0; j < 6; ++j) {
+      if (ge_frombytes_vartime(&proof.I[j],
+          reinterpret_cast<const unsigned char*>(&gkp.I[j])) != 0) {
+        logger(ERROR) << "CT validation: output " << i << " GK proof I[" << j << "] invalid point in tx " << txHash;
+        return false;
+      }
+      if (ge_frombytes_vartime(&proof.A[j],
+          reinterpret_cast<const unsigned char*>(&gkp.A[j])) != 0) {
+        logger(ERROR) << "CT validation: output " << i << " GK proof A[" << j << "] invalid point in tx " << txHash;
+        return false;
+      }
+      if (ge_frombytes_vartime(&proof.B[j],
+          reinterpret_cast<const unsigned char*>(&gkp.B[j])) != 0) {
+        logger(ERROR) << "CT validation: output " << i << " GK proof B[" << j << "] invalid point in tx " << txHash;
+        return false;
+      }
+      if (ge_frombytes_vartime(&proof.Q[j],
+          reinterpret_cast<const unsigned char*>(&gkp.Q[j])) != 0) {
+        logger(ERROR) << "CT validation: output " << i << " GK proof Q[" << j << "] invalid point in tx " << txHash;
+        return false;
+      }
+      proof.z[j] = gkp.z[j];
+      proof.za[j] = gkp.za[j];
+      proof.zb[j] = gkp.zb[j];
+    }
+    proof.f = gkp.f;
+
+    gkCommitments.push_back(cout.commitment);
+    gkProofs.push_back(std::move(proof));
+  }
+
+  if (!gkCommitments.empty() &&
+      !Crypto::gk_verify_batch(gkCommitments.data(), gkProofs.data(),
+                               gkCommitments.size(), ct_signing_hash)) {
+    // Slow diagnostic path: identify the first offending output so the log
+    // doesn't just say "the batch failed". Only runs on rejection, so the
+    // happy path stays purely batched.
+    for (size_t i = 0; i < gkProofs.size(); ++i) {
+      if (!Crypto::gk_verify(gkCommitments[i], gkProofs[i], ct_signing_hash)) {
+        logger(ERROR) << "CT validation: output " << i << " GK membership proof failed in tx " << txHash;
+        return false;
+      }
+    }
+    // All per-output checks passed individually but the batched check
+    // failed — should be statistically impossible (~2^-252). Log as a
+    // soundness anomaly rather than silently accepting.
+    logger(ERROR) << "CT validation: batched GK proof failed but all proofs verify individually in tx "
+                  << txHash << " (soundness anomaly — investigate)";
+    return false;
+  }
+
+  // Step 4: For each input, validate on-chain ring member binding and subgroup checks.
+  // CT v2 supports mixed inputs:
+  //   - KeyInput: transparent shielding into the CT pool. Verified here via
+  //     check_tx_input (legacy ring signature). Does not participate in the
+  //     batched Triptych verify; its verifiedRingPubkeys/Commitments slot is
+  //     left empty.
+  //   - ConfidentialInput: CT-to-CT or transparent-decoy spend. Ring members
+  //     resolved here and fed into the batched Triptych verify in Step 5.
+  std::vector<std::vector<Crypto::PublicKey>> verifiedRingPubkeys(tx.inputs.size());
+  std::vector<std::vector<Crypto::EllipticCurvePoint>> verifiedRingCommitments(tx.inputs.size());
+  for (size_t i = 0; i < tx.inputs.size(); ++i) {
+    if (tx.inputs[i].type() == typeid(KeyInput)) {
+      const auto& ki = boost::get<KeyInput>(tx.inputs[i]);
+      if (ki.amount == 0) {
+        logger(ERROR) << "CT validation: KeyInput " << i << " has zero amount in tx " << txHash;
+        return false;
+      }
+      if (ki.outputIndexes.empty()) {
+        logger(ERROR) << "CT validation: KeyInput " << i << " has empty ring in tx " << txHash;
+        return false;
+      }
+      if (!isKeyInputSig(tx.signatures[i]) ||
+          keyInputSig(tx.signatures[i]).size() != ki.outputIndexes.size()) {
+        logger(ERROR) << "CT validation: KeyInput " << i << " ring sig count mismatch in tx " << txHash;
+        return false;
+      }
+      // Legacy ring sig + key-image-not-spent + ring-member existence /
+      // unlock-time / pubkey resolution. ct_signing_hash is the prefix hash,
+      // identical to what check_tx_input expects for the legacy path.
+      //
+      // forceFullRingSigCheck=true: CT shield-in must verify the ring sig
+      // even inside a checkpoint zone. A skipped ring sig here means a
+      // forged claim of a transparent output, followed by minting a
+      // balanced CT output against it — permanent confidentialSupply
+      // inflation. The transparent-only legacy path can recover from a
+      // bad ring sig (the bogus state lives in plain UTXO indexes that a
+      // reorg can roll back); the CT pool integer cannot.
+      if (have_tx_keyimg_as_spent(ki.keyImage)) {
+        logger(DEBUGGING) << "CT validation: KeyInput " << i << " key image already spent in tx " << txHash;
+        return false;
+      }
+      if (!check_tx_input(ki, ct_signing_hash, keyInputSig(tx.signatures[i]),
+                          pmax_used_block_height, /*forceFullRingSigCheck=*/true)) {
+        logger(ERROR) << "CT validation: KeyInput " << i << " ring sig check failed in tx " << txHash;
+        return false;
+      }
+      continue;
+    }
+
+    if (tx.inputs[i].type() != typeid(ConfidentialInput)) {
+      logger(ERROR) << "CT validation: input " << i << " has unsupported type in tx " << txHash;
+      return false;
+    }
+    const auto& cin = boost::get<ConfidentialInput>(tx.inputs[i]);
+    const size_t ringSize = cin.ringMembers.size();
+
+    if (ringSize == 0) {
+      logger(ERROR) << "CT validation: input " << i << " has empty ring in tx " << txHash;
+      return false;
+    }
+    // Triptych supports ring sizes 4, 8, 16. Ring size 1 used to be allowed
+    // as a Schnorr-branch carve-out for v5+ coinbase, but the simpler
+    // "two independent Schnorr proofs" shape did not bind the same x in
+    // P = xG and I = x·Hp(P) — a holder could forge fresh key images for
+    // the same spend. Phase B routes transparent shielding (coinbase
+    // included) through v2 KeyInput with a legacy ring signature, so
+    // ConfidentialInput never needs ring size 1 in practice.
+    if (!Crypto::triptych_ring_size_supported(ringSize)) {
+      logger(ERROR) << "CT validation: input " << i << " ring size " << ringSize
+                    << " is not a supported Triptych shape (4, 8, or 16)"
+                    << " in tx " << txHash;
+      return false;
+    }
+    if (ringSize != cin.ringPubkeys.size() || ringSize != cin.ringCommitments.size()) {
+      logger(ERROR) << "CT validation: input " << i << " ring field size mismatch in tx " << txHash;
+      return false;
+    }
+
+    if (!Crypto::point_valid_for_pedersen(cin.pseudoCommitment)) {
+      logger(ERROR) << "CT validation: input " << i << " pseudo-commitment fails subgroup check in tx " << txHash;
+      return false;
+    }
+
+    // Key image subgroup check: 8*I != identity && I != identity
+    // Use the same check as transparent: l*I == identity (I is in prime-order subgroup)
+    if (!(Crypto::scalarmultKey(cin.keyImage, Crypto::EllipticCurveScalar2KeyImage(Crypto::L))
+          == Crypto::EllipticCurveScalar2KeyImage(Crypto::I))) {
+      logger(ERROR) << "CT validation: input " << i << " key image not in valid domain in tx " << txHash;
+      return false;
+    }
+
+    // Canonical ordering: members must be sorted by (amount, outputIndex)
+    // strictly ascending. Same amount → strictly-ascending outputIndex
+    // (no duplicates within a bucket); different amounts → amount non-
+    // decreasing, with the cross-bucket break sorting any outputIndex pair.
+    // This pins ring metadata against malleability across the mixed-bucket
+    // ring format.
+    for (size_t k = 1; k < ringSize; ++k) {
+      const auto& prev = cin.ringMembers[k - 1];
+      const auto& cur = cin.ringMembers[k];
+      const bool ascending = (cur.amount > prev.amount) ||
+                             (cur.amount == prev.amount && cur.outputIndex > prev.outputIndex);
+      if (!ascending) {
+        logger(ERROR) << "CT validation: input " << i << " ring members not in canonical (amount, outputIndex)"
+                      << " strictly-ascending order at slot " << k << " in tx " << txHash;
+        return false;
+      }
+    }
+
+    auto& boundPubkeys = verifiedRingPubkeys[i];
+    auto& boundCommitments = verifiedRingCommitments[i];
+    boundPubkeys.reserve(ringSize);
+    boundCommitments.reserve(ringSize);
+
+    // Cache per-bucket output counts so we don't hit LMDB once per ring
+    // member of the same amount.
+    std::unordered_map<uint64_t, uint32_t> bucketOutputCount;
+
+    // Defense-in-depth: even with the (amount, outputIndex) strict-ascending
+    // check above guaranteeing distinct ring slots, two different slots could
+    // in principle resolve to outputs that share the same one-time stealth
+    // pubkey (e.g. a malformed earlier tx). Reject pubkey duplicates per ring
+    // so a claimed ring-size-N can never effectively shrink to fewer than N
+    // distinct decoys.
+    std::unordered_set<Crypto::PublicKey> seenRingPubkeys;
+    seenRingPubkeys.reserve(ringSize);
+
+    for (size_t k = 0; k < ringSize; ++k) {
+      const uint64_t memberAmount = cin.ringMembers[k].amount;
+      const uint32_t memberOffset = cin.ringMembers[k].outputIndex;
+
+      if (memberAmount == 0) {
+        logger(ERROR) << "CT validation: input " << i << " ring member " << k
+                      << " has zero amount bucket in tx " << txHash;
+        return false;
+      }
+
+      auto cacheIt = bucketOutputCount.find(memberAmount);
+      if (cacheIt == bucketOutputCount.end()) {
+        const uint32_t outputCount = m_db.getKeyOutputCount(memberAmount);
+        if (outputCount == 0) {
+          logger(ERROR) << "CT validation: input " << i << " ring member " << k
+                        << " references empty bucket (amount=" << memberAmount << ") in tx " << txHash;
+          return false;
+        }
+        cacheIt = bucketOutputCount.emplace(memberAmount, outputCount).first;
+      }
+      if (memberOffset >= cacheIt->second) {
+        logger(ERROR) << "CT validation: input " << i << " ring member " << k
+                      << " offset " << memberOffset << " out of range (amount=" << memberAmount
+                      << ", bucket size=" << cacheIt->second << ") in tx " << txHash;
+        return false;
+      }
+
+      uint32_t block = 0;
+      uint16_t txSlot = 0;
+      uint16_t outIdx = 0;
+      if (!m_db.getKeyOutput(memberAmount, memberOffset, block, txSlot, outIdx)) {
+        logger(ERROR) << "CT validation: input " << i << " failed to resolve ring member " << k
+                      << " (amount=" << memberAmount << ", index=" << memberOffset << ") in tx " << txHash;
+        return false;
+      }
+
+      TransactionEntry te = transactionByIndex({block, txSlot});
+      if (outIdx >= te.tx.outputs.size()) {
+        logger(ERROR) << "CT validation: input " << i << " resolved ring member " << k
+                      << " with invalid output index in tx " << txHash;
+        return false;
+      }
+
+      if (!is_tx_spendtime_unlocked(te.tx.unlockTime)) {
+        logger(ERROR) << "CT validation: input " << i << " references locked output at ring member " << k
+                      << " in tx " << txHash;
+        return false;
+      }
+
+      const auto& referencedOutput = te.tx.outputs[outIdx];
+      const bool ringMemberIsKey = referencedOutput.target.type() == typeid(KeyOutput);
+      const bool ringMemberIsConfidential = referencedOutput.target.type() == typeid(ConfidentialOutput);
+      if (!ringMemberIsKey && !ringMemberIsConfidential) {
+        logger(ERROR) << "CT validation: input " << i << " ring member " << k
+                      << " has unsupported output type in tx " << txHash;
+        return false;
+      }
+
+      // Verify the ring member's claimed bucket matches the type and amount of
+      // the resolved on-chain output. CT outputs live in the sentinel bucket;
+      // transparent KeyOutputs live in their own amount bucket.
+      if (ringMemberIsConfidential) {
+        if (memberAmount != CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT) {
+          logger(ERROR) << "CT validation: input " << i << " ring member " << k
+                        << " is confidential but member amount " << memberAmount
+                        << " != CT_CONFIDENTIAL_OUTPUT_AMOUNT in tx " << txHash;
+          return false;
+        }
+      } else {
+        if (memberAmount != referencedOutput.amount) {
+          logger(ERROR) << "CT validation: input " << i << " ring member " << k
+                        << " bucket amount " << memberAmount
+                        << " does not match referenced output amount " << referencedOutput.amount
+                        << " in tx " << txHash;
+          return false;
+        }
+      }
+
+      // Ring-size-1 ConfidentialInput is no longer accepted; see
+      // triptych_ring_size_supported() above. Transparent shielding
+      // (coinbase included) goes through v2 KeyInput now.
+
+      Crypto::PublicKey referencedPubkey;
+      Crypto::EllipticCurvePoint expectedCommitment;
+      if (ringMemberIsKey) {
+        referencedPubkey = boost::get<KeyOutput>(referencedOutput.target).key;
+        if (!Crypto::transparent_amount_to_commitment(referencedOutput.amount, expectedCommitment)) {
+          logger(ERROR) << "CT validation: input " << i << " failed to build expected commitment for ring member " << k
+                        << " in tx " << txHash;
+          return false;
+        }
+      } else {
+        const auto& referencedConfidentialOutput = boost::get<ConfidentialOutput>(referencedOutput.target);
+        referencedPubkey = referencedConfidentialOutput.targetKey;
+        expectedCommitment = referencedConfidentialOutput.commitment;
+      }
+
+      if (!Crypto::ct_public_key_valid(referencedPubkey)) {
+        logger(ERROR) << "CT validation: input " << i << " ring pubkey " << k << " invalid on-chain in tx " << txHash;
+        return false;
+      }
+      if (!(referencedPubkey == cin.ringPubkeys[k])) {
+        logger(ERROR) << "CT validation: input " << i << " ring pubkey " << k
+                      << " does not match referenced output in tx " << txHash;
+        return false;
+      }
+
+      if (!Crypto::point_valid_for_pedersen(expectedCommitment)) {
+        logger(ERROR) << "CT validation: input " << i << " expected ring commitment " << k
+                      << " fails subgroup check in tx " << txHash;
+        return false;
+      }
+      if (!(expectedCommitment == cin.ringCommitments[k])) {
+        logger(ERROR) << "CT validation: input " << i << " ring commitment " << k
+                      << " does not match referenced output in tx " << txHash;
+        return false;
+      }
+
+      if (!seenRingPubkeys.insert(referencedPubkey).second) {
+        logger(ERROR) << "CT validation: input " << i << " ring member " << k
+                      << " has duplicate one-time pubkey in tx " << txHash;
+        return false;
+      }
+      boundPubkeys.push_back(referencedPubkey);
+      boundCommitments.push_back(expectedCommitment);
+
+      if (pmax_used_block_height && *pmax_used_block_height < block) {
+        *pmax_used_block_height = block;
+      }
+    }
+  }
+
+  // Step 5: Verify all CT input Triptych spend proofs in one batched MSM.
+  //
+  // Ring size for each input is constrained to a Triptych-supported shape
+  // (4, 8, or 16) by triptych_ring_size_supported above. The serializer
+  // pins n on each proof body to {2, 3, 4}; here we additionally enforce
+  // that the proof's shape matches its input's ring size — a prover
+  // can't swap a ring-size-8 body against a ring-size-4 input.
+  //
+  // Batched path: triptych_verify_batch derives α from a Fiat-Shamir
+  // transcript that hashes every proof byte (so α is unpredictable to
+  // the prover at sign time) and folds every α-scaled per-input
+  // equation into one Pippenger MSM. ~3-5× faster than per-input verify
+  // at txs with several inputs. On failure we fall back to per-input
+  // triptych_verify to identify which input is malformed.
+  std::vector<const Crypto::PublicKey*>           batch_ring_pubkeys;
+  std::vector<const Crypto::EllipticCurvePoint*>  batch_ring_commits;
+  std::vector<Crypto::EllipticCurvePoint>         batch_pseudo_commits;
+  std::vector<size_t>                             batch_ring_sizes;
+  std::vector<Crypto::KeyImage>                   batch_key_images;
+  std::vector<Crypto::TriptychSignature>          batch_proofs;
+  // Map each entry in the batch vectors back to the original tx.inputs
+  // index it came from, so the per-input fallback log below reports the
+  // real position (mixed v2 txs skip KeyInput slots when batching).
+  std::vector<size_t>                             batch_input_indices;
+  batch_ring_pubkeys.reserve(tx.inputs.size());
+  batch_ring_commits.reserve(tx.inputs.size());
+  batch_pseudo_commits.reserve(tx.inputs.size());
+  batch_ring_sizes.reserve(tx.inputs.size());
+  batch_key_images.reserve(tx.inputs.size());
+  batch_proofs.reserve(tx.inputs.size());
+  batch_input_indices.reserve(tx.inputs.size());
+
+  for (size_t i = 0; i < tx.inputs.size(); ++i) {
+    if (tx.inputs[i].type() == typeid(KeyInput)) {
+      // KeyInput is verified by check_tx_input above. It does not participate
+      // in the batched Triptych verify — Schnorr-on-G against amount*H + 0*G
+      // would be redundant with the legacy ring sig that already binds the
+      // input to a real on-chain KeyOutput.
+      continue;
+    }
+    const auto& cin = boost::get<ConfidentialInput>(tx.inputs[i]);
+    if (!isCtInputSig(tx.signatures[i])) {
+      logger(ERROR) << "CT validation: input " << i << " missing Triptych proof slot in tx " << txHash;
+      return false;
+    }
+    const auto& sig = ctInputSig(tx.signatures[i]);
+
+    const size_t ringSize = verifiedRingPubkeys[i].size();
+    if (!Crypto::triptych_ring_size_supported(ringSize)) {
+      logger(ERROR) << "CT validation: input " << i << " ring size " << ringSize
+                    << " is not a supported Triptych shape in tx " << txHash;
+      return false;
+    }
+    // Vector-length expectations:
+    //   ring_size = 4  → bits = 2, q_len = 2
+    //   ring_size = 8  → bits = 3, q_len = 3
+    //   ring_size = 16 → bits = 4, q_len = 4
+    const size_t expected_bits = (ringSize == 4) ? 2 :
+                                 (ringSize == 8) ? 3 : 4;
+    const size_t expected_q    = expected_bits;
+    if (sig.I_bits.size() != expected_bits ||
+        sig.A.size()      != expected_bits || sig.B.size()      != expected_bits ||
+        sig.Q_P.size()    != expected_q    || sig.Q_M.size()    != expected_q    ||
+        sig.Q_U.size()    != expected_q    ||
+        sig.z.size()      != expected_bits || sig.za.size()     != expected_bits ||
+        sig.zb.size()     != expected_bits) {
+      logger(ERROR) << "CT validation: input " << i << " Triptych proof shape"
+                    << " mismatches ring size in tx " << txHash;
+      return false;
+    }
+
+    // The Crypto layer owns its own struct so we hand it the proof field-
+    // by-field. Copies here are 32 bytes per scalar / 32 bytes per point.
+    Crypto::TriptychSignature proof;
+    proof.I_bits = sig.I_bits;
+    proof.A      = sig.A;
+    proof.B      = sig.B;
+    proof.Q_P    = sig.Q_P;
+    proof.Q_M    = sig.Q_M;
+    proof.Q_U    = sig.Q_U;
+    proof.z      = sig.z;
+    proof.za     = sig.za;
+    proof.zb     = sig.zb;
+    proof.f_P    = sig.f_P;
+    proof.f_M    = sig.f_M;
+    proof.f_U    = sig.f_U;
+
+    batch_ring_pubkeys.push_back(verifiedRingPubkeys[i].data());
+    batch_ring_commits.push_back(verifiedRingCommitments[i].data());
+    batch_pseudo_commits.push_back(cin.pseudoCommitment);
+    batch_ring_sizes.push_back(ringSize);
+    batch_key_images.push_back(cin.keyImage);
+    batch_proofs.push_back(std::move(proof));
+    batch_input_indices.push_back(i);
+  }
+
+  if (!batch_proofs.empty() &&
+      !Crypto::triptych_verify_batch(
+          ct_signing_hash,
+          batch_ring_pubkeys.data(),
+          batch_ring_commits.data(),
+          batch_pseudo_commits.data(),
+          batch_ring_sizes.data(),
+          batch_key_images.data(),
+          batch_proofs.data(),
+          batch_proofs.size())) {
+    // Slow diagnostic path: identify the first offending input so the
+    // log doesn't just say "the batch failed". Only runs on rejection.
+    // Report the original tx.inputs index (mixed v2 txs skip KeyInput
+    // slots when batching, so the batch index can drift from the input
+    // index).
+    for (size_t j = 0; j < batch_proofs.size(); ++j) {
+      if (!Crypto::triptych_verify(
+              ct_signing_hash,
+              batch_ring_pubkeys[j],
+              batch_ring_commits[j],
+              batch_pseudo_commits[j],
+              batch_ring_sizes[j],
+              batch_key_images[j],
+              batch_proofs[j])) {
+        logger(ERROR) << "CT validation: input " << batch_input_indices[j]
+                      << " Triptych proof failed in tx " << txHash;
+        return false;
+      }
+    }
+    // All inputs verify individually but the batch failed — should be
+    // statistically impossible (~2⁻²⁵²). Log as a soundness anomaly.
+    logger(ERROR) << "CT validation: batched Triptych verify failed but every"
+                  << " input verifies individually in tx " << txHash
+                  << " (soundness anomaly — investigate)";
+    return false;
+  }
+
+  // Step 6: Verify all ConfidentialInput key images are absent from global
+  // spent-key set. KeyInput key images were already checked in Step 4 via the
+  // have_tx_keyimg_as_spent / check_tx_input pair, so we skip them here.
+  // (Intra-transaction uniqueness across both input types is already enforced
+  // upstream by checkTransactionConsensusShape.)
+  for (size_t i = 0; i < tx.inputs.size(); ++i) {
+    if (tx.inputs[i].type() != typeid(ConfidentialInput)) continue;
+    const auto& cin = boost::get<ConfidentialInput>(tx.inputs[i]);
+    if (have_tx_keyimg_as_spent(cin.keyImage)) {
+      logger(DEBUGGING) << "CT validation: input " << i << " key image already spent in tx " << txHash;
+      return false;
+    }
+  }
+
+  // Step 7: Verify subgroup membership of all GK proof elements
+  // GK proof point/scalar validation is performed inside gk_verify()
+  // when each output proof is checked above. No separate GK subgroup
+  // pass is needed here.
+
+  // Step 8: Verify balance equation: sum(C_in) - sum(C_out) - fee*H = excess_commitment
+  {
+    // Collect input commitments per input type:
+    //   ConfidentialInput → sender-chosen pseudoCommitment v*H + r*G
+    //   KeyInput          → deterministic transparent_amount_to_commitment(amount)
+    //                       = amount*H + 0*G  (visible plain value entering pool)
+    // The excess kernel reflects only ConfidentialInput blindings; KeyInput
+    // contributes blinding 0 on both the input side (here) and the wallet's
+    // excess computation.
+    std::vector<Crypto::EllipticCurvePoint> input_commits;
+    input_commits.reserve(tx.inputs.size());
+    for (const auto& txin : tx.inputs) {
+      if (txin.type() == typeid(KeyInput)) {
+        const auto& ki = boost::get<KeyInput>(txin);
+        Crypto::EllipticCurvePoint c;
+        if (!Crypto::transparent_amount_to_commitment(ki.amount, c)) {
+          logger(ERROR) << "CT validation: KeyInput amount-to-commitment failed in tx " << txHash;
+          return false;
+        }
+        input_commits.push_back(c);
+      } else {
+        const auto& cin = boost::get<ConfidentialInput>(txin);
+        input_commits.push_back(cin.pseudoCommitment);
+      }
+    }
+
+    // Collect output commitments
+    std::vector<Crypto::EllipticCurvePoint> output_commits;
+    output_commits.reserve(tx.outputs.size());
+    for (const auto& txout : tx.outputs) {
+      const auto& cout = boost::get<ConfidentialOutput>(txout.target);
+      output_commits.push_back(cout.commitment);
+    }
+
+    // Map CryptoNote::TransactionKernel to Crypto::TransactionKernel
+    // CryptoNote kernel has: excessCommitment (Point), sigE (Scalar), sigS (Scalar)
+    // Crypto kernel has: excess (Point), signature (Signature = {c, r})
+    Crypto::TransactionKernel crypto_kernel{};
+    crypto_kernel.excess = tx.kernel.excessCommitment;
+    // Signature is (e, s) pair stored as two 32-byte scalars
+    crypto_kernel.signature.c = tx.kernel.sigE;
+    crypto_kernel.signature.r = tx.kernel.sigS;
+
+    if (!Crypto::verify_transaction_balance(
+        input_commits.data(), input_commits.size(),
+        output_commits.data(), output_commits.size(),
+        tx.fee,
+        ct_signing_hash,
+        crypto_kernel)) {
+      logger(ERROR) << "CT validation: balance equation / kernel signature failed in tx " << txHash;
+      return false;
+    }
+  }
+
+  // Step 9: Verify kernel Schnorr signature (done as part of Step 8 in verify_transaction_balance)
+
+  // Step 10: Verify fee >= 0 and within network fee policy
+  // (Already checked in Core::check_tx_fee; fee field is uint64_t so >= 0 is implicit)
+
+  // Step 11: CT pool liability solvency.
+  // Reject before block inclusion if this tx would withdraw more visible value
+  // from the ECC CT pool than the pool currently holds. This duplicates the
+  // safety check performed at block-push time so that mempool admission, RPC
+  // sendrawtransaction, and block-template construction all fail-fast on a
+  // doomed tx instead of waiting for the miner to discover it.
+  //
+  // delta = visible_plain_inputs - visible_plain_outputs - fee
+  //   < 0 means value is leaving the CT pool; |delta| must fit in the
+  //   currently-accumulated pool. Mempool chaining can produce a sequence
+  //   whose combined outflow exceeds the pool — that is caught at block-push
+  //   time. The per-tx check here is necessary but not sufficient.
+  //
+  // computeCtPoolDelta sums plain_in/plain_out in checked uint64_t and
+  // reports overflow rather than wrapping or sign-flipping when individual
+  // KeyInput amounts approach MONEY_SUPPLY (1e19 > INT64_MAX). A wrap would
+  // misclassify the direction of the delta and let a CT outflow look like
+  // an inflow.
+  {
+    uint64_t inflow = 0;
+    uint64_t outflow = 0;
+    if (!computeCtPoolDelta(tx, tx.fee, inflow, outflow)) {
+      logger(ERROR) << "CT validation: tx " << txHash
+                    << " has plain input/output sums that overflow uint64_t";
+      return false;
+    }
+    if (outflow > 0) {
+      uint32_t h = m_db.getChainHeight();
+      uint64_t pool = 0;
+      if (h > 0) {
+        DbBlockMeta tipMeta{};
+        m_db.getBlockMeta(h - 1, tipMeta);
+        pool = tipMeta.confidentialSupply;
+      }
+      if (outflow > pool) {
+        logger(ERROR) << "CT validation: tx " << txHash
+                      << " would underflow CT pool liability"
+                      << " (outflow=" << outflow << ", pool=" << pool << ")";
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+// Cheap structural CT validation used for transactions arriving inside a
+// confirmed checkpointed block. We trust the network's verdict on the block
+// itself, so we skip Triptych, GK proofs, balance/kernel, DB ring resolution,
+// and unlock-time checks against ring members. We still validate:
+//   - version, container shapes and per-side count invariants
+//   - every commitment / target / pseudo-commitment / ring pubkey parses as a
+//     valid point in the prime-order subgroup, so nothing malformed gets
+//     written into our indices
+//   - ring-size bounds, canonical strictly-increasing relative offsets and
+//     pseudo-commitment well-formedness
+//   - key-image domain (l*I == identity) and global double-spend
+bool Blockchain::checkConfidentialTransactionStructure(const Transaction& tx,
+                                                       const Crypto::Hash& txHash) {
+  using namespace CryptoNote::parameters;
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+
+  // Version, empty-side, output-variant, and signatures.size()==inputs.size()
+  // are all enforced upstream by checkTransactionConsensusShape. This
+  // validator runs under checkpoint trust and only needs the CT-specific
+  // structural checks (ctProofs count, curve membership, ring-size bounds,
+  // key-image domain, double-spend).
+
+  if (tx.ctProofs.size() != tx.outputs.size()) {
+    logger(ERROR) << "CT structural validation: ctProofs count " << tx.ctProofs.size()
+                  << " != outputs count " << tx.outputs.size() << " in tx " << txHash;
+    return false;
+  }
+
+  for (size_t i = 0; i < tx.outputs.size(); ++i) {
+    const auto& cout = boost::get<ConfidentialOutput>(tx.outputs[i].target);
+    if (!Crypto::ct_public_key_valid(cout.targetKey)) {
+      logger(ERROR) << "CT structural validation: output " << i
+                    << " targetKey is not a valid CT public key in tx " << txHash;
+      return false;
+    }
+    if (!Crypto::point_valid_for_pedersen(cout.commitment)) {
+      logger(ERROR) << "CT structural validation: output " << i
+                    << " commitment fails subgroup check in tx " << txHash;
+      return false;
+    }
+  }
+
+  for (size_t i = 0; i < tx.inputs.size(); ++i) {
+    if (tx.inputs[i].type() == typeid(KeyInput)) {
+      // Structural-only check for v2 KeyInput slots: outputIndexes non-empty,
+      // amount non-zero, key image in valid domain, not double-spent. The
+      // ring sig itself is trusted under a confirmed checkpoint.
+      const auto& ki = boost::get<KeyInput>(tx.inputs[i]);
+      if (ki.amount == 0 || ki.outputIndexes.empty()) {
+        logger(ERROR) << "CT structural validation: KeyInput " << i
+                      << " malformed in tx " << txHash;
+        return false;
+      }
+      if (!(Crypto::scalarmultKey(ki.keyImage, Crypto::EllipticCurveScalar2KeyImage(Crypto::L))
+            == Crypto::EllipticCurveScalar2KeyImage(Crypto::I))) {
+        logger(ERROR) << "CT structural validation: KeyInput " << i
+                      << " key image not in valid domain in tx " << txHash;
+        return false;
+      }
+      if (have_tx_keyimg_as_spent(ki.keyImage)) {
+        logger(DEBUGGING) << "CT structural validation: KeyInput " << i
+                          << " key image already spent in tx " << txHash;
+        return false;
+      }
+      continue;
+    }
+
+    if (tx.inputs[i].type() != typeid(ConfidentialInput)) {
+      logger(ERROR) << "CT structural validation: input " << i
+                    << " has unsupported type in tx " << txHash;
+      return false;
+    }
+    const auto& cin = boost::get<ConfidentialInput>(tx.inputs[i]);
+    const size_t ringSize = cin.ringMembers.size();
+
+    if (ringSize == 0) {
+      logger(ERROR) << "CT structural validation: input " << i << " has empty ring in tx " << txHash;
+      return false;
+    }
+    if (!Crypto::triptych_ring_size_supported(ringSize)) {
+      logger(ERROR) << "CT structural validation: input " << i << " ring size " << ringSize
+                    << " is not a supported Triptych shape (4, 8, or 16)"
+                    << " in tx " << txHash;
+      return false;
+    }
+    if (ringSize != cin.ringPubkeys.size() || ringSize != cin.ringCommitments.size()) {
+      logger(ERROR) << "CT structural validation: input " << i
+                    << " ring field size mismatch in tx " << txHash;
+      return false;
+    }
+
+    if (!Crypto::point_valid_for_pedersen(cin.pseudoCommitment)) {
+      logger(ERROR) << "CT structural validation: input " << i
+                    << " pseudo-commitment fails subgroup check in tx " << txHash;
+      return false;
+    }
+
+    if (!(Crypto::scalarmultKey(cin.keyImage, Crypto::EllipticCurveScalar2KeyImage(Crypto::L))
+          == Crypto::EllipticCurveScalar2KeyImage(Crypto::I))) {
+      logger(ERROR) << "CT structural validation: input " << i
+                    << " key image not in valid domain in tx " << txHash;
+      return false;
+    }
+
+    for (size_t k = 0; k < ringSize; ++k) {
+      if (cin.ringMembers[k].amount == 0) {
+        logger(ERROR) << "CT structural validation: input " << i << " ring member " << k
+                      << " has zero amount bucket in tx " << txHash;
+        return false;
+      }
+      if (!Crypto::ct_public_key_valid(cin.ringPubkeys[k])) {
+        logger(ERROR) << "CT structural validation: input " << i << " ring pubkey " << k
+                      << " is not a valid CT public key in tx " << txHash;
+        return false;
+      }
+      if (!Crypto::point_valid_for_pedersen(cin.ringCommitments[k])) {
+        logger(ERROR) << "CT structural validation: input " << i << " ring commitment " << k
+                      << " fails subgroup check in tx " << txHash;
+        return false;
+      }
+    }
+
+    // Canonical ordering: (amount, outputIndex) strictly ascending.
+    for (size_t k = 1; k < ringSize; ++k) {
+      const auto& prev = cin.ringMembers[k - 1];
+      const auto& cur = cin.ringMembers[k];
+      const bool ascending = (cur.amount > prev.amount) ||
+                             (cur.amount == prev.amount && cur.outputIndex > prev.outputIndex);
+      if (!ascending) {
+        logger(ERROR) << "CT structural validation: input " << i << " ring members not in canonical"
+                      << " (amount, outputIndex) strictly-ascending order at slot " << k
+                      << " in tx " << txHash;
+        return false;
+      }
+    }
+
+    if (have_tx_keyimg_as_spent(cin.keyImage)) {
+      logger(DEBUGGING) << "CT structural validation: input " << i
+                        << " key image already spent in tx " << txHash;
+      return false;
+    }
+  }
+
+  return true;
 }
 
 // ─── addNewBlock / pushBlock / popBlock ──────────────────────────────────────
@@ -2238,6 +3236,47 @@ bool Blockchain::addNewBlock(const Block& bl, block_verification_context& bvc) {
     m_observerManager.notify(&IBlockchainStorageObserver::blockchainUpdated);
   }
   return add_result;
+}
+
+bool Blockchain::scanCtInputRingForIndexes(const ConfidentialInput& cin,
+                                            std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) {
+  std::lock_guard<decltype(m_blockchain_lock)> bcLock(m_blockchain_lock);
+
+  if (cin.ringMembers.empty()) {
+    return false;
+  }
+
+  std::unordered_map<uint64_t, uint32_t> bucketOutputCount;
+
+  for (const auto& member : cin.ringMembers) {
+    if (member.amount == 0) {
+      return false;
+    }
+    auto cacheIt = bucketOutputCount.find(member.amount);
+    if (cacheIt == bucketOutputCount.end()) {
+      const uint32_t count = m_db.getKeyOutputCount(member.amount);
+      if (count == 0) {
+        return false;
+      }
+      cacheIt = bucketOutputCount.emplace(member.amount, count).first;
+    }
+    if (member.outputIndex >= cacheIt->second) {
+      return false;
+    }
+
+    uint32_t block = 0;
+    uint16_t txSlot = 0;
+    uint16_t outIdx = 0;
+    if (!m_db.getKeyOutput(member.amount, member.outputIndex, block, txSlot, outIdx)) {
+      return false;
+    }
+    TransactionEntry te = transactionByIndex({block, txSlot});
+    if (outIdx >= te.tx.outputs.size()) {
+      return false;
+    }
+    outputReferences.emplace_back(getObjectHash(te.tx), static_cast<size_t>(outIdx));
+  }
+  return true;
 }
 
 Blockchain::TransactionEntry Blockchain::transactionByIndex(TransactionIndex idx) {
@@ -2291,6 +3330,34 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
   std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
   auto blockProcessingStart = std::chrono::steady_clock::now();
+
+  // Bind the supplied transaction vector to the block's declared tx hash list
+  // before any indexed access. The loop below assumes |transactions| ==
+  // |blockData.transactionHashes| and that transactions[i] hashes to
+  // transactionHashes[i]. The (Block, hash, bvc) overload upstream guarantees
+  // this via take_tx-by-hash, but the (Block, vector<Transaction>, hash, bvc)
+  // overload is now also reached from alt-chain replay (snapshotted bodies)
+  // and any future caller that hand-assembles a tx vector — a count or order
+  // mismatch would silently mis-pair tx index entries and let a malformed
+  // alt-block snapshot index past transactionHashes.
+  if (transactions.size() != blockData.transactionHashes.size()) {
+    logger(ERROR, BRIGHT_RED) << "Block " << blockHash
+      << " transaction-vector size " << transactions.size()
+      << " does not match block transactionHashes count "
+      << blockData.transactionHashes.size();
+    bvc.m_verification_failed = true;
+    return false;
+  }
+  for (size_t i = 0; i < transactions.size(); ++i) {
+    Crypto::Hash computed = getObjectHash(transactions[i]);
+    if (computed != blockData.transactionHashes[i]) {
+      logger(ERROR, BRIGHT_RED) << "Block " << blockHash
+        << " transaction " << i << " hash mismatch: have=" << computed
+        << " expected=" << blockData.transactionHashes[i];
+      bvc.m_verification_failed = true;
+      return false;
+    }
+  }
 
   {
     uint32_t h = 0;
@@ -2346,7 +3413,18 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
   auto longhashTimeStart = std::chrono::steady_clock::now();
   Crypto::Hash proof_of_work = NULL_HASH;
   
-  const bool inCheckpoint = m_checkpoints.is_in_checkpoint_zone(newHeight);
+  // Two separate notions of "in a checkpoint zone":
+  //
+  // - inCheckpoint (broad): height is covered by any accepted checkpoint.
+  //   Used for the block-level anchor check and legacy PoW skip.
+  //
+  // - inHardcodedCheckpoint (trusted): height is covered by a checkpoint
+  //   sourced from the baked-in table, an operator file, or signed DNS.
+  //   Despite the historical name, signed DNS records reach this set only
+  //   after signature verification. This gates the CT structural-only fast
+  //   path for checkpointed historical sync.
+  const bool inCheckpoint           = m_checkpoints.is_in_checkpoint_zone(newHeight);
+  const bool inHardcodedCheckpoint  = m_checkpoints.is_in_hardcoded_checkpoint_zone(newHeight);
   if (inCheckpoint) {
     if (!m_checkpoints.check_block(newHeight, blockHash)) {
       logger(ERROR, BRIGHT_RED) << "CHECKPOINT VALIDATION FAILED";
@@ -2363,6 +3441,11 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
       return false;
     }
   }
+  // Checkpointed blocks skip PoW after the block hash matches a trusted
+  // checkpoint. This is the checkpoint trust tradeoff: the operator accepts
+  // the checkpoint signer/operator assertion for faster historical sync.
+  // Running with --without-checkpoints disables this shortcut and performs
+  // full local validation instead.
 
   auto longhash_calculating_time = std::chrono::duration_cast<std::chrono::milliseconds>(
     std::chrono::steady_clock::now() - longhashTimeStart).count();
@@ -2385,11 +3468,15 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
   const size_t coinbase_blob_size = getObjectBinarySize(blockData.baseTransaction);
 
   uint64_t already_generated_coins = 0;
+  uint64_t confidential_supply     = 0;
+  uint64_t pq_plain_supply         = 0;
   difficulty_type prevCumulativeDifficulty = 0;
   if (newHeight > 0) {
     DbBlockMeta prevMeta{};
     m_db.getBlockMeta(newHeight - 1, prevMeta);
     already_generated_coins   = prevMeta.alreadyGeneratedCoins;
+    confidential_supply       = prevMeta.confidentialSupply;
+    pq_plain_supply           = prevMeta.pqPlainSupply;
     prevCumulativeDifficulty  = prevMeta.cumulativeDifficulty;
   }
 
@@ -2462,19 +3549,120 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
       block.transactions.resize(block.transactions.size() + 1);
       block.transactions.back().tx = transactions[i];
 
-      size_t blob_size = toBinaryArray(block.transactions.back().tx).size();
-      uint64_t fee = getInputAmount(block.transactions.back().tx) -
-                     getOutputAmount(block.transactions.back().tx);
+      // Post-CT-fork blocks accept both legacy v1 plain and v2 CT transactions.
+      // Wallets default to CT after the fork; v1 plain remains available for
+      // tooling, exchanges, and users who explicitly opt out (e.g. via the
+      // simplewallet --legacy-tx flag). Unknown versions are still rejected.
+      if (transactions[i].version != CURRENT_TRANSACTION_VERSION &&
+          transactions[i].version != TRANSACTION_VERSION_CT) {
+        logger(ERROR, BRIGHT_RED) << "Block " << blockHash
+          << " contains transaction " << tx_id
+          << " with unsupported version " << (int)transactions[i].version << ", rejected";
+        bvc.m_verification_failed = true;
+        abortCurrentBlockTxn();
+        return false;
+      }
+      // Activation gate: CT transactions are illegal before CT_FORK_HEIGHT.
+      // Core::check_tx_syntax rejects them on the mempool/broadcast path, but
+      // consensus block acceptance must enforce this itself rather than trust
+      // outer admission code — alt-block reorg paths, RPC submitblock, and
+      // direct downloaded checkpoint blobs can deliver CT txs to pushBlock
+      // without going through check_tx_syntax first.
+      if (transactions[i].version == TRANSACTION_VERSION_CT &&
+          !m_currency.isConfidentialTransactionsActivated(newHeight)) {
+        logger(ERROR, BRIGHT_RED) << "Block " << blockHash << " at height " << newHeight
+          << " contains CT transaction " << tx_id
+          << " before CT activation height "
+          << CryptoNote::parameters::CT_FORK_HEIGHT << ", rejected";
+        bvc.m_verification_failed = true;
+        abortCurrentBlockTxn();
+        return false;
+      }
 
-      // Under a confirmed checkpoint the block hash has already been verified by
-      // the network. Skip the expensive per-input validation (key-image domain
-      // check, output-key LMDB scans) - pushTransaction still records everything.
-      if (!inCheckpoint && !checkTransactionInputs(block.transactions.back().tx)) {
+      size_t blob_size = toBinaryArray(block.transactions.back().tx).size();
+      // CT transactions carry an explicit fee field; transparent txs derive fee from I/O difference.
+      const Transaction& curTx = block.transactions.back().tx;
+      uint64_t fee = (transactions[i].version == TRANSACTION_VERSION_CT)
+                     ? transactions[i].fee
+                     : getInputAmount(curTx) - getOutputAmount(curTx);
+
+      // Under a trusted checkpoint the block hash has already matched an
+      // accepted anchor. We accept that the heavy historical crypto
+      // (Triptych, GK, balance kernel, ring resolution) was validated before
+      // publication of that checkpoint and run only structural sanity here
+      // (version, shape, subgroup checks, key-image domain, double-spend).
+      // Built-in, operator-file, and signed-DNS checkpoints all reach this
+      // path; --without-checkpoints keeps the full validation path active.
+      if (inHardcodedCheckpoint) {
+        if (!checkTransactionInputs(curTx, TxValidationContext::CheckpointedBlock)) {
+          logger(INFO, BRIGHT_WHITE) << "Block " << blockHash
+            << " has at least one transaction with structurally invalid inputs: " << tx_id;
+          bvc.m_verification_failed = true;
+          abortCurrentBlockTxn();
+          return false;
+        }
+      } else if (!checkTransactionInputs(curTx, TxValidationContext::Block)) {
         logger(INFO, BRIGHT_WHITE) << "Block " << blockHash
           << " has at least one transaction with wrong inputs: " << tx_id;
         bvc.m_verification_failed = true;
         abortCurrentBlockTxn();
         return false;
+      }
+
+      // ── CT pool liability accounting (consensus) ────────────────────────────
+      // For each non-coinbase tx, the delta to the CT pool's visible value is:
+      //   delta = visible_plain_inputs - visible_plain_outputs - visible_fee
+      // where visible_plain_* sums only KeyInput / KeyOutput amounts (CT inputs
+      // and CT outputs contribute 0 because their amounts are hidden in
+      // Pedersen commitments and ConfidentialOutput sets TransactionOutput.amount
+      // to 0). The miner fee is always paid in plain visible value.
+      //   plain → plain:  delta == 0  (fee == in - out)
+      //   plain → CT:     delta > 0   (visible value entering the pool)
+      //   CT    → plain:  delta < 0   (visible value leaving the pool)
+      //   CT    → CT:     delta == -fee (only the visible fee leaves)
+      // Reject the block if any tx would underflow the pool — that would mean
+      // visible value is being conjured from CT outputs that don't exist.
+      //
+      // computeCtPoolDelta computes inflow / outflow in checked uint64_t. A
+      // naive cast through int64_t would sign-flip on individual amounts
+      // approaching MONEY_SUPPLY (1e19 > INT64_MAX ≈ 9.22e18), causing a
+      // valid large shield to be classified as outflow. Reject overflow
+      // explicitly rather than letting it wrap or corrupt confidential_supply.
+      {
+        uint64_t inflow = 0;
+        uint64_t outflow = 0;
+        if (!computeCtPoolDelta(curTx, fee, inflow, outflow)) {
+          logger(ERROR, BRIGHT_RED) << "Block " << blockHash
+            << " tx " << tx_id << " plain input/output sums overflow uint64_t";
+          bvc.m_verification_failed = true;
+          abortCurrentBlockTxn();
+          return false;
+        }
+        if (outflow > 0) {
+          if (outflow > confidential_supply) {
+            logger(ERROR, BRIGHT_RED) << "Block " << blockHash
+              << " tx " << tx_id << " would underflow CT pool liability"
+              << " (outflow=" << outflow << ", pool=" << confidential_supply << ")";
+            bvc.m_verification_failed = true;
+            abortCurrentBlockTxn();
+            return false;
+          }
+          confidential_supply -= outflow;
+        } else if (inflow > 0) {
+          // Defensive cap: confidential_supply is uint64_t, and it represents
+          // visible value held in the CT pool. MONEY_SUPPLY bounds the total
+          // emission, so the running pool can never legally exceed it. Reject
+          // any addition that would push it past UINT64_MAX before it's stored.
+          if (confidential_supply > std::numeric_limits<uint64_t>::max() - inflow) {
+            logger(ERROR, BRIGHT_RED) << "Block " << blockHash
+              << " tx " << tx_id << " would overflow CT pool liability"
+              << " (inflow=" << inflow << ", pool=" << confidential_supply << ")";
+            bvc.m_verification_failed = true;
+            abortCurrentBlockTxn();
+            return false;
+          }
+          confidential_supply += inflow;
+        }
       }
 
       ++transactionIndex.transaction;
@@ -2504,6 +3692,8 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
 
     block.block_cumulative_size   = cumulative_block_size;
     block.already_generated_coins = already_generated_coins + emissionChange;
+    block.confidential_supply     = confidential_supply;
+    block.pq_plain_supply         = pq_plain_supply;
     block.cumulative_difficulty   = currentDifficulty + prevCumulativeDifficulty;
 
     pushBlock(block, blockHash);  // writes block-level LMDB data
@@ -2563,6 +3753,7 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
   m_upgradeDetectorV4.blockPushed();
   m_upgradeDetectorV5.blockPushed();
   m_upgradeDetectorV6.blockPushed();
+  m_upgradeDetectorV7.blockPushed();
 
   update_next_cumulative_size_limit();
   return true;
@@ -2580,6 +3771,8 @@ bool Blockchain::pushBlock(BlockEntry& block, const Crypto::Hash& blockHash) {
   meta.timestamp            = block.bl.timestamp;
   meta.cumulativeDifficulty = block.cumulative_difficulty;
   meta.alreadyGeneratedCoins = block.already_generated_coins;
+  meta.confidentialSupply   = block.confidential_supply;
+  meta.pqPlainSupply        = block.pq_plain_supply;
   meta.blockCumulativeSize  = static_cast<uint32_t>(block.block_cumulative_size);
   meta.height               = height;
   meta.txCount              = static_cast<uint16_t>(block.transactions.size());
@@ -2645,6 +3838,7 @@ void Blockchain::popBlock() {
   m_upgradeDetectorV4.blockPopped();
   m_upgradeDetectorV5.blockPopped();
   m_upgradeDetectorV6.blockPopped();
+  m_upgradeDetectorV7.blockPopped();
 }
 
 bool Blockchain::pushTransaction(BlockEntry& block, const Crypto::Hash& transactionHash,
@@ -2662,20 +3856,28 @@ bool Blockchain::pushTransaction(BlockEntry& block, const Crypto::Hash& transact
 
   // Record spent key images; detect double-spends within this write txn
   for (size_t i = 0; i < tx.inputs.size(); ++i) {
+    Crypto::KeyImage ki;
     if (tx.inputs[i].type() == typeid(KeyInput)) {
-      const auto& ki = boost::get<KeyInput>(tx.inputs[i]).keyImage;
-      if (m_db.hasSpentKey(ki)) {
-        logger(ERROR, BRIGHT_RED) << "Double spending transaction was pushed to blockchain.";
-        // Roll back keys already written in this tx
-        for (size_t j = 0; j < i; ++j) {
-          if (tx.inputs[j].type() == typeid(KeyInput)) {
-            m_db.removeSpentKey(boost::get<KeyInput>(tx.inputs[j]).keyImage);
-          }
-        }
-        return false;
-      }
-      m_db.putSpentKey(ki, block.height);
+      ki = boost::get<KeyInput>(tx.inputs[i]).keyImage;
+    } else if (tx.inputs[i].type() == typeid(ConfidentialInput)) {
+      ki = boost::get<ConfidentialInput>(tx.inputs[i]).keyImage;
+    } else {
+      continue;
     }
+
+    if (m_db.hasSpentKey(ki)) {
+      logger(ERROR, BRIGHT_RED) << "Double spending transaction was pushed to blockchain.";
+      // Roll back keys already written in this tx
+      for (size_t j = 0; j < i; ++j) {
+        if (tx.inputs[j].type() == typeid(KeyInput)) {
+          m_db.removeSpentKey(boost::get<KeyInput>(tx.inputs[j]).keyImage);
+        } else if (tx.inputs[j].type() == typeid(ConfidentialInput)) {
+          m_db.removeSpentKey(boost::get<ConfidentialInput>(tx.inputs[j]).keyImage);
+        }
+      }
+      return false;
+    }
+    m_db.putSpentKey(ki, block.height);
   }
 
   // Record key outputs and fill global output indexes
@@ -2685,6 +3887,11 @@ bool Blockchain::pushTransaction(BlockEntry& block, const Crypto::Hash& transact
     if (tx.outputs[o].target.type() == typeid(KeyOutput)) {
       uint32_t globalIdx = m_db.getKeyOutputCount(tx.outputs[o].amount);
       m_db.putKeyOutput(tx.outputs[o].amount, globalIdx,
+                        block.height, transactionIndex.transaction, o);
+      gidx[o] = globalIdx;
+    } else if (tx.outputs[o].target.type() == typeid(ConfidentialOutput)) {
+      uint32_t globalIdx = m_db.getKeyOutputCount(CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT);
+      m_db.putKeyOutput(CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT, globalIdx,
                         block.height, transactionIndex.transaction, o);
       gidx[o] = globalIdx;
     }
@@ -2742,6 +3949,10 @@ void Blockchain::popTransaction(const Transaction& transaction,
       if (!m_db.removeLastKeyOutput(out.amount)) {
         logger(ERROR, BRIGHT_RED) << "Blockchain consistency broken - removeLastKeyOutput failed for amount=" << out.amount;
       }
+    } else if (out.target.type() == typeid(ConfidentialOutput)) {
+      if (!m_db.removeLastKeyOutput(CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT)) {
+        logger(ERROR, BRIGHT_RED) << "Blockchain consistency broken - removeLastKeyOutput failed for confidential output bucket";
+      }
     }
   }
 
@@ -2751,6 +3962,11 @@ void Blockchain::popTransaction(const Transaction& transaction,
       const auto& ki = boost::get<KeyInput>(input).keyImage;
       if (!m_db.removeSpentKey(ki)) {
         logger(ERROR, BRIGHT_RED) << "Blockchain consistency broken - removeSpentKey failed";
+      }
+    } else if (input.type() == typeid(ConfidentialInput)) {
+      const auto& ki = boost::get<ConfidentialInput>(input).keyImage;
+      if (!m_db.removeSpentKey(ki)) {
+        logger(ERROR, BRIGHT_RED) << "Blockchain consistency broken - removeSpentKey failed for CT input";
       }
     }
   }
@@ -2969,6 +4185,40 @@ bool Blockchain::getAlreadyGeneratedCoins(const Crypto::Hash& hash, uint64_t& ge
   return false;
 }
 
+bool Blockchain::getConfidentialSupplyAtBlock(const Crypto::Hash& hash, uint64_t& supply) {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  uint32_t height = 0;
+  if (m_db.getHashHeight(hash, height)) {
+    DbBlockMeta meta{};
+    m_db.getBlockMeta(height, meta);
+    supply = meta.confidentialSupply;
+    return true;
+  }
+  auto it = m_alternative_chains.find(hash);
+  if (it != m_alternative_chains.end()) {
+    supply = it->second.confidential_supply;
+    return true;
+  }
+  return false;
+}
+
+bool Blockchain::getPqPlainSupplyAtBlock(const Crypto::Hash& hash, uint64_t& supply) {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  uint32_t height = 0;
+  if (m_db.getHashHeight(hash, height)) {
+    DbBlockMeta meta{};
+    m_db.getBlockMeta(height, meta);
+    supply = meta.pqPlainSupply;
+    return true;
+  }
+  auto it = m_alternative_chains.find(hash);
+  if (it != m_alternative_chains.end()) {
+    supply = it->second.pq_plain_supply;
+    return true;
+  }
+  return false;
+}
+
 bool Blockchain::getBlockSize(const Crypto::Hash& hash, size_t& size) {
   std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
   uint32_t height = 0;
@@ -3023,6 +4273,10 @@ bool Blockchain::isBlockInMainChain(const Crypto::Hash& blockId) {
 
 bool Blockchain::isInCheckpointZone(const uint32_t height) {
   return m_checkpoints.is_in_checkpoint_zone(height);
+}
+
+bool Blockchain::isInHardcodedCheckpointZone(const uint32_t height) {
+  return m_checkpoints.is_in_hardcoded_checkpoint_zone(height);
 }
 
 // ─── Account number lookups ──────────────────────────────────────────────────
@@ -3157,7 +4411,11 @@ bool Blockchain::loadTransactions(const Block& block, std::vector<Transaction>& 
     if (!m_tx_pool.take_tx(block.transactionHashes[i], transactions[i], transactionSize, fee)) {
       tx_verification_context context;
       for (size_t j = 0; j < i; ++j) {
-        if (!m_tx_pool.add_tx(transactions[i - 1 - j], context, true)) {
+        // Rolling txs back into the pool after a partial load: treat as live
+        // mempool candidates so full validation re-runs the next time the
+        // pool is consulted.
+        if (!m_tx_pool.add_tx(transactions[i - 1 - j], context, true,
+                              TxValidationContext::Mempool)) {
           throw std::runtime_error("Blockchain::loadTransactions, failed to add transaction to pool");
         }
       }
@@ -3170,7 +4428,9 @@ bool Blockchain::loadTransactions(const Block& block, std::vector<Transaction>& 
 void Blockchain::saveTransactions(const std::vector<Transaction>& transactions) {
   tx_verification_context context;
   for (size_t i = 0; i < transactions.size(); ++i) {
-    if (!m_tx_pool.add_tx(transactions[transactions.size() - 1 - i], context, true)) {
+    // Reorg / popBlock: txs return to the pool, full validation context.
+    if (!m_tx_pool.add_tx(transactions[transactions.size() - 1 - i], context, true,
+                          TxValidationContext::Mempool)) {
       logger(WARNING, BRIGHT_YELLOW) << "Blockchain::saveTransactions, failed to add transaction to pool";
     }
   }

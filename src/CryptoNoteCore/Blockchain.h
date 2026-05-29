@@ -68,8 +68,10 @@ namespace CryptoNote {
     bool flushBatch();
 
     // ITransactionValidator
-    virtual bool checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock) override;
-    virtual bool checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock, BlockInfo& lastFailed) override;
+    virtual bool checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock,
+                                        TxValidationContext context) override;
+    virtual bool checkTransactionInputs(const CryptoNote::Transaction& tx, BlockInfo& maxUsedBlock,
+                                        BlockInfo& lastFailed, TxValidationContext context) override;
     virtual bool haveSpentKeyImages(const CryptoNote::Transaction& tx) override;
     virtual bool checkTransactionSize(size_t blobSize) override;
 
@@ -103,6 +105,19 @@ namespace CryptoNote {
     uint64_t getBlockTimestamp(uint32_t height);
     uint64_t getCoinsInCirculation();
     uint64_t getCoinsInCirculation(uint32_t height);
+    // Total visible value currently locked in the ECC CT pool at the chain tip
+    // (or at a specific height). This is consensus-tracked: every block updates
+    // it from the per-tx visible-value delta and the invariant
+    //   visible_plain_supply + pq_plain_supply + confidential_supply
+    //     == already_generated_coins
+    // is preserved across all chain operations including reorg.
+    uint64_t getConfidentialSupply();
+    uint64_t getConfidentialSupply(uint32_t height);
+    // Total visible value held by PQ-owned plain outputs. Stubbed at 0 today
+    // (no PQ output types exist yet); included so the consensus invariant and
+    // RPC surface are forward-compatible with the planned PQ-plain activation.
+    uint64_t getPqPlainSupply();
+    uint64_t getPqPlainSupply(uint32_t height);
     uint8_t getBlockMajorVersionForHeight(uint32_t height) const;
     bool addNewBlock(const Block& bl, block_verification_context& bvc);
     bool resetAndSetGenesisBlock(const Block& b);
@@ -122,7 +137,8 @@ namespace CryptoNote {
     bool getBackwardBlocksSize(size_t from_height, std::vector<size_t>& sz, size_t count);
     bool getTransactionOutputGlobalIndexes(const Crypto::Hash& tx_id, std::vector<uint32_t>& indexs);
     bool checkTransactionInputs(const Transaction& tx, uint32_t& pmax_used_block_height,
-                                 Crypto::Hash& max_used_block_id, BlockInfo* tail = 0);
+                                 Crypto::Hash& max_used_block_id, TxValidationContext context,
+                                 BlockInfo* tail = 0);
     uint64_t getCurrentCumulativeBlocksizeLimit();
     uint64_t blockDifficulty(size_t i);
     uint64_t blockCumulativeDifficulty(size_t i);
@@ -132,6 +148,8 @@ namespace CryptoNote {
     bool getBlockContainingTransaction(const Crypto::Hash& txId, Crypto::Hash& blockId,
                                         uint32_t& blockHeight);
     bool getAlreadyGeneratedCoins(const Crypto::Hash& hash, uint64_t& generatedCoins);
+    bool getConfidentialSupplyAtBlock(const Crypto::Hash& hash, uint64_t& supply);
+    bool getPqPlainSupplyAtBlock(const Crypto::Hash& hash, uint64_t& supply);
     bool getBlockSize(const Crypto::Hash& hash, size_t& size);
     bool getGeneratedTransactionsNumber(uint32_t height, uint64_t& generatedTransactions);
     bool getOrphanBlockIdsByHeight(uint32_t height, std::vector<Crypto::Hash>& blockHashes);
@@ -143,6 +161,10 @@ namespace CryptoNote {
                                        std::vector<Crypto::Hash>& transactionHashes);
     bool isBlockInMainChain(const Crypto::Hash& blockId);
     bool isInCheckpointZone(const uint32_t height);
+    // Restricts the zone to trusted checkpoints: baked-in CHECKPOINTS,
+    // operator file checkpoints, or signed DNS checkpoints. Used to gate the
+    // CT structural-only validation fast path during checkpointed sync.
+    bool isInHardcodedCheckpointZone(const uint32_t height);
 
     bool getHashingBlob(const uint32_t height, BinaryArray& blob);
 
@@ -156,6 +178,11 @@ namespace CryptoNote {
     template<class visitor_t>
     bool scanOutputKeysForIndexes(const KeyInput& tx_in_to_key, visitor_t& vis,
                                    uint32_t* pmax_related_block_height = nullptr);
+
+    // Resolve a CT input ring to (txHash, outputIndex) pairs for explorer / detail rendering.
+    // Returns false if any ring offset can't be resolved.
+    bool scanCtInputRingForIndexes(const ConfidentialInput& cin,
+                                    std::list<std::pair<Crypto::Hash, size_t>>& outputReferences);
 
     bool addMessageQueue(MessageQueue<BlockchainMessage>& messageQueue);
     bool removeMessageQueue(MessageQueue<BlockchainMessage>& messageQueue);
@@ -266,6 +293,16 @@ namespace CryptoNote {
       uint64_t block_cumulative_size  = 0;
       difficulty_type cumulative_difficulty = 0;
       uint64_t already_generated_coins = 0;
+      // Consensus-tracked total visible value currently locked inside the ECC
+      // CT pool (plain → CT increases it; CT → plain / CT → CT visible fee
+      // decreases it). When this reaches zero the CT subsystem can be safely
+      // deactivated.
+      uint64_t confidential_supply    = 0;
+      // Total visible value currently held by PQ-owned plain outputs. Stub for
+      // a future PQ-plain output type; today this is always 0 because no PQ
+      // outputs are minted. Tracked so that CN → PQ migration and the global
+      // supply invariant can be validated cheaply when PQ activates.
+      uint64_t pq_plain_supply        = 0;
       std::vector<TransactionEntry> transactions;
 
       void serialize(ISerializer& s) {
@@ -274,6 +311,8 @@ namespace CryptoNote {
         s(block_cumulative_size, "block_cumulative_size");
         s(cumulative_difficulty, "cumulative_difficulty");
         s(already_generated_coins, "already_generated_coins");
+        s(confidential_supply, "confidential_supply");
+        s(pq_plain_supply, "pq_plain_supply");
         s(transactions, "transactions");
       }
     };
@@ -311,6 +350,7 @@ namespace CryptoNote {
     UpgradeDetector m_upgradeDetectorV4;
     UpgradeDetector m_upgradeDetectorV5;
     UpgradeDetector m_upgradeDetectorV6;
+    UpgradeDetector m_upgradeDetectorV7;
 
     bool m_no_blobs;
 
@@ -377,12 +417,34 @@ namespace CryptoNote {
     // Increment batch counter; commit if batch is full or we've caught up.
     void commitBatchOrBlock(bool forceSingle = false);
 
+    // forceFullRingSigCheck:
+    //   When true, the legacy "checkpoint zone -> return true" shortcut at
+    //   the end of check_tx_input is bypassed and the ring signature is
+    //   verified regardless of where the node currently is in the chain.
+    //   The CT shield-in path (full checkConfidentialTransaction) must pass
+    //   true here — a forged shield-in claims a transparent output without
+    //   proving ownership and then mints a balanced CT output against it,
+    //   permanently inflating confidentialSupply. That risk doesn't exist
+    //   for the legacy v1 spend path which still uses the default (false).
     bool check_tx_input(const KeyInput& txin, const Crypto::Hash& tx_prefix_hash,
                          const std::vector<Crypto::Signature>& sig,
-                         uint32_t* pmax_related_block_height = nullptr);
+                         uint32_t* pmax_related_block_height = nullptr,
+                         bool forceFullRingSigCheck = false);
     bool checkTransactionInputs(const Transaction& tx, const Crypto::Hash& tx_prefix_hash,
                                  uint32_t* pmax_used_block_height = nullptr);
-    bool checkTransactionInputs(const Transaction& tx, uint32_t* pmax_used_block_height = nullptr);
+    bool checkTransactionInputs(const Transaction& tx,
+                                 TxValidationContext context,
+                                 uint32_t* pmax_used_block_height = nullptr);
+
+    // Confidential transaction validation pipeline (spec Section 15).
+    // Executes all 10 checks in order; returns false on first failure.
+    bool checkConfidentialTransaction(const Transaction& tx, const Crypto::Hash& txHash,
+                                      uint32_t* pmax_used_block_height);
+    // Cheap structural-only CT checks used for transactions arriving inside a
+    // confirmed checkpointed block. Validates sizes, point parseability /
+    // subgroup membership, key-image domain, and global double-spend; skips
+    // Triptych, GK proofs, balance kernel and DB ring resolution.
+    bool checkConfidentialTransactionStructure(const Transaction& tx, const Crypto::Hash& txHash);
 
     // Returns by value (deserialized from tx_entries)
     TransactionEntry transactionByIndex(TransactionIndex index);
@@ -436,8 +498,13 @@ namespace CryptoNote {
     if (outputCount == 0 || tx_in_to_key.outputIndexes.empty())
       return false;
 
-    std::vector<uint32_t> absolute_offsets =
-      relative_output_offsets_to_absolute(tx_in_to_key.outputIndexes);
+    std::vector<uint32_t> absolute_offsets;
+    if (!relative_output_offsets_to_absolute(tx_in_to_key.outputIndexes, absolute_offsets)) {
+      logger(Logging::ERROR, Logging::BRIGHT_RED)
+        << "Relative output offsets overflow uint32_t in transaction input"
+        << " for amount=" << tx_in_to_key.amount;
+      return false;
+    }
 
     size_t count = 0;
     for (uint32_t i : absolute_offsets) {

@@ -130,6 +130,27 @@ public:
   uint32_t minNumberVotingBlocks() const { return (m_upgradeVotingWindow * m_upgradeVotingThreshold + 99) / 100; }
   uint32_t maxUpgradeDistance() const { return 7 * m_upgradeWindow; }
   uint32_t calculateUpgradeHeight(uint32_t voteCompleteHeight) const { return voteCompleteHeight + m_upgradeWindow; }
+  // CT activation gate: uses the dynamic m_upgradeHeightV6, NOT the compile-time
+  // CT_FORK_HEIGHT constant. This is the same height the upgrade detector uses
+  // to dispatch block major versions; tying the two together means:
+  //   - Mainnet: m_upgradeHeightV6 defaults to parameters::UPGRADE_HEIGHT_V6 =
+  //     CT_FORK_HEIGHT, so behavior is identical to the old compile-time check.
+  //   - Testnet: the testnet override (Currency.cpp) lowers m_upgradeHeightV6
+  //     to 100; CT activates at testnet height 100, matching block version
+  //     dispatch (a previously-broken state where V6 blocks were accepted but
+  //     CT v2 txs inside them were rejected by the gate).
+  //   - Tests: CurrencyBuilder::upgradeHeightV6(N) override is now respected
+  //     by both block version dispatch and the CT tx-version gate.
+  bool isConfidentialTransactionsActivated(uint32_t height) const { return height >= m_upgradeHeightV6; }
+  // Block major v6+ replaces the legacy dual height/timestamp unlock_time
+  // interpretation with a height-only rule capped at
+  // CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6, both for accepting new txs and for
+  // deciding whether referenced outputs from old txs are spendable.
+  // Uses dynamic m_upgradeHeightV6 for the same testnet/test reasons as above.
+  bool isUnlockTimeCappedAt(uint32_t height) const { return height >= m_upgradeHeightV6; }
+  uint8_t currentTransactionVersion(uint32_t height) const {
+    return isConfidentialTransactionsActivated(height) ? TRANSACTION_VERSION_CT : CURRENT_TRANSACTION_VERSION;
+  }
 
   const std::string& blocksFileName() const { return m_blocksFileName; }
   const std::string& blocksCacheFileName() const { return m_blocksCacheFileName; }
@@ -142,9 +163,15 @@ public:
   const Block& genesisBlock() const { return m_genesisBlock; }
   const Crypto::Hash& genesisBlockHash() const { return m_genesisBlockHash; }
 
-  uint64_t calculateReward(uint64_t alreadyGeneratedCoins) const;
+  uint64_t effectiveMoneySupply(uint32_t height) const;
+  uint64_t calculateReward(uint64_t alreadyGeneratedCoins, uint32_t height) const;
+  uint64_t calculateReward(uint64_t alreadyGeneratedCoins) const { return calculateReward(alreadyGeneratedCoins, 0); }
   bool getBlockReward(uint8_t blockMajorVersion, size_t medianSize, size_t currentBlockSize, uint64_t alreadyGeneratedCoins, uint64_t fee,
-    uint64_t& reward, int64_t& emissionChange) const;
+    uint64_t& reward, int64_t& emissionChange, uint32_t height) const;
+  bool getBlockReward(uint8_t blockMajorVersion, size_t medianSize, size_t currentBlockSize, uint64_t alreadyGeneratedCoins, uint64_t fee,
+    uint64_t& reward, int64_t& emissionChange) const {
+    return getBlockReward(blockMajorVersion, medianSize, currentBlockSize, alreadyGeneratedCoins, fee, reward, emissionChange, 0);
+  }
   size_t maxBlockCumulativeSize(uint64_t height) const;
 
   bool constructMinerTx(uint8_t blockMajorVersion, uint32_t height, size_t medianSize, uint64_t alreadyGeneratedCoins, size_t currentBlockSize,
@@ -170,7 +197,14 @@ public:
 
   std::string formatAmount(uint64_t amount) const;
   std::string formatAmount(int64_t amount) const;
+  // Height-aware overloads kept for call-site compatibility; height is currently ignored.
+  std::string formatAmount(uint64_t amount, uint32_t height) const;
+  std::string formatAmount(int64_t amount, uint32_t height) const;
   bool parseAmount(const std::string& str, uint64_t& amount) const;
+  bool parseAmount(const std::string& str, uint64_t& amount, uint32_t height) const;
+
+  // True if amount cannot become a CT output (i.e. < MIN_CT_DENOMINATION).
+  static bool isDustOutput(uint64_t amount);
 
   difficulty_type nextDifficulty(uint32_t height, uint8_t blockMajorVersion, std::vector<uint64_t> timestamps, std::vector<difficulty_type> Difficulties) const;
   difficulty_type nextDifficultyV1(std::vector<uint64_t> timestamps, std::vector<difficulty_type> Difficulties) const;
@@ -253,6 +287,7 @@ private:
   uint32_t m_upgradeHeightV4;
   uint32_t m_upgradeHeightV5;
   uint32_t m_upgradeHeightV6;
+  uint32_t m_upgradeHeightV7;
   unsigned int m_upgradeVotingThreshold;
   uint32_t m_upgradeVotingWindow;
   uint32_t m_upgradeWindow;
@@ -340,6 +375,7 @@ public:
   CurrencyBuilder& upgradeHeightV4(uint64_t val) { m_currency.m_upgradeHeightV4 = static_cast<uint32_t>(val); return *this; }
   CurrencyBuilder& upgradeHeightV5(uint64_t val) { m_currency.m_upgradeHeightV5 = static_cast<uint32_t>(val); return *this; }
   CurrencyBuilder& upgradeHeightV6(uint64_t val) { m_currency.m_upgradeHeightV6 = static_cast<uint32_t>(val); return *this; }
+  CurrencyBuilder& upgradeHeightV7(uint64_t val) { m_currency.m_upgradeHeightV7 = static_cast<uint32_t>(val); return *this; }
   CurrencyBuilder& upgradeVotingThreshold(unsigned int val);
   CurrencyBuilder& upgradeVotingWindow(size_t val) { m_currency.m_upgradeVotingWindow = static_cast<uint32_t>(val); return *this; }
   CurrencyBuilder& upgradeWindow(size_t val);

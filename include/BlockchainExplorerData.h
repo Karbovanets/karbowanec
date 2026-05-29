@@ -98,7 +98,20 @@ struct KeyInputDetails {
   std::vector<TransactionOutputReferenceDetails> outputs;
 };
 
-typedef boost::variant<BaseInputDetails, KeyInputDetails> transactionInputDetails2;
+// Confidential (CT) input detail: amount is hidden, but the ring layout,
+// pseudo-commitment and key image are public and useful for explorers.
+// ringMembers carries the per-member (amount, outputIndex) tuples needed
+// to render mixed transparent/confidential rings; outputs[] holds the
+// matching resolved (txHash, outputIndex) pairs in the same order.
+struct ConfidentialInputDetails {
+  Crypto::KeyImage keyImage;
+  Crypto::EllipticCurvePoint pseudoCommitment;
+  uint64_t mixin;
+  std::vector<RingMemberRef> ringMembers;
+  std::vector<TransactionOutputReferenceDetails> outputs;
+};
+
+typedef boost::variant<BaseInputDetails, KeyInputDetails, ConfidentialInputDetails> transactionInputDetails2;
 
 struct TransactionExtraDetails2 {
   std::vector<size_t> padding;
@@ -114,7 +127,8 @@ struct TransactionDetails {
   uint64_t fee = 0;
   uint64_t totalInputsAmount = 0;
   uint64_t totalOutputsAmount = 0;
-  uint64_t mixin = 0;
+  uint64_t mixin = 0;     // max ring size across inputs (legacy field)
+  uint64_t minMixin = 0;  // min ring size across inputs (CT rings must be a supported power of two: 4, 8, or 16)
   uint64_t unlockTime = 0;
   uint64_t timestamp = 0;
   uint8_t version = 0;
@@ -124,9 +138,17 @@ struct TransactionDetails {
   Crypto::Hash blockHash;
   uint32_t blockHeight = 0;
   TransactionExtraDetails2 extra;
-  std::vector<std::vector<Crypto::Signature>> signatures;
+  // Per-input authorization, parallel to inputs:
+  //   BaseInput          → boost::blank
+  //   KeyInput           → std::vector<Crypto::Signature>
+  //   ConfidentialInput  → CTInputSignature  (Triptych spend proof)
+  std::vector<InputSignatures> signatures;
   std::vector<transactionInputDetails2> inputs;
   std::vector<transactionOutputDetails2> outputs;
+
+  // CT (v2) proof body. Empty / value-initialized for non-CT transactions.
+  std::vector<CTOutputProof>    ctProofs;     // per-output GK denomination membership
+  TransactionKernel             kernel;       // balance-equation excess + Schnorr
 };
 
 struct BlockDetails {
@@ -147,6 +169,12 @@ struct BlockDetails {
   uint64_t blockSize = 0;
   uint64_t transactionsCumulativeSize = 0;
   uint64_t alreadyGeneratedCoins = 0;
+  // Consensus-tracked: total visible value currently locked inside the ECC CT
+  // pool at this block height. See Blockchain::getConfidentialSupply.
+  uint64_t confidentialSupply = 0;
+  // Consensus-tracked: total visible value held by PQ-owned plain outputs.
+  // Stubbed at 0 today; will become non-zero once PQ-plain activates.
+  uint64_t pqPlainSupply = 0;
   uint64_t alreadyGeneratedTransactions = 0;
   uint64_t sizeMedian = 0;
   uint64_t effectiveSizeMedian = 0;

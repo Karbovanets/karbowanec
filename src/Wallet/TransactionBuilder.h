@@ -28,6 +28,8 @@
 
 namespace CryptoNote {
 
+// ── Transparent (v1) transaction builder types ──────────────────────────────
+
 // Input descriptor: holds resolved mixin outputs + sender keys needed to generate key image and sign.
 // ephKeys is populated by buildTransaction() during addInput.
 struct TxBuildInput {
@@ -43,21 +45,7 @@ struct TxBuildOutput {
   uint64_t amount;
 };
 
-// Build and sign a complete transaction using the ITransaction interface.
-//
-// Construction order (preserves deterministic key correctness):
-//   1. setUnlockTime
-//   2. addInput x N  (generates key images, stores ephKeys back into inputs[i].ephKeys)
-//   3. generateDeterministicTransactionKeys(viewSecretKey)  [ITransaction method]
-//   4. addOutput x N — sorted ascending by amount (derivation uses deterministic tx key)
-//   5. appendExtra
-//   6. signInputKey x N
-//
-// viewSecretKey: wallet view secret key used for deterministic tx key generation.
-//           If NULL_SECRET_KEY (view-only wallet without view key), uses random keypair.
-// sizeLimit: throws TRANSACTION_SIZE_TOO_BIG if the serialized size exceeds the limit.
-//            Pass 0 to disable the check.
-// txSecretKey: [out] the deterministic secret key, for sending-proof storage.
+// Build and sign a complete transparent (v1) transaction using the ITransaction interface.
 std::unique_ptr<ITransaction> buildTransaction(
     std::vector<TxBuildInput>& inputs,
     std::vector<TxBuildOutput>& outputs,
@@ -66,5 +54,81 @@ std::unique_ptr<ITransaction> buildTransaction(
     uint64_t unlockTimestamp,
     uint64_t sizeLimit,
     Crypto::SecretKey& txSecretKey);
+
+// ── Confidential (v2 CT) transaction builder types ──────────────────────────
+
+// One ring member descriptor used during transaction construction.
+// Each member is self-describing: its amount bucket and absolute offset are
+// independent of other members, allowing mixed transparent/confidential rings.
+// For a transparent KeyOutput member, amount is the real on-chain amount; for
+// a ConfidentialOutput member, amount is CT_CONFIDENTIAL_OUTPUT_AMOUNT.
+struct CTBuildRingMember {
+  uint64_t                       amount;       // bucket: real amount or CT sentinel
+  uint32_t                       outputIndex;  // absolute index in that bucket
+  Crypto::PublicKey              pubkey;       // one-time public key
+  Crypto::EllipticCurvePoint     commitment;   // Pedersen commitment (or amount*H for transparent)
+};
+
+// CT input: a spent output with its ring members and the sender's secret keys.
+//
+// `isTransparent` decides the on-wire input shape:
+//   true  → emit a KeyInput (legacy ring sig in tx.signatures). Used for
+//           transparent shielding into the CT pool. Ring must be all-KeyOutput
+//           and all members must share the same amount bucket as `amount`.
+//           realBlinding is ignored (always 0 for transparent outputs).
+//   false → emit a ConfidentialInput (Triptych in tx.signatures variant). Used for
+//           CT-to-CT or transparent-decoy spend. Ring may be mixed-bucket.
+//
+// Ring members are NOT required to be sorted on entry — buildConfidentialTransaction
+// canonicalises them by (amount, outputIndex) before signing and updates
+// realIndex to the corresponding post-sort slot.
+struct CTBuildInput {
+  std::vector<CTBuildRingMember> ringMembers;  // all members of the ring (one is real)
+  size_t                         realIndex;    // index of the real spend in ringMembers (pre-sort)
+  Crypto::SecretKey              spendPrivkey; // ephemeral spend key for real input: P_real = x*G
+  Crypto::EllipticCurveScalar    realBlinding; // blinding of the real input's commitment (0 for transparent)
+  uint64_t                       amount;       // plaintext amount of the real input in atomic units
+  bool                           isTransparent = false;
+};
+
+// CT output: a single canonical denomination going to a destination address.
+struct CTBuildOutput {
+  AccountPublicAddress destination;
+  uint64_t amount;  // must be a canonical denomination (from DENOMINATIONS[0..63])
+};
+
+// Build a complete confidential (v2 CT) transaction.
+//
+// Construction order:
+//   1. Deterministic tx key from viewSecretKey + inputs hash
+//   2. For each output: derive blinding factor, compute Pedersen commitment, ECDH-mask amount
+//   3. For each input: choose random pseudo-blinding factor, compute pseudo-commitment
+//   4. Compute CT signing hash (excludes proof response fields)
+//   5. Generate GK denomination proofs for each output
+//   6. Generate Triptych spend proofs for each input
+//   7. Compute excess scalar, sign kernel Schnorr signature
+//
+// viewSecretKey:  wallet view secret key for deterministic tx key derivation.
+// fee:           plaintext fee in new atomic units.
+// extra:         extra data (payment ID, etc.) — encoded in tx.extra.
+// txSecretKey:   [out] the deterministic tx secret key for sending-proof.
+//
+// unlockTime: height before which the output is unspendable. Defaults to 0
+// (immediately spendable). Karbo CT transactions previously required this
+// to be 0; the relaxed rule (see CT-DESIGN.md "hide amounts, not graph"
+// threat model) allows any value up to CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6,
+// matching the v6 plain-tx cap. Wallets that want pre-signed refund
+// transactions for atomic swaps or vesting schedules pass a real height here.
+//
+// Returns the fully constructed and signed CryptoNote::Transaction.
+// Throws on invalid input (non-canonical denomination, ring size mismatch, etc.).
+Transaction buildConfidentialTransaction(
+    std::vector<CTBuildInput>& inputs,
+    std::vector<CTBuildOutput>& outputs,
+    const Crypto::SecretKey& viewSecretKey,
+    uint64_t fee,
+    const std::string& extra,
+    Crypto::SecretKey& txSecretKey,
+    uint64_t unlockTime = 0);
 
 } // namespace CryptoNote

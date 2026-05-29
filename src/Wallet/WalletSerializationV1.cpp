@@ -601,7 +601,7 @@ void WalletSerializerV1::updateTransactionsBaseStatus() {
         return rec.container->getTransactionInformation(tx.hash, txInfo);
       });
 
-      tx.isBase = it != std::end(wallets) && txInfo.totalAmountIn == 0;
+      tx.isBase = it != std::end(wallets) && txInfo.isBase;
     });
   }
 }

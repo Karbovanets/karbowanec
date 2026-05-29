@@ -28,6 +28,7 @@
 #include "Serialization/SerializationOverloads.h"
 #include "Serialization/BinaryInputStreamSerializer.h"
 #include "Serialization/BinaryOutputStreamSerializer.h"
+#include "Serialization/JsonOutputStreamSerializer.h"
 
 #include "Common/StringOutputStream.h"
 #include "crypto/crypto.h"
@@ -49,6 +50,7 @@ size_t getSignaturesCount(const TransactionInput& input) {
   struct txin_signature_size_visitor : public boost::static_visitor < size_t > {
     size_t operator()(const BaseInput& txin) const { return 0; }
     size_t operator()(const KeyInput& txin) const { return txin.outputIndexes.size(); }
+    size_t operator()(const ConfidentialInput& txin) const { return 0; } // Triptych proof lives in tx body
   };
 
   return boost::apply_visitor(txin_signature_size_visitor(), input);
@@ -57,7 +59,11 @@ size_t getSignaturesCount(const TransactionInput& input) {
 struct BinaryVariantTagGetter: boost::static_visitor<uint8_t> {
   uint8_t operator()(const CryptoNote::BaseInput) { return  0xff; }
   uint8_t operator()(const CryptoNote::KeyInput) { return  0x2; }
+  // Tag 0x3 reserverd for deprecated CryptoNote::MultisignatureInput
+  uint8_t operator()(const CryptoNote::ConfidentialInput) { return  0x4; }
   uint8_t operator()(const CryptoNote::KeyOutput) { return  0x2; }
+  // Tag 0x3 reserverd for deprecated CryptoNote::MultisignatureOutput
+  uint8_t operator()(const CryptoNote::ConfidentialOutput) { return  0x4; }
   uint8_t operator()(const CryptoNote::Transaction) { return  0xcc; }
   uint8_t operator()(const CryptoNote::Block) { return  0xbb; }
 };
@@ -86,6 +92,12 @@ void getVariantValue(CryptoNote::ISerializer& serializer, uint8_t tag, CryptoNot
     in = v;
     break;
   }
+  case 0x4: {
+    CryptoNote::ConfidentialInput v;
+    serializer(v, "value");
+    in = v;
+    break;
+  }
   default:
     throw std::runtime_error("Unknown variant tag");
   }
@@ -95,6 +107,12 @@ void getVariantValue(CryptoNote::ISerializer& serializer, uint8_t tag, CryptoNot
   switch(tag) {
   case 0x2: {
     CryptoNote::KeyOutput v;
+    serializer(v, "data");
+    out = v;
+    break;
+  }
+  case 0x4: {
+    CryptoNote::ConfidentialOutput v;
     serializer(v, "data");
     out = v;
     break;
@@ -121,6 +139,72 @@ bool serializeVarintVector(std::vector<uint32_t>& vector, CryptoNote::ISerialize
 
   for (size_t i = 0; i < size; ++i) {
     serializer(vector[i], "");
+  }
+
+  serializer.endArray();
+  return true;
+}
+
+void throwIfArrayTooLarge(size_t size, size_t maxSize, const char* fieldName) {
+  if (size > maxSize) {
+    std::ostringstream oss;
+    oss << "Serialization error: array '" << fieldName << "' size " << size
+        << " exceeds limit " << maxSize;
+    throw std::runtime_error(oss.str());
+  }
+}
+
+bool serializeBoundedVarintVector(std::vector<uint32_t>& vector, CryptoNote::ISerializer& serializer,
+                                  Common::StringView name, size_t maxSize, const char* fieldName) {
+  size_t size = vector.size();
+
+  if (serializer.type() == CryptoNote::ISerializer::OUTPUT) {
+    throwIfArrayTooLarge(size, maxSize, fieldName);
+  }
+
+  if (!serializer.beginArray(size, name)) {
+    if (serializer.type() == CryptoNote::ISerializer::INPUT) {
+      vector.clear();
+    }
+    return false;
+  }
+
+  if (serializer.type() == CryptoNote::ISerializer::INPUT) {
+    throwIfArrayTooLarge(size, maxSize, fieldName);
+    vector.resize(size);
+  }
+
+  for (size_t i = 0; i < size; ++i) {
+    serializer(vector[i], "");
+  }
+
+  serializer.endArray();
+  return true;
+}
+
+template <typename T, typename SerializeElement>
+bool serializeBoundedVector(std::vector<T>& vector, CryptoNote::ISerializer& serializer, Common::StringView name,
+                            size_t maxSize, const char* fieldName, SerializeElement serializeElement) {
+  size_t size = vector.size();
+
+  if (serializer.type() == CryptoNote::ISerializer::OUTPUT) {
+    throwIfArrayTooLarge(size, maxSize, fieldName);
+  }
+
+  if (!serializer.beginArray(size, name)) {
+    if (serializer.type() == CryptoNote::ISerializer::INPUT) {
+      vector.clear();
+    }
+    return false;
+  }
+
+  if (serializer.type() == CryptoNote::ISerializer::INPUT) {
+    throwIfArrayTooLarge(size, maxSize, fieldName);
+    vector.resize(size);
+  }
+
+  for (size_t i = 0; i < size; ++i) {
+    serializeElement(vector[i]);
   }
 
   serializer.endArray();
@@ -170,63 +254,127 @@ namespace CryptoNote {
 void serialize(TransactionPrefix& txP, ISerializer& serializer) {
   serializer(txP.version, "version");
 
-  if (CURRENT_TRANSACTION_VERSION < txP.version) {
+  if (txP.version > CURRENT_TRANSACTION_VERSION && txP.version != TRANSACTION_VERSION_CT) {
     throw std::runtime_error("Wrong transaction version");
   }
 
-  serializer(txP.unlockTime, "unlock_time");
-  serializer(txP.inputs, "vin");
-  serializer(txP.outputs, "vout");
-  serializeAsBinary(txP.extra, "extra", serializer);
+  if (txP.version == TRANSACTION_VERSION_CT) {
+    // CT v2 prefix layout: version, unlock_time, fee, vin, vout, extra.
+    //
+    // unlock_time matches the position v1 uses, so external tooling that
+    // walks the prefix field-by-field gets uniform structure across
+    // versions (the only CT-specific addition is the plaintext `fee`).
+    //
+    // Historical note: this branch used to FORCE txP.unlockTime = 0 in
+    // memory and then omit the field from the wire entirely. That had two
+    // bad consequences:
+    //
+    //   1. The consensus rule allowing non-zero unlockTime on CT (see
+    //      CT-DESIGN.md and checkTransactionConsensusShape) was
+    //      effectively dead — the wallet's intended lock height never
+    //      reached the wire, so refund-on-timeout patterns for atomic
+    //      swaps and vesting payouts silently produced immediately-
+    //      spendable outputs.
+    //
+    //   2. Calling toBinaryArray(tx) — used by getObjectHash() under the
+    //      hood — mutated tx as a side effect via the const_cast in
+    //      CryptoNoteTools.h. Any code path that computed a CT tx's hash
+    //      silently wiped its unlockTime field.
+    //
+    // Both are fixed by treating unlockTime as a proper serialized field
+    // here. The consensus cap (`<= CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6`) is
+    // enforced in checkTransactionConsensusShape against the deserialized
+    // value, so over-cap junk is still rejected at admission.
+    serializer(txP.unlockTime, "unlock_time");
+    serializer(txP.fee, "fee");
+    serializeBoundedVector(txP.inputs, serializer, "vin", CryptoNote::parameters::CT_MAX_INPUTS, "vin",
+      [&serializer](TransactionInput& input) { serializer(input, ""); });
+    serializeBoundedVector(txP.outputs, serializer, "vout", CryptoNote::parameters::CT_MAX_OUTPUTS, "vout",
+      [&serializer](TransactionOutput& output) { serializer(output, ""); });
+    serializeAsBinary(txP.extra, "extra", serializer);
+  } else {
+    // Version 1 (transparent)
+    serializer(txP.unlockTime, "unlock_time");
+    serializer(txP.inputs, "vin");
+    serializer(txP.outputs, "vout");
+    serializeAsBinary(txP.extra, "extra", serializer);
+  }
 }
 
 void serialize(Transaction& tx, ISerializer& serializer) {
   serialize(static_cast<TransactionPrefix&>(tx), serializer);
 
-  size_t sigSize = tx.inputs.size();
-  //TODO: make arrays without sizes
-//  serializer.beginArray(sigSize, "signatures");
-  
-  //if (serializer.type() == ISerializer::INPUT) {
-  // ignore base transaction
-  if (serializer.type() == ISerializer::INPUT && !(sigSize == 1 && tx.inputs[0].type() == typeid(BaseInput))) {
-    tx.signatures.resize(sigSize);
-  }
+  // Per-input authorization, parallel to tx.inputs:
+  //   BaseInput          → no bytes (variant alt: boost::blank)
+  //   KeyInput           → ring sig: outputIndexes.size() × Crypto::Signature
+  //   ConfidentialInput  → Triptych spend proof
+  // The variant alternative is selected by inputs[i].type() — no per-slot
+  // tag on the wire — so a pure-coinbase tx emits zero authorization
+  // bytes and a mixed v2 tx emits each slot's body in input order.
+  {
+    const size_t inCount = tx.inputs.size();
+    const bool coinbaseOnly =
+        inCount == 1 && tx.inputs[0].type() == typeid(BaseInput);
 
-  bool signaturesNotExpected = tx.signatures.empty();
-  if (!signaturesNotExpected && tx.inputs.size() != tx.signatures.size()) {
-    throw std::runtime_error("Serialization error: unexpected signatures size");
-  }
+    if (serializer.type() == ISerializer::INPUT) {
+      tx.signatures.assign(coinbaseOnly ? 0 : inCount, InputSignatures{});
+    } else if (!coinbaseOnly && tx.signatures.size() != inCount) {
+      throw std::runtime_error("Serialization error: signatures size != inputs size");
+    }
 
-  for (size_t i = 0; i < tx.inputs.size(); ++i) {
-    size_t signatureSize = getSignaturesCount(tx.inputs[i]);
-    if (signaturesNotExpected) {
-      if (signatureSize == 0) {
+    for (size_t i = 0; i < inCount; ++i) {
+      if (tx.inputs[i].type() == typeid(BaseInput)) {
         continue;
+      }
+      if (tx.inputs[i].type() == typeid(KeyInput)) {
+        const size_t ringSize = boost::get<KeyInput>(tx.inputs[i]).outputIndexes.size();
+        if (serializer.type() == ISerializer::OUTPUT) {
+          const auto& sigs = boost::get<std::vector<Crypto::Signature>>(tx.signatures[i]);
+          if (sigs.size() != ringSize) {
+            throw std::runtime_error("Serialization error: ring-sig length mismatch");
+          }
+          for (auto& sig : const_cast<std::vector<Crypto::Signature>&>(sigs)) {
+            serializePod(sig, "", serializer);
+          }
+        } else {
+          std::vector<Crypto::Signature> sigs(ringSize);
+          for (auto& sig : sigs) {
+            serializePod(sig, "", serializer);
+          }
+          tx.signatures[i] = std::move(sigs);
+        }
+      } else if (tx.inputs[i].type() == typeid(ConfidentialInput)) {
+        if (serializer.type() == ISerializer::INPUT) {
+          tx.signatures[i] = CTInputSignature{};
+        }
+        CTInputSignature& proof =
+            boost::get<CTInputSignature>(tx.signatures[i]);
+        serialize(proof, serializer);
       } else {
-        throw std::runtime_error("Serialization error: signatures are not expected");
+        throw std::runtime_error("Serialization error: unsupported input type");
       }
-    }
-
-    if (serializer.type() == ISerializer::OUTPUT) {
-      if (signatureSize != tx.signatures[i].size()) {
-        throw std::runtime_error("Serialization error: unexpected signatures size");
-      }
-
-      for (Crypto::Signature& sig : tx.signatures[i]) {
-        serializePod(sig, "", serializer);
-      }
-
-    } else {
-      std::vector<Crypto::Signature> signatures(signatureSize);
-      for (Crypto::Signature& sig : signatures) {
-        serializePod(sig, "", serializer);
-      }
-
-      tx.signatures[i] = std::move(signatures);
     }
   }
-//  serializer.endArray();
+
+  if (tx.version == TRANSACTION_VERSION_CT) {
+    // Per-output GK denomination proofs
+    size_t proofCount = tx.ctProofs.size();
+    if (serializer.type() == ISerializer::OUTPUT) {
+      throwIfArrayTooLarge(proofCount, CryptoNote::parameters::CT_MAX_OUTPUTS, "ct_proofs");
+    }
+    serializer.beginArray(proofCount, "ct_proofs");
+    if (serializer.type() == ISerializer::INPUT) {
+      throwIfArrayTooLarge(proofCount, CryptoNote::parameters::CT_MAX_OUTPUTS, "ct_proofs");
+      tx.ctProofs.resize(proofCount);
+    }
+    for (size_t i = 0; i < proofCount; ++i) {
+      serialize(tx.ctProofs[i], serializer);
+    }
+    serializer.endArray();
+
+    // Kernel (balance proof)
+    serialize(tx.kernel, serializer);
+  }
 }
 
 void serialize(TransactionInput& in, ISerializer& serializer) {
@@ -282,6 +430,248 @@ void serialize(TransactionOutputTarget& output, ISerializer& serializer) {
 
 void serialize(KeyOutput& key, ISerializer& serializer) {
   serializer(key.key, "key");
+}
+
+void serialize(ConfidentialInput& input, ISerializer& serializer) {
+  // Per-member ring references: amount + absolute outputIndex per ring slot.
+  // The single ringAmount/ringOutputIndexes from the previous schema is gone
+  // so CT inputs can mix transparent and confidential ring members.
+  size_t ringSize = input.ringMembers.size();
+  if (serializer.type() == ISerializer::OUTPUT) {
+    throwIfArrayTooLarge(ringSize, CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_members");
+  }
+  serializer.beginArray(ringSize, "ring_members");
+  if (serializer.type() == ISerializer::INPUT) {
+    throwIfArrayTooLarge(ringSize, CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_members");
+    input.ringMembers.resize(ringSize);
+  }
+  for (size_t i = 0; i < ringSize; ++i) {
+    // Each element is a (amount, offset) struct with two differently-typed
+    // fields. The KV-binary array protocol pins one element type per array
+    // from the first write, so the only safe shape for heterogeneous
+    // elements is OBJECT — wrap each member in an explicit object scope.
+    // beginObject/endObject are no-ops on the binary stream serializer
+    // (LMDB / on-chain), so the wire bytes for the stored tx blob are
+    // unchanged; this only fixes KV-binary RPC round-trip.
+    serializer.beginObject("");
+    serializer(input.ringMembers[i].amount, "amount");
+    serializer(input.ringMembers[i].outputIndex, "offset");
+    serializer.endObject();
+  }
+  serializer.endArray();
+
+  // Ring public keys (variable length, must match ringMembers count)
+  size_t ringPubkeySize = input.ringPubkeys.size();
+  if (serializer.type() == ISerializer::OUTPUT) {
+    throwIfArrayTooLarge(ringPubkeySize, CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_pubkeys");
+    if (ringPubkeySize != ringSize) {
+      throw std::runtime_error("Serialization error: ring_pubkeys size does not match ring_members size");
+    }
+  }
+  serializer.beginArray(ringPubkeySize, "ring_pubkeys");
+  if (serializer.type() == ISerializer::INPUT) {
+    throwIfArrayTooLarge(ringPubkeySize, CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_pubkeys");
+    if (ringPubkeySize != ringSize) {
+      throw std::runtime_error("Serialization error: ring_pubkeys size does not match ring_members size");
+    }
+    input.ringPubkeys.resize(ringPubkeySize);
+  }
+  for (size_t i = 0; i < ringPubkeySize; ++i) {
+    serializer(input.ringPubkeys[i], "");
+  }
+  serializer.endArray();
+
+  // Ring commitments (must match ringMembers count)
+  size_t ringCommitmentSize = input.ringCommitments.size();
+  if (serializer.type() == ISerializer::OUTPUT) {
+    throwIfArrayTooLarge(ringCommitmentSize, CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_commits");
+    if (ringCommitmentSize != ringSize) {
+      throw std::runtime_error("Serialization error: ring_commits size does not match ring_members size");
+    }
+  }
+  serializer.beginArray(ringCommitmentSize, "ring_commits");
+  if (serializer.type() == ISerializer::INPUT) {
+    throwIfArrayTooLarge(ringCommitmentSize, CryptoNote::parameters::CT_MAX_RING_SIZE, "ring_commits");
+    if (ringCommitmentSize != ringSize) {
+      throw std::runtime_error("Serialization error: ring_commits size does not match ring_members size");
+    }
+    input.ringCommitments.resize(ringCommitmentSize);
+  }
+  for (size_t i = 0; i < ringCommitmentSize; ++i) {
+    serializePod(input.ringCommitments[i], "", serializer);
+  }
+  serializer.endArray();
+
+  // Pseudo-output commitment
+  serializePod(input.pseudoCommitment, "pseudo_commit", serializer);
+
+  // Key image
+  serializer(input.keyImage, "k_image");
+}
+
+void serialize(ConfidentialOutput& output, ISerializer& serializer) {
+  // One-time stealth address (32 bytes)
+  serializer(output.targetKey, "target_key");
+
+  // Pedersen commitment (32 bytes)
+  serializePod(output.commitment, "commitment", serializer);
+
+  // Masked amount (8 bytes)
+  serializer.binary(output.maskedAmount.data(), 8, "masked_amount");
+}
+
+void serialize(CTInputSignature& sig, ISerializer& serializer) {
+  // Triptych proof body, controlled by a single header byte n:
+  //   n ∈ {2, 3, 4}  (ring_size ∈ {4, 8, 16})
+  //     I_bits / A / B / Q_P / Q_M / Q_U / z / za / zb : n entries each
+  //     f_P, f_M, f_U                                  : 3 scalars
+  //     wire: 1 + 6n×32 + (3n+3)×32 bytes
+  //
+  // n ∈ {0, 1, 0xFF} are reserved as invalid. Empty-slot signaling (for
+  // KeyInput slots in a mixed v2 tx) is now done at the Transaction
+  // level via the InputSignatures variant — this serializer only ever
+  // runs on a ConfidentialInput slot, so it always carries a real proof.
+
+  if (dynamic_cast<JsonOutputStreamSerializer*>(&serializer) != nullptr) {
+    uint8_t n_json = static_cast<uint8_t>(sig.I_bits.size());
+    serializer(n_json, "n");
+
+    auto emitPointArray = [&](std::vector<Crypto::EllipticCurvePoint>& arr,
+                              Common::StringView name) {
+      size_t size = arr.size();
+      serializer.beginArray(size, name);
+      for (auto& p : arr) serializePod(p, "", serializer);
+      serializer.endArray();
+    };
+    auto emitScalarArray = [&](std::vector<Crypto::EllipticCurveScalar>& arr,
+                               Common::StringView name) {
+      size_t size = arr.size();
+      serializer.beginArray(size, name);
+      for (auto& s : arr) serializePod(s, "", serializer);
+      serializer.endArray();
+    };
+
+    emitPointArray(sig.I_bits, "I_bits");
+    emitPointArray(sig.A,      "A");
+    emitPointArray(sig.B,      "B");
+    emitPointArray(sig.Q_P,    "Q_P");
+    emitPointArray(sig.Q_M,    "Q_M");
+    emitPointArray(sig.Q_U,    "Q_U");
+    emitScalarArray(sig.z,  "z");
+    emitScalarArray(sig.za, "za");
+    emitScalarArray(sig.zb, "zb");
+    serializePod(sig.f_P, "f_P", serializer);
+    serializePod(sig.f_M, "f_M", serializer);
+    serializePod(sig.f_U, "f_U", serializer);
+    return;
+  }
+
+  uint8_t n = 0;
+  if (serializer.type() == ISerializer::OUTPUT) {
+    const size_t bits_len = sig.I_bits.size();
+    const size_t q_len    = sig.Q_P.size();
+    if ((bits_len == 2 || bits_len == 3 || bits_len == 4) && q_len == bits_len) {
+      n = static_cast<uint8_t>(bits_len);
+    } else {
+      throw std::runtime_error("CTInputSignature: invalid shape on serialize");
+    }
+    if (sig.A.size()   != bits_len || sig.B.size()   != bits_len ||
+        sig.Q_M.size() != bits_len || sig.Q_U.size() != bits_len ||
+        sig.z.size()   != bits_len || sig.za.size()  != bits_len || sig.zb.size() != bits_len) {
+      throw std::runtime_error("CTInputSignature: vector length mismatch on serialize");
+    }
+  }
+  serializer.binary(&n, sizeof(n), "n");
+  if (serializer.type() == ISerializer::INPUT) {
+    if (n != 2 && n != 3 && n != 4) {
+      throw std::runtime_error("CTInputSignature: unsupported proof size on deserialize");
+    }
+    const size_t len = static_cast<size_t>(n);
+    sig.I_bits.resize(len);
+    sig.A.resize(len);
+    sig.B.resize(len);
+    sig.Q_P.resize(len);
+    sig.Q_M.resize(len);
+    sig.Q_U.resize(len);
+    sig.z.resize(len);
+    sig.za.resize(len);
+    sig.zb.resize(len);
+  }
+
+  const size_t len = static_cast<size_t>(n);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.I_bits[i], "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.A[i],      "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.B[i],      "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.Q_P[i],    "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.Q_M[i],    "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.Q_U[i],    "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.z[i],      "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.za[i],     "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.zb[i],     "", serializer);
+  serializePod(sig.f_P, "", serializer);
+  serializePod(sig.f_M, "", serializer);
+  serializePod(sig.f_U, "", serializer);
+}
+
+void serialize(CTOutputProof& proof, ISerializer& serializer) {
+  // The proof body is consensus-critical: the binary form is fixed at 6 raw
+  // points/scalars per field with no length prefix, so any signed/hashed bytes
+  // line up with what verifiers reconstruct. JSON output, however, needs named
+  // arrays so RPC consumers (block explorer) can read the fields. Branch on
+  // serializer type rather than retrofitting beginArray() into the binary path,
+  // which would change the on-disk layout.
+  if (dynamic_cast<JsonOutputStreamSerializer*>(&serializer) != nullptr) {
+    auto emitPointArray = [&](Crypto::EllipticCurvePoint (&arr)[6], Common::StringView name) {
+      size_t size = 6;
+      serializer.beginArray(size, name);
+      for (size_t i = 0; i < 6; ++i) serializePod(arr[i], "", serializer);
+      serializer.endArray();
+    };
+    auto emitScalarArray = [&](Crypto::EllipticCurveScalar (&arr)[6], Common::StringView name) {
+      size_t size = 6;
+      serializer.beginArray(size, name);
+      for (size_t i = 0; i < 6; ++i) serializePod(arr[i], "", serializer);
+      serializer.endArray();
+    };
+    emitPointArray(proof.I, "I");
+    emitPointArray(proof.A, "A");
+    emitPointArray(proof.B, "B");
+    emitPointArray(proof.Q, "Q");
+    emitScalarArray(proof.z, "z");
+    emitScalarArray(proof.za, "za");
+    emitScalarArray(proof.zb, "zb");
+    serializePod(proof.f, "f", serializer);
+    return;
+  }
+
+  for (size_t i = 0; i < 6; ++i) {
+    serializePod(proof.I[i], "", serializer);
+  }
+  for (size_t i = 0; i < 6; ++i) {
+    serializePod(proof.A[i], "", serializer);
+  }
+  for (size_t i = 0; i < 6; ++i) {
+    serializePod(proof.B[i], "", serializer);
+  }
+  for (size_t i = 0; i < 6; ++i) {
+    serializePod(proof.Q[i], "", serializer);
+  }
+  for (size_t i = 0; i < 6; ++i) {
+    serializePod(proof.z[i], "", serializer);
+  }
+  for (size_t i = 0; i < 6; ++i) {
+    serializePod(proof.za[i], "", serializer);
+  }
+  for (size_t i = 0; i < 6; ++i) {
+    serializePod(proof.zb[i], "", serializer);
+  }
+  serializePod(proof.f, "", serializer);
+}
+
+void serialize(TransactionKernel& kernel, ISerializer& serializer) {
+  serializePod(kernel.excessCommitment, "excess", serializer);
+  serializePod(kernel.sigE, "sig_e", serializer);
+  serializePod(kernel.sigS, "sig_s", serializer);
 }
 
 void serialize(ParentBlockSerializer& pbs, ISerializer& serializer) {
@@ -358,7 +748,7 @@ void serialize(ParentBlockSerializer& pbs, ISerializer& serializer) {
 
 void serializeBlockHeader(BlockHeader& header, ISerializer& serializer) {
   serializer(header.majorVersion, "major_version");
-  if (header.majorVersion > BLOCK_MAJOR_VERSION_6) {
+  if (header.majorVersion > BLOCK_MAJOR_VERSION_7) {
     throw std::runtime_error("Wrong major version");
   }
 

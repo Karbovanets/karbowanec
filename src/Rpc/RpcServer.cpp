@@ -23,8 +23,12 @@
 #include "BuiltinExplorer.h"
 #include "version.h"
 
+#include <algorithm>
+#include <array>
+#include <cstring>
 #include <future>
 #include <limits>
+#include <set>
 #include <unordered_map>
 #include <time.h>
 #include <boost/lexical_cast.hpp>
@@ -32,6 +36,7 @@
 
 // CryptoNote
 #include <crypto/crypto.h>
+#include "crypto/ct_ecdh.h"
 #include <crypto/random.h>
 #include "BlockchainExplorerData.h"
 #include "Common/Base58.h"
@@ -48,6 +53,7 @@
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "CryptoNoteCore/AccountNumber.h"
 #include "CryptoNoteCore/CryptoNoteBasicImpl.h"
+#include "CryptoNoteConfig.h"
 #include "CryptoNoteProtocol/ICryptoNoteProtocolQuery.h"
 #include "P2p/ConnectionContext.h"
 #include "P2p/NetNode.h"
@@ -68,6 +74,67 @@ template <typename T>
 static bool print_as_json(const T& obj) {
   std::cout << CryptoNote::storeToJson(obj) << ENDL;
   return true;
+}
+
+uint64_t getRpcTransactionFee(const Transaction& tx) {
+  uint64_t fee = 0;
+  return get_tx_fee(tx, fee) ? fee : 0;
+}
+
+uint64_t getRpcPublicOutputAmount(const Transaction& tx) {
+  return tx.version == TRANSACTION_VERSION_CT ? 0 : getOutputAmount(tx);
+}
+
+// formatExplorerAmount, hasConfidentialOutput, maskedAmountToHex and
+// appendPodArray now live in src/Rpc/BuiltinExplorer.cpp — they were
+// only ever used by the HTML explorer pages, which moved out.
+
+bool getOutputAmountForAddress(const TransactionOutput& output, const AccountPublicAddress& address,
+                               const Crypto::KeyDerivation& derivation, size_t outputIndex,
+                               uint64_t& amount) {
+  Crypto::PublicKey outputKey;
+  bool isConfidential = false;
+
+  if (output.target.type() == typeid(KeyOutput)) {
+    const KeyOutput& outKey = boost::get<KeyOutput>(output.target);
+    outputKey = outKey.key;
+    amount = output.amount;
+  } else if (output.target.type() == typeid(ConfidentialOutput)) {
+    const ConfidentialOutput& confidentialOutput = boost::get<ConfidentialOutput>(output.target);
+    outputKey = confidentialOutput.targetKey;
+    isConfidential = true;
+  } else {
+    return false;
+  }
+
+  Crypto::PublicKey derivedKey;
+  if (!Crypto::derive_public_key(derivation, outputIndex, address.spendPublicKey, derivedKey) || derivedKey != outputKey) {
+    return false;
+  }
+
+  if (!isConfidential) {
+    return true;
+  }
+
+  const ConfidentialOutput& confidentialOutput = boost::get<ConfidentialOutput>(output.target);
+  Crypto::MaskedAmount maskedAmount;
+  static_assert(sizeof(maskedAmount.data) == sizeof(confidentialOutput.maskedAmount), "Masked amount size mismatch");
+  std::memcpy(maskedAmount.data, confidentialOutput.maskedAmount.data(), sizeof(maskedAmount.data));
+
+  amount = Crypto::unmask_amount(derivation, outputIndex, maskedAmount);
+
+  Crypto::EllipticCurveScalar blindingFactor;
+  Crypto::derive_blinding_factor(derivation, outputIndex, blindingFactor);
+
+  Crypto::PublicKey expectedCommitment;
+  if (!Crypto::pedersen_commit(amount, blindingFactor, expectedCommitment)) {
+    return false;
+  }
+
+  Crypto::PublicKey commitment;
+  static_assert(sizeof(commitment) == sizeof(confidentialOutput.commitment), "Commitment size mismatch");
+  std::memcpy(&commitment, &confidentialOutput.commitment, sizeof(commitment));
+  return expectedCommitment == commitment;
 }
 
 template <typename Command>
@@ -752,13 +819,10 @@ bool RpcServer::checkIncomingTransactionForFee(const BinaryArray& tx_blob) {
     return false;
   }
 
-  // always relay fusion transactions
-  uint64_t inputs_amount = 0;
-  get_inputs_money_amount(tx, inputs_amount);
-  uint64_t outputs_amount = get_outs_money_amount(tx);
-
-  const uint64_t fee = inputs_amount - outputs_amount;
-  if (fee == 0 && m_core.currency().isFusionTransaction(tx, tx_blob.size(), m_core.getCurrentBlockchainHeight() - 1)) {
+  // always relay pre-CT-fork fusion transactions
+  const uint64_t fee = getRpcTransactionFee(tx);
+  const uint32_t height = m_core.getCurrentBlockchainHeight() == 0 ? 0 : m_core.getCurrentBlockchainHeight() - 1;
+  if (fee == 0 && m_core.currency().isFusionTransaction(tx, tx_blob.size(), height)) {
     logger(Logging::DEBUGGING) << "Masternode received fusion transaction, relaying with no fee check";
     return true;
   }
@@ -840,8 +904,18 @@ bool RpcServer::on_query_blocks_lite(const COMMAND_RPC_QUERY_BLOCKS_LITE::reques
   uint32_t startHeight;
   uint32_t currentHeight;
   uint32_t fullOffset;
-  if (!m_core.queryBlocksLite(req.blockIds, req.timestamp, startHeight, currentHeight, fullOffset, res.items)) {
-    res.status = "Failed to perform query";
+  try {
+    if (!m_core.queryBlocksLite(req.blockIds, req.timestamp, startHeight, currentHeight, fullOffset, res.items)) {
+      res.status = "Failed to perform query";
+      return false;
+    }
+  } catch (const std::exception& e) {
+    // queryBlocksLite goes through transactionByIndex which deserializes the
+    // stored tx blob — surface the exception in the daemon log instead of
+    // letting it bubble through the HTTP layer as an opaque 500 (which the
+    // wallet only sees as "Network error").
+    logger(Logging::ERROR, Logging::BRIGHT_RED) << "queryBlocksLite threw: " << e.what();
+    res.status = std::string("Failed to perform query: ") + e.what();
     return false;
   }
 
@@ -1331,7 +1405,7 @@ bool RpcServer::on_get_transactions_with_output_global_indexes_by_heights(const 
           e.timestamp = blk.timestamp;
           e.transaction = *static_cast<const TransactionPrefix*>(&txi.first);
           e.output_indexes = txi.second;
-          e.fee = is_coinbase(txi.first) ? 0 : getInputAmount(txi.first) - getOutputAmount(txi.first);
+          e.fee = is_coinbase(txi.first) ? 0 : getRpcTransactionFee(txi.first);
         }
       }
 
@@ -1442,26 +1516,22 @@ bool RpcServer::on_check_payment(const COMMAND_RPC_CHECK_PAYMENT_BY_PAYMENT_ID::
     std::vector<TransactionOutput> outputs;
     try {
       for (const TransactionOutput& o : tx.outputs) {
-        if (o.target.type() == typeid(KeyOutput)) {
-          const KeyOutput out_key = boost::get<KeyOutput>(o.target);
-          Crypto::PublicKey pubkey;
-          derive_public_key(derivation, keyIndex, address.spendPublicKey, pubkey);
-          if (pubkey == out_key.key) {
-            received += o.amount;
+        uint64_t outputAmount = 0;
+        if (getOutputAmountForAddress(o, address, derivation, keyIndex, outputAmount)) {
+          received += outputAmount;
 
-            // count confirmations only for actually paying tx
-            // and include only their hashes in responce
-            Crypto::Hash blockHash;
-            uint32_t blockHeight;
-            Crypto::Hash txHash = getObjectHash(tx);
-            if (std::find(rsp.transaction_hashes.begin(), rsp.transaction_hashes.end(), txHash) == rsp.transaction_hashes.end()) {
-              rsp.transaction_hashes.push_back(txHash);
-            }
-            if (m_core.getBlockContainingTx(txHash, blockHash, blockHeight)) {
-              uint32_t confirmations = m_protocolQuery.getObservedHeight() - blockHeight;
-              if  (rsp.confirmations < confirmations) {
-                   rsp.confirmations = confirmations;
-              }
+          // count confirmations only for actually paying tx
+          // and include only their hashes in responce
+          Crypto::Hash blockHash;
+          uint32_t blockHeight;
+          Crypto::Hash txHash = getObjectHash(tx);
+          if (std::find(rsp.transaction_hashes.begin(), rsp.transaction_hashes.end(), txHash) == rsp.transaction_hashes.end()) {
+            rsp.transaction_hashes.push_back(txHash);
+          }
+          if (m_core.getBlockContainingTx(txHash, blockHash, blockHeight)) {
+            uint32_t confirmations = m_protocolQuery.getObservedHeight() - blockHeight;
+            if  (rsp.confirmations < confirmations) {
+                 rsp.confirmations = confirmations;
             }
           }
         }
@@ -1573,8 +1643,10 @@ bool RpcServer::on_get_info(const COMMAND_RPC_GET_INFO::request& req, COMMAND_RP
   uint64_t alreadyGeneratedCoins = m_core.getTotalGeneratedAmount();
   // that large uint64_t number is unsafe in JavaScript environment and therefore as a JSON value so we display it as a formatted string
   res.already_generated_coins = m_core.currency().formatAmount(alreadyGeneratedCoins);
+  res.confidential_supply = m_core.currency().formatAmount(m_core.getConfidentialSupply());
+  res.pq_plain_supply     = m_core.currency().formatAmount(m_core.getPqPlainSupply());
   res.block_major_version = m_core.getCurrentBlockMajorVersion();
-  uint64_t nextReward = m_core.currency().calculateReward(alreadyGeneratedCoins);
+  uint64_t nextReward = m_core.currency().calculateReward(alreadyGeneratedCoins, m_core.getCurrentBlockchainHeight());
   res.next_reward = nextReward;
   if (!m_core.getBlockCumulativeDifficulty(res.height - 1, res.cumulative_difficulty)) {
     throw JsonRpc::JsonRpcError{
@@ -1989,9 +2061,10 @@ bool RpcServer::on_get_transactions_pool_short(const COMMAND_RPC_GET_TRANSACTION
     transaction_pool_response mempool_transaction;
     mempool_transaction.hash = Common::podToHex(txd.id);
     mempool_transaction.fee = txd.fee;
-    mempool_transaction.amount_out = getOutputAmount(txd.tx);
+    mempool_transaction.amount_out = getRpcPublicOutputAmount(txd.tx);
     mempool_transaction.size = txd.blobSize;
     mempool_transaction.receive_time = txd.receiveTime;
+    mempool_transaction.version = txd.tx.version;
     res.transactions.push_back(mempool_transaction);
   }
   res.status = CORE_RPC_STATUS_OK;
@@ -2052,14 +2125,13 @@ bool RpcServer::on_get_transactions_by_payment_id(const COMMAND_RPC_GET_TRANSACT
 
   for (const Transaction& tx : transactions) {
     transaction_short_response transaction_short;
-    uint64_t amount_in = 0;
-    get_inputs_money_amount(tx, amount_in);
-    uint64_t amount_out = get_outs_money_amount(tx);
+    uint64_t amount_out = getRpcPublicOutputAmount(tx);
 
     transaction_short.hash = Common::podToHex(getObjectHash(tx));
-    transaction_short.fee = amount_in - amount_out;
+    transaction_short.fee = getRpcTransactionFee(tx);
     transaction_short.amount_out = amount_out;
     transaction_short.size = getObjectBinarySize(tx);
+    transaction_short.version = tx.version;
     res.transactions.push_back(transaction_short);
   }
 
@@ -2354,14 +2426,10 @@ bool RpcServer::on_check_transaction_key(const COMMAND_RPC_CHECK_TRANSACTION_KEY
   std::vector<TransactionOutput> outputs;
   try {
     for (const TransactionOutput& o : transaction.outputs) {
-      if (o.target.type() == typeid(KeyOutput)) {
-        const KeyOutput out_key = boost::get<KeyOutput>(o.target);
-        Crypto::PublicKey pubkey;
-        derive_public_key(derivation, keyIndex, address.spendPublicKey, pubkey);
-        if (pubkey == out_key.key) {
-          received += o.amount;
-          outputs.push_back(o);
-        }
+      uint64_t outputAmount = 0;
+      if (getOutputAmountForAddress(o, address, derivation, keyIndex, outputAmount)) {
+        received += outputAmount;
+        outputs.push_back(o);
       }
       ++keyIndex;
     }
@@ -2427,14 +2495,10 @@ bool RpcServer::on_check_transaction_with_view_key(const COMMAND_RPC_CHECK_TRANS
   std::vector<TransactionOutput> outputs;
   try {
     for (const TransactionOutput& o : transaction.outputs) {
-      if (o.target.type() == typeid(KeyOutput)) {
-        const KeyOutput out_key = boost::get<KeyOutput>(o.target);
-        Crypto::PublicKey pubkey;
-        derive_public_key(derivation, keyIndex, address.spendPublicKey, pubkey);
-        if (pubkey == out_key.key) {
-          received += o.amount;
-          outputs.push_back(o);
-        }
+      uint64_t outputAmount = 0;
+      if (getOutputAmountForAddress(o, address, derivation, keyIndex, outputAmount)) {
+        received += outputAmount;
+        outputs.push_back(o);
       }
       ++keyIndex;
     }
@@ -2522,14 +2586,10 @@ bool RpcServer::on_check_transaction_proof(const COMMAND_RPC_CHECK_TRANSACTION_P
     std::vector<TransactionOutput> outputs;
     try {
       for (const TransactionOutput& o : transaction.outputs) {
-        if (o.target.type() == typeid(KeyOutput)) {
-          const KeyOutput out_key = boost::get<KeyOutput>(o.target);
-          Crypto::PublicKey pubkey;
-          derive_public_key(derivation, keyIndex, address.spendPublicKey, pubkey);
-          if (pubkey == out_key.key) {
-            received += o.amount;
-            outputs.push_back(o);
-          }
+        uint64_t outputAmount = 0;
+        if (getOutputAmountForAddress(o, address, derivation, keyIndex, outputAmount)) {
+          received += outputAmount;
+          outputs.push_back(o);
         }
         ++keyIndex;
       }

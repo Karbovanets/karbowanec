@@ -58,6 +58,40 @@ Karbo node v. )" PROJECT_VERSION_LONG R"( &bull; )";
 
 const std::string index_finish = " </body></html>";
 
+// Format a per-output amount in the explorer's tables. CT confidential
+// outputs use the CT_CONFIDENTIAL_OUTPUT_AMOUNT sentinel in their wire
+// amount field; render them as "hidden" so the explorer doesn't show
+// the sentinel as if it were the real amount.
+std::string formatExplorerAmount(const Currency& currency, uint64_t amount) {
+  return amount == parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT ? "hidden" : currency.formatAmount(amount);
+}
+
+// True if any output on this tx is a ConfidentialOutput. Used to suppress
+// the public "sum of outputs" line on CT txs (where the public sum does
+// not include hidden amounts).
+bool hasConfidentialOutput(const TransactionDetails& tx) {
+  return std::any_of(tx.outputs.begin(), tx.outputs.end(), [](const transactionOutputDetails2& out) {
+    return out.output.target.type() == typeid(ConfidentialOutput);
+  });
+}
+
+std::string maskedAmountToHex(const std::array<uint8_t, 8>& amount) {
+  return Common::toHex(amount.data(), amount.size());
+}
+
+// Render a fixed-size array of POD fields (GK proof's I[6] / A[6] /
+// B[6] / Q[6] etc.) as a numbered list.
+template <typename T, size_t N>
+void appendPodArray(std::string& body, const std::string& label, const T (&values)[N]) {
+  body += "  <li>" + label + "\n";
+  body += "    <ol>\n";
+  for (size_t i = 0; i < N; ++i) {
+    body += "      <li class=\"wrap\">" + Common::podToHex(values[i]) + "</li>\n";
+  }
+  body += "    </ol>\n";
+  body += "  </li>\n";
+}
+
 } // anonymous namespace
 
 BuiltinExplorer::BuiltinExplorer(Core& core,
@@ -133,13 +167,18 @@ bool BuiltinExplorer::on_get_payment_id(const COMMAND_HTTP::request& /*req*/, CO
 
 bool BuiltinExplorer::on_get_explorer(const COMMAND_EXPLORER::request& req, COMMAND_EXPLORER::response& res) {
   uint32_t top_block_index = m_core.getCurrentBlockchainHeight() - 1;
+  uint64_t accountRegistrationsCount = 0;
+  m_core.getCanonicalAccountRegistrationsCount(accountRegistrationsCount);
   std::string body = index_start + (m_core.currency().isTestnet() ? "testnet" : "mainnet") +
     "\n<p>" + "Height: <b>" + std::to_string(top_block_index) + "</b>" +
     " &bull; " + "Difficulty: <b>" + std::to_string(m_core.getNextBlockDifficulty()) + "</b>" +
     " &bull; " + "Alt. blocks: <b>" + std::to_string(m_core.getAlternativeBlocksCount()) + "</b>" +
     " &bull; " + "Transactions: <b>" + std::to_string(m_core.getBlockchainTotalTransactions() - top_block_index + 1) + "</b>" +
-    " &bull; " + "Emission: <b>" + m_core.currency().formatAmount(m_core.getTotalGeneratedAmount()) + "</b>" +
-    " &bull; " + "Next reward: <b>" + m_core.currency().formatAmount(m_core.currency().calculateReward(m_core.getTotalGeneratedAmount())) + "</b>" +
+    " &bull; " + "Account numbers: <b>" + std::to_string(accountRegistrationsCount) + "</b>" +
+    "</p>\n<p>" +
+    "Total supply: <b>" + m_core.currency().formatAmount(m_core.getTotalGeneratedAmount()) + "</b>" +
+    " &bull; " + "Confidential supply: <b>" + m_core.currency().formatAmount(m_core.getConfidentialSupply()) + "</b>" +
+    " &bull; " + "Next reward: <b>" + m_core.currency().formatAmount(m_core.currency().calculateReward(m_core.getTotalGeneratedAmount(), m_core.getCurrentBlockchainHeight())) + "</b>" +
     "</p>\n";
 
   const uint32_t print_blocks_count = 10;
@@ -537,10 +576,27 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
       body += "  </li>\n";
     }
     body += "  <li>\n";
-    body += "    Sum of outputs: " + m_core.currency().formatAmount(transactionsDetails.totalOutputsAmount) + "\n";
+    const bool txHasConfidentialOutput = hasConfidentialOutput(transactionsDetails);
+    if (txHasConfidentialOutput && transactionsDetails.totalOutputsAmount == 0) {
+      body += "    Sum of outputs: hidden (confidential)\n";
+    } else if (txHasConfidentialOutput) {
+      body += "    Public output amount: " + m_core.currency().formatAmount(transactionsDetails.totalOutputsAmount)
+        + " (confidential outputs hidden)\n";
+    } else {
+      body += "    Sum of outputs: " + m_core.currency().formatAmount(transactionsDetails.totalOutputsAmount) + "\n";
+    }
+    body += "  </li>\n";
+    body += "  <li>\n";
+    body += "    Fee: " + m_core.currency().formatAmount(transactionsDetails.fee) + "\n";
     body += "  </li>\n";
     body += "  <li>\n";
     body += "    Size: " + std::to_string(transactionsDetails.size) + "\n";
+    body += "  </li>\n";
+    body += "  <li>\n";
+    body += "    Inputs: " + std::to_string(transactionsDetails.inputs.size()) + "\n";
+    body += "  </li>\n";
+    body += "  <li>\n";
+    body += "    Outputs: " + std::to_string(transactionsDetails.outputs.size()) + "\n";
     body += "  </li>\n";
     body += "  <li>\n";
     body += "    Unlock time: " + std::to_string(transactionsDetails.unlockTime) + "\n";
@@ -549,7 +605,15 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
     body += "    Version: " + std::to_string(transactionsDetails.version) + "\n";
     body += "  </li>\n";
     body += "  <li>\n";
-    body += "    Mixin count: " + std::to_string(transactionsDetails.mixin) + "\n";
+    if (transactionsDetails.minMixin == transactionsDetails.mixin) {
+      body += "    Mixin count: " + std::to_string(transactionsDetails.mixin) + "\n";
+    } else {
+      // Mixed ring sizes (e.g. ring-1 coinbase shielding + ring-N normal CT)
+      body += "    Mixin count: "
+           + std::to_string(transactionsDetails.minMixin) + ".."
+           + std::to_string(transactionsDetails.mixin)
+           + " (varies per input - see Inputs table)\n";
+    }
     body += "  </li>\n";
     body += "  <li>\n";
     body += "    Public key: <span class=\"wrap\">" + Common::podToHex(transactionsDetails.extra.publicKey) + "</span>\n";
@@ -557,6 +621,14 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
     if (transactionsDetails.hasPaymentId) {
       body += "  <li>\n";
       body += "    Payment ID: <span class=\"wrap\">" + Common::podToHex(transactionsDetails.paymentId) + "</span>\n";
+      body += "  </li>\n";
+    }
+    body += "  <li>\n";
+    body += "    Extra size: " + std::to_string(transactionsDetails.extra.size) + "\n";
+    body += "  </li>\n";
+    if (!transactionsDetails.extra.raw.empty()) {
+      body += "  <li>\n";
+      body += "    Extra raw: <span class=\"wrap\">" + Common::toHex(transactionsDetails.extra.raw) + "</span>\n";
       body += "  </li>\n";
     }
     // Check for account registration in tx extra
@@ -610,7 +682,7 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
     body += "<table class=\"counter\" cellpadding=\"10px\">\n";
     body += "  <thead>\n";
     body += "  <tr>\n";
-    body += "    <th>No</th><th>Amount</th><th>Key image</th><th>Output indexes (references)</th>\n";
+    body += "    <th>No</th><th>Amount</th><th>Key image</th><th>Pseudo commitment</th><th>Output indexes (references)<br />Key Offset - Output No</th>\n";
     body += "  </tr>\n";
     body += "</thead>\n";
     body += "<tbody>\n";
@@ -622,22 +694,54 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
       if (in.type() == typeid(BaseInputDetails)) {
         BaseInputDetails c = boost::get<BaseInputDetails>(in);
         body += m_core.currency().formatAmount(c.amount);
-        body += "</td>\n    <td colspan=\"2\">coinbase</td>\n";
+        body += "</td>\n    <td colspan=\"3\">coinbase</td>\n";
       }
       else if (in.type() == typeid(KeyInputDetails)) {
         KeyInputDetails k = boost::get<KeyInputDetails>(in);
         body += m_core.currency().formatAmount(k.input.amount);
         body += "</td>\n    <td class=\"wrap\">";
         body += Common::podToHex(k.input.keyImage);
+        body += "</td>\n    <td>-";
         body += "</td>\n    <td>";
-        for (size_t i = 0; i < k.input.outputIndexes.size(); ++i) {
-          body += "    <a href=\"/explorer/tx/" + Common::podToHex(k.outputs[i].transactionHash) + "\">";
-          body += std::to_string(k.input.outputIndexes[i]); // key_offset
-          body += " (output No " + std::to_string(k.outputs[i].number) +")</a>"; // tx output reference
-          body += ", ";
+        if (k.outputs.empty()) {
+          body += "references unavailable";
+        } else {
+          for (size_t n = 0; n < k.outputs.size(); ++n) {
+            body += "    <a href=\"/explorer/tx/" + Common::podToHex(k.outputs[n].transactionHash) + "\">";
+            body += (n < k.input.outputIndexes.size() ? std::to_string(k.input.outputIndexes[n]) : "?"); // key_offset
+            body += " - " + std::to_string(k.outputs[n].number) +"</a>"; // tx output reference
+            if (n + 1 < k.outputs.size()) body += ", ";
+          }
         }
-        body.pop_back();
-        body.pop_back();
+        body += "    </td>\n";
+      }
+      else if (in.type() == typeid(ConfidentialInputDetails)) {
+        ConfidentialInputDetails c = boost::get<ConfidentialInputDetails>(in);
+        // Mixed-bucket rings: report unique buckets used by ring members.
+        std::set<uint64_t> bucketSet;
+        for (const auto& m : c.ringMembers) bucketSet.insert(m.amount);
+        if (bucketSet.size() == 1) {
+          body += formatExplorerAmount(m_core.currency(), *bucketSet.begin());
+        } else {
+          body += "mixed (" + std::to_string(bucketSet.size()) + " buckets)";
+        }
+        body += "</td>\n    <td class=\"wrap\">";
+        body += Common::podToHex(c.keyImage);
+        body += "</td>\n    <td class=\"wrap\">";
+        body += Common::podToHex(c.pseudoCommitment);
+        body += "</td>\n    <td>";
+        if (c.outputs.empty()) {
+          body += "ring of " + std::to_string(c.mixin) + " (references unavailable)";
+        } else {
+          for (size_t k = 0; k < c.outputs.size(); ++k) {
+            body += "    <a href=\"/explorer/tx/" + Common::podToHex(c.outputs[k].transactionHash) + "\">";
+            if (k < c.ringMembers.size()) {
+              body += std::to_string(c.ringMembers[k].outputIndex) + " ";
+            }
+            body += " - " + std::to_string(c.outputs[k].number) + "</a>";
+            if (k + 1 < c.outputs.size()) body += ", ";
+          }
+        }
         body += "    </td>\n";
       }
       body += "  </tr>\n";
@@ -650,7 +754,7 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
     body += "<table class=\"counter\" cellpadding=\"10px\">\n";
     body += "  <thead>\n";
     body += "  <tr>\n";
-    body += "    <th>No</th><th>Amount</th><th>Public key (stealth address)</th><th>Global index</th>\n";
+    body += "    <th>No</th><th>Type</th><th>Amount</th><th>Public key (stealth address)</th><th>Commitment</th><th>Masked amount</th><th>Global index</th>\n";
     body += "  </tr>\n";
     body += "</thead>\n";
     body += "<tbody>\n";
@@ -659,11 +763,30 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
       body += "  <tr>\n";
       body += "    <td>" + std::to_string(i) + ")</td>";
       body += "    <td>";
-      body += m_core.currency().formatAmount(o.output.amount);
+      if (o.output.target.type() == typeid(ConfidentialOutput)) {
+        body += "Confidential";
+      } else {
+        body += "Key";
+      }
+      body += "</td>\n    <td>";
+      if (o.output.target.type() == typeid(ConfidentialOutput)) {
+        body += "hidden";
+      } else {
+        body += m_core.currency().formatAmount(o.output.amount);
+      }
       body += "</td>\n    <td class=\"wrap\">";
       if (o.output.target.type() == typeid(KeyOutput)) {
         KeyOutput ko = boost::get<KeyOutput>(o.output.target);
-        body += Common::podToHex(ko);
+        body += Common::podToHex(ko.key);
+        body += "</td>\n    <td>-";
+        body += "</td>\n    <td>-";
+      } else if (o.output.target.type() == typeid(ConfidentialOutput)) {
+        ConfidentialOutput co = boost::get<ConfidentialOutput>(o.output.target);
+        body += Common::podToHex(co.targetKey);
+        body += "</td>\n    <td class=\"wrap\">";
+        body += Common::podToHex(co.commitment);
+        body += "</td>\n    <td class=\"wrap\">";
+        body += maskedAmountToHex(co.maskedAmount);
       }
       body += "</td>\n    <td>";
       body += std::to_string(o.globalIndex);
@@ -673,23 +796,117 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
     body += "</tbody>\n";
     body += "</table>\n";
 
-    // no signatures e.g. in coinbase
-    if (!transactionsDetails.signatures.empty()) {
-      body += "<h3>Signatures</h3>\n";
-
+    // Unified "Input signatures" section. Each input gets one entry whose
+    // body is dispatched off the per-input variant:
+    //   vector<Signature> → legacy ring signature (v1 tx, or v2 KeyInput shielding)
+    //   CTInputSignature  → Triptych spend proof (v2 ConfidentialInput)
+    //   boost::blank      → coinbase (BaseInput), no authorization
+    const auto& sigs = transactionsDetails.signatures;
+    const size_t inputCount = sigs.size();
+    if (inputCount > 0) {
+      body += "<h3>Input signatures</h3>\n";
       body += "<ol>\n";
-      for (const auto& s0 : transactionsDetails.signatures) {
-        body += "  <li>\n";
-        body += "    <ol>\n";
-        for (const auto& s1 : s0) {
-          body += "      <li class=\"wrap\">\n";
-          body += "    " + Common::podToHex(s1) + "\n";
-          body += "      </li>\n";
+
+      auto dumpPointArray =
+          [&](const std::vector<Crypto::EllipticCurvePoint>& arr, const char* label) {
+        body += "        <li>" + std::string(label) + "\n          <ol>\n";
+        for (const auto& p : arr) {
+          body += "            <li><span class=\"wrap\">" + Common::podToHex(p) + "</span></li>\n";
         }
-        body += "    </ol>\n";
+        body += "          </ol>\n        </li>\n";
+      };
+      auto dumpScalarArray =
+          [&](const std::vector<Crypto::EllipticCurveScalar>& arr, const char* label) {
+        body += "        <li>" + std::string(label) + "\n          <ol>\n";
+        for (const auto& s : arr) {
+          body += "            <li><span class=\"wrap\">" + Common::podToHex(s) + "</span></li>\n";
+        }
+        body += "          </ol>\n        </li>\n";
+      };
+
+      for (size_t i = 0; i < inputCount; ++i) {
+        body += "  <li>\n";
+        body += "    <details open>\n";
+
+        if (isCtInputSig(sigs[i])) {
+          const auto& signature = ctInputSig(sigs[i]);
+          const size_t n = signature.I_bits.size();
+          const size_t ring_size = static_cast<size_t>(1) << n;
+          body += "      <summary>Input " + std::to_string(i) +
+                  " &mdash; Triptych spend proof"
+                  " (n=" + std::to_string(n) +
+                  ", ring size " + std::to_string(ring_size) + ")</summary>\n";
+          body += "      <ul>\n";
+          dumpPointArray(signature.I_bits, "I_bits");
+          dumpPointArray(signature.A,      "A");
+          dumpPointArray(signature.B,      "B");
+          dumpPointArray(signature.Q_P,    "Q_P");
+          dumpPointArray(signature.Q_M,    "Q_M");
+          dumpPointArray(signature.Q_U,    "Q_U");
+          dumpScalarArray(signature.z,  "z");
+          dumpScalarArray(signature.za, "za");
+          dumpScalarArray(signature.zb, "zb");
+          body += "        <li>f_P: <span class=\"wrap\">" + Common::podToHex(signature.f_P) + "</span></li>\n";
+          body += "        <li>f_M: <span class=\"wrap\">" + Common::podToHex(signature.f_M) + "</span></li>\n";
+          body += "        <li>f_U: <span class=\"wrap\">" + Common::podToHex(signature.f_U) + "</span></li>\n";
+          body += "      </ul>\n";
+        } else if (isKeyInputSig(sigs[i])) {
+          // Legacy ring signature: v1 transparent input, or v2 KeyInput
+          // shielding into the CT pool.
+          const bool isV2KeyInput = (transactionsDetails.version == TRANSACTION_VERSION_CT);
+          body += "      <summary>Input " + std::to_string(i) +
+                  " &mdash; " +
+                  (isV2KeyInput ? "transparent shielding (legacy ring signature)"
+                                : "legacy ring signature") +
+                  "</summary>\n";
+          body += "      <ol>\n";
+          for (const auto& s1 : keyInputSig(sigs[i])) {
+            body += "        <li class=\"wrap\">" + Common::podToHex(s1) + "</li>\n";
+          }
+          body += "      </ol>\n";
+        } else {
+          // boost::blank — BaseInput (coinbase) slot.
+          body += "      <summary>Input " + std::to_string(i) +
+                  " &mdash; coinbase (no signature)</summary>\n";
+        }
+
+        body += "    </details>\n";
         body += "  </li>\n";
       }
       body += "</ol>\n";
+    }
+
+    if (transactionsDetails.version == TRANSACTION_VERSION_CT) {
+      body += "<h3>CT kernel</h3>\n";
+      body += "<ul>\n";
+      body += "  <li>Excess commitment: <span class=\"wrap\">" + Common::podToHex(transactionsDetails.kernel.excessCommitment) + "</span></li>\n";
+      body += "  <li>Signature e: <span class=\"wrap\">" + Common::podToHex(transactionsDetails.kernel.sigE) + "</span></li>\n";
+      body += "  <li>Signature s: <span class=\"wrap\">" + Common::podToHex(transactionsDetails.kernel.sigS) + "</span></li>\n";
+      body += "</ul>\n";
+
+      if (!transactionsDetails.ctProofs.empty()) {
+        body += "<h3>CT output proofs</h3>\n";
+        body += "<ol>\n";
+        for (size_t i = 0; i < transactionsDetails.ctProofs.size(); ++i) {
+          const auto& proof = transactionsDetails.ctProofs[i];
+          body += "  <li>\n";
+          body += "    <details>\n";
+          body += "      <summary>Output " + std::to_string(i) + " GK denomination proof</summary>\n";
+          body += "      <ul>\n";
+          appendPodArray(body, "I", proof.I);
+          appendPodArray(body, "A", proof.A);
+          appendPodArray(body, "B", proof.B);
+          appendPodArray(body, "Q", proof.Q);
+          appendPodArray(body, "z", proof.z);
+          appendPodArray(body, "za", proof.za);
+          appendPodArray(body, "zb", proof.zb);
+          body += "        <li>f: <span class=\"wrap\">" + Common::podToHex(proof.f) + "</span></li>\n";
+          body += "      </ul>\n";
+          body += "    </details>\n";
+          body += "  </li>\n";
+        }
+        body += "</ol>\n";
+      }
     }
 
     body += index_finish;
@@ -707,6 +924,7 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
 
   return true;
 }
+
 
 bool BuiltinExplorer::on_get_explorer_txs_by_payment_id(const COMMAND_EXPLORER_GET_TRANSACTIONS_BY_PAYMENT_ID::request& req, COMMAND_EXPLORER_GET_TRANSACTIONS_BY_PAYMENT_ID::response& res) {
   Crypto::Hash paymentId;

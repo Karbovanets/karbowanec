@@ -29,12 +29,28 @@ namespace CryptoNote {
 
 namespace TransactionTypes {
   
-  enum class InputType : uint8_t { Invalid, Key, Generating };
-  enum class OutputType : uint8_t { Invalid, Key };
+  enum class InputType : uint8_t { Invalid, Key, Generating, Confidential };
+  enum class OutputType : uint8_t { Invalid, Key, Confidential };
 
   struct GlobalOutput {
+    GlobalOutput() = default;
+    GlobalOutput(const Crypto::PublicKey& targetKey, uint32_t outputIndex) :
+      targetKey(targetKey), outputIndex(outputIndex) {
+    }
+
     Crypto::PublicKey targetKey;
-    uint32_t outputIndex;
+    Crypto::EllipticCurvePoint commitment{};
+    uint32_t outputIndex = 0;
+    uint32_t blockHeight = 0;
+    bool isCoinbase = false;
+    bool isConfidential = false;
+    // Bucket amount this ring member lives in: for transparent outputs, the
+    // on-chain amount; for confidential outputs, CT_CONFIDENTIAL_OUTPUT_AMOUNT.
+    // Lets CT inputs assemble mixed rings (transparent + confidential decoys)
+    // where each member names its own bucket. Defaults to 0 so legacy callers
+    // that ignore this field don't accidentally end up with non-zero garbage;
+    // the CT wallet path populates it explicitly.
+    uint64_t amount = 0;
   };
 
   typedef std::vector<GlobalOutput> GlobalOutputsContainer;
@@ -46,9 +62,15 @@ namespace TransactionTypes {
   };
 
   struct InputKeyInfo {
+    // Legacy single-bucket field: still used by transparent KeyInput rings.
+    // For CT inputs with mixed-bucket rings, the per-member amount on each
+    // GlobalOutput in `outputs` is authoritative and this field is ignored.
     uint64_t amount;
     GlobalOutputsContainer outputs;
     OutputKeyInfo realOutput;
+    uint64_t realOutputAmount = 0;
+    Crypto::EllipticCurveScalar realOutputBlinding{};
+    bool realOutputIsConfidential = false;
   };
 }
 
@@ -83,6 +105,7 @@ public:
   virtual uint64_t getOutputTotalAmount() const = 0;
   virtual TransactionTypes::OutputType getOutputType(size_t index) const = 0;
   virtual void getOutput(size_t index, KeyOutput& output, uint64_t& amount) const = 0;
+  virtual void getOutput(size_t index, ConfidentialOutput& output) const = 0;
 
   // signatures
   virtual size_t getRequiredSignaturesCount(size_t inputIndex) const = 0;

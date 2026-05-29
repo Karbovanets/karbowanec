@@ -313,13 +313,17 @@ bool ICoreStub::getAlreadyGeneratedCoins(const Crypto::Hash& hash, uint64_t& gen
 }
 
 bool ICoreStub::getBlockReward(uint8_t blockMajorVersion, size_t medianSize, size_t currentBlockSize, uint64_t alreadyGeneratedCoins, uint64_t fee,
-    uint64_t& reward, int64_t& emissionChange) {
+    uint64_t& reward, int64_t& emissionChange, uint32_t height) {
   reward = 0;
   emissionChange = 0;
   return true;
 }
 
 bool ICoreStub::scanOutputkeysForIndices(const CryptoNote::KeyInput& txInToKey, std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) {
+  return true;
+}
+
+bool ICoreStub::scanCtInputRingForIndices(const CryptoNote::ConfidentialInput& cin, std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) {
   return true;
 }
 
@@ -566,6 +570,24 @@ uint64_t ICoreStub::getTotalGeneratedAmount() {
   return generatedCoins;
 }
 
+uint64_t ICoreStub::getConfidentialSupply() {
+  return 0;
+}
+
+uint64_t ICoreStub::getPqPlainSupply() {
+  return 0;
+}
+
+bool ICoreStub::getConfidentialSupplyAtBlock(const Crypto::Hash& /*blockHash*/, uint64_t& supply) {
+  supply = 0;
+  return true;
+}
+
+bool ICoreStub::getPqPlainSupplyAtBlock(const Crypto::Hash& /*blockHash*/, uint64_t& supply) {
+  supply = 0;
+  return true;
+}
+
 bool ICoreStub::check_tx_fee(const CryptoNote::Transaction& tx, const Crypto::Hash& txHash, size_t blobSize, CryptoNote::tx_verification_context& tvc, uint32_t height) {
   return true;
 }
@@ -589,6 +611,11 @@ size_t ICoreStub::getBlockchainTotalTransactions() {
 }
 
 uint32_t ICoreStub::getCurrentBlockchainHeight() {
+  // Tests can advance the height via set_blockchain_top() without populating
+  // the blocks vector (e.g. tx_pool tests that need to land past CT_FORK_HEIGHT
+  // to exercise CT-version gating). Honor an explicit topHeight whenever it
+  // has been set; fall back to the empty-blocks=>0 sentinel otherwise.
+  if (topHeight > 0) return topHeight + 1;
   return blocks.empty() ? 0 : topHeight + 1;
 }
 

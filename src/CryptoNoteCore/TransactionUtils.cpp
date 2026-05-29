@@ -17,9 +17,11 @@
 
 #include "TransactionUtils.h"
 
+#include <cstring>
 #include <unordered_set>
 
 #include "crypto/crypto.h"
+#include "crypto/ct_ecdh.h"
 #include "CryptoNoteCore/Account.h"
 #include "CryptoNoteFormatUtils.h"
 #include "TransactionExtra.h"
@@ -62,6 +64,9 @@ TransactionTypes::InputType getTransactionInputType(const TransactionInput& in) 
   if (in.type() == typeid(BaseInput)) {
     return TransactionTypes::InputType::Generating;
   }
+  if (in.type() == typeid(ConfidentialInput)) {
+    return TransactionTypes::InputType::Confidential;
+  }
   return TransactionTypes::InputType::Invalid;
 }
 
@@ -85,6 +90,9 @@ const TransactionInput& getInputChecked(const CryptoNote::TransactionPrefix& tra
 TransactionTypes::OutputType getTransactionOutputType(const TransactionOutputTarget& out) {
   if (out.type() == typeid(KeyOutput)) {
     return TransactionTypes::OutputType::Key;
+  }
+  if (out.type() == typeid(ConfidentialOutput)) {
+    return TransactionTypes::OutputType::Confidential;
   }
   return TransactionTypes::OutputType::Invalid;
 }
@@ -127,11 +135,32 @@ bool findOutputsToAccount(const CryptoNote::TransactionPrefix& transaction, cons
   generate_key_derivation(txPubKey, keys.viewSecretKey, derivation);
 
   for (const TransactionOutput& o : transaction.outputs) {
-    assert(o.target.type() == typeid(KeyOutput));
     if (o.target.type() == typeid(KeyOutput)) {
       if (is_out_to_acc(keys, boost::get<KeyOutput>(o.target), derivation, keyIndex)) {
         out.push_back(outputIndex);
         amount += o.amount;
+      }
+      ++keyIndex;
+    } else if (o.target.type() == typeid(ConfidentialOutput)) {
+      // CT outputs use the same stealth-address scheme as transparent KeyOutput
+      // (targetKey = Hs(8aR||idx)*G + B). Holders of the view secret key can
+      // detect ownership via ECDH and recover the hidden amount via the masked-amount
+      // ECDH unmask + commitment check. This lets node operators with their view-secret
+      // configured (e.g. masternode-fee enforcement) check CT-paid fees correctly.
+      const ConfidentialOutput& ctOut = boost::get<ConfidentialOutput>(o.target);
+      if (isOutToKey(addr.spendPublicKey, ctOut.targetKey, derivation, keyIndex)) {
+        Crypto::MaskedAmount masked;
+        std::memcpy(masked.data, ctOut.maskedAmount.data(), sizeof(masked.data));
+        const Crypto::PublicKey& commitmentPK =
+            reinterpret_cast<const Crypto::PublicKey&>(ctOut.commitment);
+        uint64_t recoveredAmount = 0;
+        Crypto::EllipticCurveScalar blindingFactor;
+        if (Crypto::decrypt_and_verify_output(viewSecretKey, txPubKey, keyIndex,
+                                               masked, commitmentPK,
+                                               recoveredAmount, blindingFactor)) {
+          out.push_back(outputIndex);
+          amount += recoveredAmount;
+        }
       }
       ++keyIndex;
     }

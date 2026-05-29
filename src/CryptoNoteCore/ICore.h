@@ -105,8 +105,9 @@ public:
   virtual bool getBlockSize(const Crypto::Hash& hash, size_t& size) = 0;
   virtual bool getAlreadyGeneratedCoins(const Crypto::Hash& hash, uint64_t& generatedCoins) = 0;
   virtual bool getBlockReward(uint8_t blockMajorVersion, size_t medianSize, size_t currentBlockSize, uint64_t alreadyGeneratedCoins, uint64_t fee,
-                              uint64_t& reward, int64_t& emissionChange) = 0;
+                              uint64_t& reward, int64_t& emissionChange, uint32_t height = 0) = 0;
   virtual bool scanOutputkeysForIndices(const KeyInput& txInToKey, std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) = 0;
+  virtual bool scanCtInputRingForIndices(const ConfidentialInput& cin, std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) = 0;
   virtual bool getBlockDifficulty(uint32_t height, difficulty_type& difficulty) = 0;
   virtual bool getBlockCumulativeDifficulty(uint32_t height, difficulty_type& difficulty) = 0;
   virtual bool getBlockTimestamp(uint32_t height, uint64_t& timestamp) = 0;
@@ -122,6 +123,20 @@ public:
   virtual uint64_t getMinimalFee() = 0;
   virtual uint64_t getNextBlockDifficulty() = 0;
   virtual uint64_t getTotalGeneratedAmount() = 0;
+  // Total visible value currently locked inside the ECC CT pool (consensus-tracked).
+  // Returns 0 before the CT fork. Allows external observers / RPC to surface the
+  // remaining liability so the chain can later force or encourage CT exits and,
+  // once this reaches zero, the CT subsystem can be safely deactivated.
+  virtual uint64_t getConfidentialSupply() = 0;
+  // Total visible value held by PQ-owned plain outputs. Stubbed at 0 today;
+  // included so the consensus invariant
+  //   visible_plain_supply + pq_plain_supply + confidential_supply
+  //     == already_generated_coins
+  // is forward-compatible with future PQ-plain activation.
+  virtual uint64_t getPqPlainSupply() = 0;
+  // Per-block lookups for explorer/RPC. Return false if the block is unknown.
+  virtual bool getConfidentialSupplyAtBlock(const Crypto::Hash& blockHash, uint64_t& supply) = 0;
+  virtual bool getPqPlainSupplyAtBlock(const Crypto::Hash& blockHash, uint64_t& supply) = 0;
   virtual bool check_tx_fee(const Transaction& tx, const Crypto::Hash& txHash, size_t blobSize, tx_verification_context& tvc, uint32_t height) = 0;
   virtual size_t getPoolTransactionsCount() = 0;
   virtual size_t getBlockchainTotalTransactions() = 0;

@@ -20,6 +20,7 @@
 #include "IWalletLegacy.h"
 #include "Common/StdInputStream.h"
 #include "Common/StdOutputStream.h"
+#include "CryptoNoteConfig.h"
 #include "CryptoNoteCore/CryptoNoteBasicImpl.h"
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "Serialization/BinaryInputStreamSerializer.h"
@@ -32,7 +33,10 @@ using namespace Logging;
 
 namespace CryptoNote {
 
-void serialize(TransactionInformation& ti, CryptoNote::ISerializer& s) {
+// Version 3 added the explicit `fee` and `isBase` fields. Containers written by
+// older code (version <= 2) don't carry them; on load they default to 0/false
+// and are refilled on the next rescan (only the rescan path consumes them).
+static void serializeTransactionInformation(TransactionInformation& ti, uint32_t version, CryptoNote::ISerializer& s) {
   s(ti.transactionHash, "");
   s(ti.publicKey, "");
   serializeBlockHeight(s, ti.blockHeight, "");
@@ -42,9 +46,13 @@ void serialize(TransactionInformation& ti, CryptoNote::ISerializer& s) {
   s(ti.totalAmountOut, "");
   s(ti.extra, "");
   s(ti.paymentId, "");
+  if (version >= 3) {
+    s(ti.fee, "");
+    s(ti.isBase, "");
+  }
 }
 
-const uint32_t TRANSFERS_CONTAINER_STORAGE_VERSION = 0;
+const uint32_t TRANSFERS_CONTAINER_STORAGE_VERSION = 3;
 
 namespace {
   template<typename TIterator>
@@ -110,7 +118,7 @@ SpentOutputDescriptor::SpentOutputDescriptor(const TransactionOutputInformationI
     m_type(transactionInfo.type),
     m_amount(0),
     m_globalOutputIndex(0) {
-  if (m_type == TransactionTypes::OutputType::Key) {
+  if (m_type == TransactionTypes::OutputType::Key || m_type == TransactionTypes::OutputType::Confidential) {
     m_keyImage = &transactionInfo.keyImage;
   } else {
     assert(false);
@@ -131,8 +139,9 @@ bool SpentOutputDescriptor::isValid() const {
 }
 
 bool SpentOutputDescriptor::operator==(const SpentOutputDescriptor& other) const {
-  if (m_type == TransactionTypes::OutputType::Key) {
-    return other.m_type == m_type && *other.m_keyImage == *m_keyImage;
+  if (m_type == TransactionTypes::OutputType::Key || m_type == TransactionTypes::OutputType::Confidential) {
+    return (other.m_type == TransactionTypes::OutputType::Key || other.m_type == TransactionTypes::OutputType::Confidential)
+           && *other.m_keyImage == *m_keyImage;
   } else {
     assert(false);
     return false;
@@ -140,7 +149,7 @@ bool SpentOutputDescriptor::operator==(const SpentOutputDescriptor& other) const
 }
 
 size_t SpentOutputDescriptor::hash() const {
-  if (m_type == TransactionTypes::OutputType::Key) {
+  if (m_type == TransactionTypes::OutputType::Key || m_type == TransactionTypes::OutputType::Confidential) {
     static_assert(sizeof(size_t) < sizeof(*m_keyImage), "sizeof(size_t) < sizeof(*m_keyImage)");
     return *reinterpret_cast<const size_t*>(m_keyImage->data);
   } else {
@@ -218,6 +227,23 @@ void TransfersContainer::addTransaction(const TransactionBlockInfo& block, const
   txInfo.totalAmountOut = tx.getOutputTotalAmount();
   txInfo.extra = tx.getExtra();
 
+  // Coinbase detection: a coinbase tx carries a single BaseInput (Generating).
+  // Don't rely on "totalAmountIn == 0" — that is also true for fully-confidential
+  // CT spends, whose transparent input total is zero.
+  txInfo.isBase = tx.getInputCount() > 0 && tx.getInputType(0) == TransactionTypes::InputType::Generating;
+
+  // Fee: CT (v2) amounts are blinded, so totalAmountIn/Out can't yield the fee;
+  // take the explicit plaintext fee from the prefix. v1 txs derive it from the
+  // transparent in - out (0 for coinbase).
+  TransactionPrefix prefix = tx.getTransactionPrefix();
+  if (txInfo.isBase) {
+    txInfo.fee = 0;
+  } else if (prefix.version == TRANSACTION_VERSION_CT) {
+    txInfo.fee = prefix.fee;
+  } else {
+    txInfo.fee = txInfo.totalAmountIn >= txInfo.totalAmountOut ? txInfo.totalAmountIn - txInfo.totalAmountOut : 0;
+  }
+
   if (!tx.getPaymentId(txInfo.paymentId)) {
     txInfo.paymentId = NULL_HASH;
   }
@@ -261,7 +287,7 @@ bool TransfersContainer::addTransactionOutputs(const TransactionBlockInfo& block
       (void)result; // Disable unused warning
       assert(result.second);
     } else {
-      if (info.type == TransactionTypes::OutputType::Key) {
+      if (info.type == TransactionTypes::OutputType::Key || info.type == TransactionTypes::OutputType::Confidential) {
         bool duplicate = false;
         SpentOutputDescriptor descriptor(transfer);
 
@@ -280,7 +306,7 @@ bool TransfersContainer::addTransactionOutputs(const TransactionBlockInfo& block
         }
 
         if (duplicate) {
-          auto message = "Failed to add transaction output: key output already exists";
+          auto message = "Failed to add transaction output: output already exists";
           m_logger(ERROR, BRIGHT_RED) << message << ", transaction hash " << info.transactionHash << ", output index " << info.outputInTransaction <<
             ", key image " << info.keyImage;
           throw std::runtime_error(message);
@@ -292,7 +318,7 @@ bool TransfersContainer::addTransactionOutputs(const TransactionBlockInfo& block
       assert(result.second);
     }
 
-    if (info.type == TransactionTypes::OutputType::Key) {
+    if (info.type == TransactionTypes::OutputType::Key || info.type == TransactionTypes::OutputType::Confidential) {
       updateTransfersVisibility(info.keyImage);
     }
 
@@ -417,6 +443,36 @@ bool TransfersContainer::addTransactionInputs(const TransactionBlockInfo& block,
       updateTransfersVisibility(input.keyImage);
 
       inputsAdded = true;
+    } else if (inputType == TransactionTypes::InputType::Confidential) {
+      // CT input: extract key image from the raw transaction inputs
+      auto inputs = tx.getInputs();
+      if (i >= inputs.size()) continue;
+      const auto& ctInput = boost::get<ConfidentialInput>(inputs[i]);
+
+      SpentOutputDescriptor descriptor(&ctInput.keyImage);
+      auto spentRange = m_spentTransfers.get<SpentOutputDescriptorIndex>().equal_range(descriptor);
+      if (std::distance(spentRange.first, spentRange.second) > 0) {
+        auto message = "Failed add CT input: key image already spent";
+        m_logger(ERROR, BRIGHT_RED) << message << ", key image " << ctInput.keyImage;
+        throw std::runtime_error(message);
+      }
+
+      auto& outputDescriptorIndex = m_availableTransfers.get<SpentOutputDescriptorIndex>();
+      auto availableOutputsRange = outputDescriptorIndex.equal_range(SpentOutputDescriptor(&ctInput.keyImage));
+      size_t availableCount = std::distance(availableOutputsRange.first, availableOutputsRange.second);
+
+      if (availableCount == 0) {
+        // Not our output or view-only wallet
+        continue;
+      }
+
+      auto spendingTransferIt = availableOutputsRange.first;
+      assert(spendingTransferIt->keyImage == ctInput.keyImage);
+      copyToSpent(block, tx, i, *spendingTransferIt);
+      outputDescriptorIndex.erase(spendingTransferIt);
+      updateTransfersVisibility(ctInput.keyImage);
+
+      inputsAdded = true;
     } else {
       assert(inputType == TransactionTypes::InputType::Generating);
     }
@@ -486,7 +542,7 @@ bool TransfersContainer::markTransactionConfirmed(const TransactionBlockInfo& bl
 
       transferIt = m_unconfirmedTransfers.get<ContainingTransactionIndex>().erase(transferIt);
 
-      if (transfer.type == TransactionTypes::OutputType::Key) {
+      if (transfer.type == TransactionTypes::OutputType::Key || transfer.type == TransactionTypes::OutputType::Confidential) {
         updateTransfersVisibility(transfer.keyImage);
       }
     }
@@ -524,7 +580,7 @@ bool TransfersContainer::markTransactionConfirmed(const TransactionBlockInfo& bl
 
       transferIt = m_availableTransfers.get<ContainingTransactionIndex>().erase(transferIt);
 
-      if (unconfirmedTransfer.type == TransactionTypes::OutputType::Key) {
+      if (unconfirmedTransfer.type == TransactionTypes::OutputType::Key || unconfirmedTransfer.type == TransactionTypes::OutputType::Confidential) {
         updateTransfersVisibility(unconfirmedTransfer.keyImage);
       }
     }
@@ -560,14 +616,14 @@ void TransfersContainer::deleteTransactionTransfers(const Hash& transactionHash)
     assert(result.second);
     it = spendingTransactionIndex.erase(it);
 
-    if (result.first->type == TransactionTypes::OutputType::Key) {
+    if (result.first->type == TransactionTypes::OutputType::Key || result.first->type == TransactionTypes::OutputType::Confidential) {
       updateTransfersVisibility(result.first->keyImage);
     }
   }
 
   auto unconfirmedTransfersRange = m_unconfirmedTransfers.get<ContainingTransactionIndex>().equal_range(transactionHash);
   for (auto it = unconfirmedTransfersRange.first; it != unconfirmedTransfersRange.second;) {
-    if (it->type == TransactionTypes::OutputType::Key) {
+    if (it->type == TransactionTypes::OutputType::Key || it->type == TransactionTypes::OutputType::Confidential) {
       KeyImage keyImage = it->keyImage;
       it = m_unconfirmedTransfers.get<ContainingTransactionIndex>().erase(it);
       updateTransfersVisibility(keyImage);
@@ -579,7 +635,7 @@ void TransfersContainer::deleteTransactionTransfers(const Hash& transactionHash)
   auto& transactionTransfersIndex = m_availableTransfers.get<ContainingTransactionIndex>();
   auto transactionTransfersRange = transactionTransfersIndex.equal_range(transactionHash);
   for (auto it = transactionTransfersRange.first; it != transactionTransfersRange.second;) {
-    if (it->type == TransactionTypes::OutputType::Key) {
+    if (it->type == TransactionTypes::OutputType::Key || it->type == TransactionTypes::OutputType::Confidential) {
       KeyImage keyImage = it->keyImage;
       it = transactionTransfersIndex.erase(it);
       updateTransfersVisibility(keyImage);
@@ -891,7 +947,12 @@ void TransfersContainer::save(std::ostream& os) {
   s(const_cast<uint32_t&>(TRANSFERS_CONTAINER_STORAGE_VERSION), "version");
 
   s(m_currentHeight, "height");
-  writeSequence<TransactionInformation>(m_transactions.begin(), m_transactions.end(), "transactions", s);
+  size_t txCount = m_transactions.size();
+  s.beginArray(txCount, "transactions");
+  for (auto it = m_transactions.begin(); it != m_transactions.end(); ++it) {
+    serializeTransactionInformation(const_cast<TransactionInformation&>(*it), TRANSFERS_CONTAINER_STORAGE_VERSION, s);
+  }
+  s.endArray();
   writeSequence<TransactionOutputInformationEx>(m_unconfirmedTransfers.begin(), m_unconfirmedTransfers.end(), "unconfirmedTransfers", s);
   writeSequence<TransactionOutputInformationEx>(m_availableTransfers.begin(), m_availableTransfers.end(), "availableTransfers", s);
   writeSequence<SpentTransactionOutput>(m_spentTransfers.begin(), m_spentTransfers.end(), "spentTransfers", s);
@@ -918,7 +979,15 @@ void TransfersContainer::load(std::istream& in) {
   SpentTransfersMultiIndex spentTransfers;
 
   s(currentHeight, "height");
-  readSequence<TransactionInformation>(std::inserter(transactions, transactions.end()), "transactions", s);
+  size_t txCount = 0;
+  if (s.beginArray(txCount, "transactions")) {
+    while (txCount--) {
+      TransactionInformation ti;
+      serializeTransactionInformation(ti, version, s);
+      transactions.insert(std::move(ti));
+    }
+    s.endArray();
+  }
   readSequence<TransactionOutputInformationEx>(std::inserter(unconfirmedTransfers, unconfirmedTransfers.end()), "unconfirmedTransfers", s);
   readSequence<TransactionOutputInformationEx>(std::inserter(availableTransfers, availableTransfers.end()), "availableTransfers", s);
   readSequence<SpentTransactionOutput>(std::inserter(spentTransfers, spentTransfers.end()), "spentTransfers", s);
@@ -1029,6 +1098,14 @@ void TransfersContainer::repair() {
 }
 
 bool TransfersContainer::isSpendTimeUnlocked(uint64_t unlockTime) const {
+  if (m_currency.isUnlockTimeCappedAt(m_currentHeight)) {
+    // Mirror v6+ consensus (see Blockchain::is_tx_spendtime_unlocked): absurd
+    // unlock_time values from old txs are treated as unlocked so previously
+    // frozen outputs are now displayed as spendable.
+    if (unlockTime == 0) return true;
+    if (unlockTime > CryptoNote::parameters::CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6) return true;
+    return m_currentHeight + m_currency.lockedTxAllowedDeltaBlocks() >= unlockTime;
+  }
   if (unlockTime < m_currency.maxBlockHeight()) {
     // interpret as block index
     return m_currentHeight + m_currency.lockedTxAllowedDeltaBlocks() >= unlockTime;
@@ -1058,7 +1135,8 @@ bool TransfersContainer::isIncluded(TransactionTypes::OutputType type, uint32_t 
   return
     // filter by type
     (
-    ((flags & IncludeTypeKey) != 0            && type == TransactionTypes::OutputType::Key)
+    ((flags & IncludeTypeKey) != 0            && type == TransactionTypes::OutputType::Key) ||
+    ((flags & IncludeTypeConfidential) != 0   && type == TransactionTypes::OutputType::Confidential)
     )
     &&
     // filter by state

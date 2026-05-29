@@ -17,6 +17,7 @@
 // along with Karbo.  If not, see <http://www.gnu.org/licenses/>.
 
 #include <algorithm>
+#include <cassert>
 #include <future>
 #include "crypto/crypto.h"
 #include "crypto/random.h"
@@ -29,6 +30,10 @@
 
 #include "CryptoNoteCore/CryptoNoteBasicImpl.h"
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
+#include "CryptoNoteCore/CryptoNoteTools.h"
+#include "CryptoNoteConfig.h"
+#include "Denominations.h"
+#include "crypto/transaction_balance.h"
 
 #include <Logging/LoggerGroup.h>
 
@@ -63,18 +68,99 @@ std::shared_ptr<WalletLegacyEvent> makeCompleteEvent(WalletUserTransactionsCache
   return std::make_shared<WalletSendTransactionCompletedEvent>(transactionId, ec);
 }
 
+uint64_t safeSubtract(uint64_t minuend, uint64_t subtrahend) {
+  return minuend > subtrahend ? minuend - subtrahend : 0;
+}
+
+uint64_t changeAmount(const WalletUserTransactionsCache& transactionsCache) {
+  return safeSubtract(transactionsCache.unconfrimedOutsAmount(), transactionsCache.unconfirmedTransactionsAmount());
+}
+
+uint64_t calculateTotalBalance(const ITransfersContainer& transferDetails, const WalletUserTransactionsCache& transactionsCache) {
+  uint64_t actual = safeSubtract(
+    transferDetails.balance(ITransfersContainer::IncludeDefault),
+    transactionsCache.unconfrimedOutsAmount());
+  uint64_t pending = transferDetails.balance(ITransfersContainer::IncludeAllLocked) + changeAmount(transactionsCache);
+  return actual + pending;
+}
+
+// A transparent output is "non-canonical" relative to the v2 CT path if its
+// amount can't be expressed cleanly as a canonical CN denomination — either
+// because it's sub-cent / not 0.01-aligned (e.g. a 0.001 KRB dust piece), or
+// because it's 0.01-aligned but not a {1,2,5}×10^k CN denomination (e.g.
+// the 2.92… KRB v5+ coinbase reward). Both shapes route through v2 KeyInput
+// in CT mode — coinbase uses ring size 1, others fall back gracefully.
+bool isTransparentNonCanonicalCtAmount(const TransactionOutputInformation& output) {
+  if (output.type == TransactionTypes::OutputType::Confidential) return false;
+  return output.amount % CryptoNote::MIN_CT_DENOMINATION != 0 ||
+         !is_valid_decomposed_amount(output.amount);
+}
+
+bool isPurgeableCtDust(const TransactionOutputInformation& output, uint64_t spendAmount) {
+  return output.type != TransactionTypes::OutputType::Confidential &&
+         spendAmount > 0 &&
+         spendAmount < CryptoNote::MIN_CT_DENOMINATION;
+}
+
+bool isSameOutput(const TransactionOutputInformation& lhs, const TransactionOutputInformation& rhs) {
+  return lhs.transactionHash == rhs.transactionHash &&
+         lhs.outputInTransaction == rhs.outputInTransaction;
+}
+
+bool isInOutputList(const TransactionOutputInformation& out,
+                    const std::list<TransactionOutputInformation>& list) {
+  return std::any_of(list.begin(), list.end(),
+    [&out](const TransactionOutputInformation& other) { return isSameOutput(out, other); });
+}
+
+// Upper bound on opportunistic mixable-dust inputs appended to a single
+// mixin>0 send. Each carries a full ring payload, so we keep this modest to
+// avoid pushing a routine send past the transaction-size limit. Dust beyond
+// this is cleaned up over subsequent sends or via the explicit dust_sweep.
+const size_t MAX_MIXABLE_DUST_SWEEP_PER_TX = 8;
+
+// chooseCtMixingBuckets leaves mixingBuckets[i] = 0 for inputs that skip
+// cross-bucket mixing (e.g. ring-size-1 coinbase). The daemon's
+// getRandomOutsByAmounts treats amount=0 as an empty bucket and logs an
+// error per zero entry — we drop those slots from the wire request and
+// then restore alignment on the response.
+void filterMixingAmounts(const std::vector<uint64_t>& mixingBuckets,
+                         std::vector<uint64_t>& filteredAmounts,
+                         std::vector<size_t>& originalIndex) {
+  filteredAmounts.reserve(mixingBuckets.size());
+  originalIndex.reserve(mixingBuckets.size());
+  for (size_t i = 0; i < mixingBuckets.size(); ++i) {
+    if (mixingBuckets[i] != 0) {
+      filteredAmounts.push_back(mixingBuckets[i]);
+      originalIndex.push_back(i);
+    }
+  }
+}
+
+void expandMixingOuts(
+    std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& rawOuts,
+    const std::vector<size_t>& originalIndex,
+    size_t totalInputs,
+    std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixingOuts) {
+  mixingOuts.assign(totalInputs, CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount{});
+  for (size_t k = 0; k < rawOuts.size() && k < originalIndex.size(); ++k) {
+    mixingOuts[originalIndex[k]] = std::move(rawOuts[k]);
+  }
+}
+
 } //namespace
 
 namespace CryptoNote {
 
-WalletTransactionSender::WalletTransactionSender(const Currency& currency, WalletUserTransactionsCache& transactionsCache, AccountKeys keys, ITransfersContainer& transfersContainer, INode& node) :
+WalletTransactionSender::WalletTransactionSender(const Currency& currency, WalletUserTransactionsCache& transactionsCache, AccountKeys keys, ITransfersContainer& transfersContainer, INode& node, bool forceLegacy) :
   m_currency(currency),
   m_node(node),
   m_transactionsCache(transactionsCache),
   m_isStoping(false),
   m_keys(keys),
   m_transferDetails(transfersContainer),
-  m_upperTransactionSizeLimit(m_currency.maxTransactionSizeLimit()) {
+  m_upperTransactionSizeLimit(m_currency.maxTransactionSizeLimit()),
+  m_forceLegacy(forceLegacy) {
 }
 
 void WalletTransactionSender::stop() {
@@ -94,6 +180,223 @@ void WalletTransactionSender::validateTransfersAddresses(const std::vector<Walle
   }
 }
 
+uint64_t WalletTransactionSender::resolveSpendableAmount(const TransactionOutputInformation& output) const {
+  return output.amount;
+}
+
+bool WalletTransactionSender::isCoinbaseOutput(const TransactionOutputInformation& output) const {
+  if (output.type == TransactionTypes::OutputType::Confidential) {
+    return false;
+  }
+
+  TransactionInformation txInfo;
+  return m_transferDetails.getTransactionInformation(output.transactionHash, txInfo) &&
+         txInfo.isBase &&
+         txInfo.blockHeight >= m_currency.upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5);
+}
+
+void WalletTransactionSender::appendMixableDustSweep(std::shared_ptr<SendTransactionContext> context) const {
+  // Opportunistic dust cleanup for mixin>0 sends. We append every purgeable
+  // sub-floor dust output not already selected and tag it in sweptDust. Each
+  // tagged piece will be given a real ring by chooseInputMixins and then
+  // either mixed (if its bucket has decoys, typical on a mature mainnet) or
+  // dropped by adaptTransparentRings (typical on a sparse testnet). Bounded
+  // so a dust-heavy wallet can't balloon a routine send past the tx-size
+  // limit — each mixed input carries a full Triptych/ring-sig payload.
+  const size_t inputCap = std::min<size_t>(
+    CryptoNote::parameters::CT_MAX_INPUTS,
+    context->selectedTransfers.size() + MAX_MIXABLE_DUST_SWEEP_PER_TX);
+  if (context->selectedTransfers.size() >= inputCap) {
+    return;
+  }
+
+  std::vector<TransactionOutputInformation> outputs;
+  m_transferDetails.getOutputs(outputs, ITransfersContainer::IncludeDefault);
+
+  std::vector<std::pair<size_t, uint64_t>> candidates; // (index, spendable)
+  for (size_t i = 0; i < outputs.size(); ++i) {
+    const auto& out = outputs[i];
+    if (m_transactionsCache.isUsed(out)) continue;
+    if (isInOutputList(out, context->selectedTransfers)) continue;
+    const uint64_t spendable = resolveSpendableAmount(out);
+    if (!isPurgeableCtDust(out, spendable)) continue;
+    candidates.emplace_back(i, spendable);
+  }
+
+  // Largest dust first: clears the most value per added input.
+  std::sort(candidates.begin(), candidates.end(),
+            [](const std::pair<size_t, uint64_t>& a, const std::pair<size_t, uint64_t>& b) {
+              return a.second > b.second;
+            });
+
+  for (const auto& c : candidates) {
+    if (context->selectedTransfers.size() >= inputCap) break;
+    context->selectedTransfers.push_back(outputs[c.first]);
+    context->sweptDust.push_back(outputs[c.first]);
+    context->foundMoney += c.second;
+  }
+}
+
+void WalletTransactionSender::adaptTransparentRings(std::shared_ptr<SendTransactionContext> context) const {
+  // Transparent inputs spend through a v2 KeyInput (legacy ring signature),
+  // which — unlike a Triptych ConfidentialInput — accepts ANY ring size. When
+  // a bucket can't supply the requested decoys we shrink that input's ring to
+  // what the daemon actually returned (down to ring 1) rather than failing the
+  // send: the transaction's CT outputs still hide amounts, and a shielded-in
+  // transparent input's amount is public regardless, so its ring size is a
+  // secondary concern. Confidential (Triptych) inputs are left strict — their
+  // amounts are hidden, so the ring is real privacy and must stay a valid
+  // Triptych size; checkIfEnoughMixins enforces them downstream.
+  //
+  // Optional swept dust is the one exception that can be *dropped* (rather than
+  // adapted to a tiny ring): it's not needed to fund the spend, so when its
+  // bucket can't even reach CT_MIN_RING_SIZE we leave it in the wallet instead
+  // of bloating the send with a revealed, un-mixable input.
+  const uint64_t minMixin = CryptoNote::parameters::CT_MIN_RING_SIZE - 1;
+  std::vector<bool> keep(context->inputMixins.size(), true);
+  bool anyPruned = false;
+  size_t i = 0;
+  for (auto it = context->selectedTransfers.begin();
+       it != context->selectedTransfers.end() && i < context->inputMixins.size(); ++it, ++i) {
+    if (context->inputMixins[i] == 0) continue;                            // coinbase / required dust ring-1
+    if (it->type == TransactionTypes::OutputType::Confidential) continue;  // strict Triptych
+    const size_t available = i < context->outs.size() ? context->outs[i].outs.size() : 0;
+    // checkIfEnoughMixins requires outs.size() >= mixin + 1, so the largest
+    // ring this bucket supports has mixin = available - 1.
+    const uint64_t maxMixin = available > 0 ? static_cast<uint64_t>(available - 1) : 0;
+    const uint64_t newMixin = std::min<uint64_t>(context->inputMixins[i], maxMixin);
+    if (isInOutputList(*it, context->sweptDust) && newMixin < minMixin) {
+      keep[i] = false;                    // optional dust that can't reach CT_MIN ring — leave it in the wallet
+      anyPruned = true;
+    } else {
+      context->inputMixins[i] = newMixin; // adapt ring down to what's available (required inputs may reach ring 1)
+    }
+  }
+  if (!anyPruned) return;
+
+  std::list<TransactionOutputInformation> newSelected;
+  std::vector<uint64_t> newMixins;
+  std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount> newOuts;
+  std::vector<uint64_t> newBuckets;
+  uint64_t newFound = 0;
+  i = 0;
+  for (auto it = context->selectedTransfers.begin(); it != context->selectedTransfers.end(); ++it, ++i) {
+    if (i < keep.size() && !keep[i]) {
+      continue;
+    }
+    newSelected.push_back(*it);
+    newFound += resolveSpendableAmount(*it);
+    if (i < context->inputMixins.size())   newMixins.push_back(context->inputMixins[i]);
+    if (i < context->outs.size())          newOuts.push_back(context->outs[i]);
+    if (i < context->mixingBuckets.size()) newBuckets.push_back(context->mixingBuckets[i]);
+  }
+
+  context->selectedTransfers = std::move(newSelected);
+  context->inputMixins = std::move(newMixins);
+  context->outs = std::move(newOuts);
+  context->mixingBuckets = std::move(newBuckets);
+  context->foundMoney = newFound;
+}
+
+std::vector<uint64_t> WalletTransactionSender::chooseInputMixins(
+  const std::list<TransactionOutputInformation>& selectedTransfers,
+  uint64_t requestedMixin,
+  bool useCT) const {
+
+  std::vector<uint64_t> inputMixins(selectedTransfers.size(), requestedMixin);
+  if (!useCT) {
+    return inputMixins;
+  }
+
+  // Triptych supports ring sizes {4, 8, 16}. Round the requested mixin up
+  // to the next supported ring size. Coinbase outputs and purgeable
+  // sub-floor transparent dust use mixin 0 (ring size 1) through v2
+  // KeyInput; confidential spends never use mixin 0.
+  const uint64_t minCtMixin = CryptoNote::parameters::CT_MIN_RING_SIZE - 1;
+  const uint64_t maxCtMixin = CryptoNote::parameters::CT_MAX_RING_SIZE - 1;
+  const uint64_t normalMixin = std::max<uint64_t>(requestedMixin, minCtMixin);
+  if (normalMixin > maxCtMixin) {
+    throw std::system_error(make_error_code(error::MIXIN_COUNT_TOO_BIG));
+  }
+  auto roundUpToTriptychMixin = [](uint64_t mixin) -> uint64_t {
+    const uint64_t ringSize = mixin + 1;
+    if (ringSize <= 4)  return 3;
+    if (ringSize <= 8)  return 7;
+    return 15;
+  };
+  const uint64_t roundedMixin = roundUpToTriptychMixin(normalMixin);
+
+  size_t i = 0;
+  for (const auto& output : selectedTransfers) {
+    // Coinbase spends at ring 1 (v2 KeyInput, single-member). Every other
+    // input requests the rounded ring; adaptTransparentRings later shrinks
+    // transparent inputs to the decoys actually available (and drops optional
+    // swept dust that can't reach CT_MIN_RING_SIZE), while confidential inputs
+    // keep their strict Triptych ring.
+    inputMixins[i++] = isCoinbaseOutput(output) ? 0 : roundedMixin;
+  }
+
+  return inputMixins;
+}
+
+bool WalletTransactionSender::hasMixinInputs(const std::vector<uint64_t>& inputMixins) const {
+  return std::any_of(inputMixins.begin(), inputMixins.end(), [](uint64_t inputMixin) { return inputMixin != 0; });
+}
+
+std::vector<uint64_t> WalletTransactionSender::chooseCtMixingBuckets(
+  const std::list<TransactionOutputInformation>& selectedTransfers,
+  const std::vector<uint64_t>& inputMixins,
+  bool useCT) const {
+
+  std::vector<uint64_t> mixingBuckets(selectedTransfers.size(), 0);
+  if (!useCT) return mixingBuckets;
+  if (CryptoNote::parameters::CT_MIXING_DECOYS_PER_INPUT == 0) return mixingBuckets;
+  if (CryptoNote::parameters::CT_MIN_RING_SIZE_FOR_MIXING == 0) return mixingBuckets;
+
+  std::mt19937 rng = Random::generator();
+  std::uniform_int_distribution<size_t> denomDist(0, CryptoNote::DENOMINATIONS.size() - 1);
+
+  size_t i = 0;
+  for (const auto& transfer : selectedTransfers) {
+    if (inputMixins[i] == 0) { ++i; continue; }
+    if (inputMixins[i] + 1 < CryptoNote::parameters::CT_MIN_RING_SIZE_FOR_MIXING) { ++i; continue; }
+
+    const bool realIsConfidential = transfer.type == TransactionTypes::OutputType::Confidential;
+    if (realIsConfidential) {
+      // ConfidentialInput rings may mix in transparent decoys from any bucket.
+      mixingBuckets[i] = CryptoNote::DENOMINATIONS[denomDist(rng)];
+    } else {
+      // Transparent reals are routed to KeyInput in v2 mixed mode (shielding),
+      // whose rings are constrained to a single transparent bucket. Skip
+      // cross-bucket mixing — the ring must be pure same-amount KeyOutputs.
+    }
+    ++i;
+  }
+  return mixingBuckets;
+}
+
+uint64_t WalletTransactionSender::maxInputMixin(const std::vector<uint64_t>& inputMixins) const {
+  return inputMixins.empty() ? 0 : *std::max_element(inputMixins.begin(), inputMixins.end());
+}
+
+void WalletTransactionSender::checkIfEnoughMixins(
+  const std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& outs,
+  const std::vector<uint64_t>& inputMixins) const {
+
+  if (outs.size() != inputMixins.size()) {
+    throw std::system_error(make_error_code(error::MIXIN_COUNT_TOO_BIG));
+  }
+
+  for (size_t i = 0; i < inputMixins.size(); ++i) {
+    if (inputMixins[i] == 0) {
+      continue;
+    }
+    if (outs[i].outs.size() < inputMixins[i] + 1) {
+      throw std::system_error(make_error_code(error::MIXIN_COUNT_TOO_BIG));
+    }
+  }
+}
+
 std::shared_ptr<WalletRequest> WalletTransactionSender::makeSendRequest(TransactionId& transactionId, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
     const std::vector<WalletLegacyTransfer>& transfers, const std::list<TransactionOutputInformation>& selectedOuts, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp) {
 
@@ -102,26 +405,45 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::makeSendRequest(Transact
   throwIf(transfers.empty(), error::ZERO_DESTINATION);
   validateTransfersAddresses(transfers);
   uint64_t neededMoney = countNeededMoney(fee, transfers);
+  const bool useCT = !m_forceLegacy &&
+    m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
 
   std::shared_ptr<SendTransactionContext> context = std::make_shared<SendTransactionContext>();
 
   if (selectedOuts.size() > 0) {
     for (auto& out : selectedOuts) {
-      context->foundMoney += out.amount;
+      context->foundMoney += resolveSpendableAmount(out);
     }
     context->selectedTransfers = selectedOuts;
   }
   else {
-    context->foundMoney = selectTransfersToSend(neededMoney, 0 == mixIn, context->dustPolicy.dustThreshold, context->selectedTransfers);
+    context->foundMoney = selectTransfersToSend(
+      neededMoney,
+      0 == mixIn,
+      context->dustPolicy.dustThreshold,
+      context->selectedTransfers,
+      useCT);
   }
 
   throwIf(context->foundMoney < neededMoney, error::WRONG_AMOUNT);
 
+  // Opportunistic mixable-dust sweep: only on auto-selected mixin>0 CT sends
+  // (explicit-output sends control their own inputs; mixin==0 is handled by
+  // selectTransfersToSend's ring-1 sweep). Tagged dust is pruned later if its
+  // bucket can't supply decoys, so this never jeopardises funding.
+  if (useCT && mixIn != 0 && selectedOuts.empty()) {
+    appendMixableDustSweep(context);
+  }
+
   transactionId = m_transactionsCache.addNewTransaction(neededMoney, fee, extra, transfers, unlockTimestamp);
   context->transactionId = transactionId;
   context->mixIn = mixIn;
+  context->inputMixins = chooseInputMixins(context->selectedTransfers, mixIn, useCT);
+  // CT cross-bucket mixing: per-input alternative-bucket assignment. Empty
+  // when CT is off or the ring is below CT_MIN_RING_SIZE_FOR_MIXING.
+  context->mixingBuckets = chooseCtMixingBuckets(context->selectedTransfers, context->inputMixins, useCT);
 
-  if(context->mixIn) {
+  if (hasMixinInputs(context->inputMixins)) {
     std::shared_ptr<WalletRequest> request = makeGetRandomOutsRequest(context);
     return request;
   }
@@ -141,32 +463,48 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
   throwIf(transfers.empty(), error::ZERO_DESTINATION);
   validateTransfersAddresses(transfers);
   uint64_t neededMoney = countNeededMoney(fee, transfers);
+  const bool useCT = !m_forceLegacy &&
+    m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
 
   std::shared_ptr<SendTransactionContext> context = std::make_shared<SendTransactionContext>();
 
   if (selectedOuts.size() > 0) {
     for (auto& out : selectedOuts) {
-      context->foundMoney += out.amount;
+      context->foundMoney += resolveSpendableAmount(out);
     }
     context->selectedTransfers = selectedOuts;
   }
   else {
-     context->foundMoney = selectTransfersToSend(neededMoney, 0 == mixIn, context->dustPolicy.dustThreshold, context->selectedTransfers);
+     context->foundMoney = selectTransfersToSend(
+       neededMoney,
+       0 == mixIn,
+       context->dustPolicy.dustThreshold,
+       context->selectedTransfers,
+       useCT);
   }
 
   throwIf(context->foundMoney < neededMoney, error::WRONG_AMOUNT);
+
+  // Opportunistic mixable-dust sweep (see makeSendRequest for rationale).
+  if (useCT && mixIn != 0 && selectedOuts.empty()) {
+    appendMixableDustSweep(context);
+  }
 
   // add tx to wallet cache to prevent reuse of outputs used in this tx
   transactionId = m_transactionsCache.addNewTransaction(neededMoney, fee, extra, transfers, unlockTimestamp);
   context->transactionId = transactionId;
   context->mixIn = mixIn;
+  context->inputMixins = chooseInputMixins(context->selectedTransfers, mixIn, useCT);
+  context->mixingBuckets = chooseCtMixingBuckets(context->selectedTransfers, context->inputMixins, useCT);
 
-  if (context->mixIn) {
-    uint64_t outsCount = mixIn + 1; // add one to make possible (if need) to skip real output key
+  if (hasMixinInputs(context->inputMixins)) {
+    uint64_t outsCount = maxInputMixin(context->inputMixins) + 1; // add one to make possible (if need) to skip real output key
     std::vector<uint64_t> amounts;
 
     for (const auto& td : context->selectedTransfers) {
-      amounts.push_back(td.amount);
+      amounts.push_back(td.type == TransactionTypes::OutputType::Confidential
+        ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+        : td.amount);
     }
 
     auto queryAmountsCompleted = std::promise<std::error_code>();
@@ -182,14 +520,38 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
 
     queryAmountsWaitFuture.get();
 
-    auto scanty_it = std::find_if(context->outs.begin(), context->outs.end(),
-      [&](COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount& out) {
-      return out.outs.size() < mixIn;
-    });
+    // Shrink transparent input rings to the decoys their buckets returned (and
+    // drop optional swept dust that can't reach CT_MIN_RING_SIZE) before the
+    // strict check below, which now only gates confidential (Triptych) inputs.
+    adaptTransparentRings(context);
 
-    if (scanty_it != context->outs.end()) {
-      throw std::system_error(make_error_code(error::MIXIN_COUNT_TOO_BIG));
-      return raw_tx;
+    checkIfEnoughMixins(context->outs, context->inputMixins);
+
+    // Fetch CT cross-bucket decoys synchronously, best-effort. Failures fall
+    // back to all-native rings instead of aborting the build.
+    if (std::any_of(context->mixingBuckets.begin(), context->mixingBuckets.end(),
+                    [](uint64_t b) { return b != 0; })) {
+      std::vector<uint64_t> filteredAmounts;
+      std::vector<size_t> originalIndex;
+      filterMixingAmounts(context->mixingBuckets, filteredAmounts, originalIndex);
+
+      std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount> rawOuts;
+      auto mixingCompleted = std::promise<std::error_code>();
+      auto mixingFuture = mixingCompleted.get_future();
+      m_node.getRandomOutsByAmounts(std::move(filteredAmounts),
+        CryptoNote::parameters::CT_MIXING_DECOYS_PER_INPUT + 1,
+        std::ref(rawOuts),
+        [&mixingCompleted](std::error_code ec) {
+          auto detached = std::move(mixingCompleted);
+          detached.set_value(ec);
+        });
+      auto mixingEc = mixingFuture.get();
+      if (mixingEc) {
+        context->mixingOuts.clear(); // best-effort: silently drop on error
+      } else {
+        expandMixingOuts(rawOuts, originalIndex,
+                         context->mixingBuckets.size(), context->mixingOuts);
+      }
     }
   }
 
@@ -199,7 +561,8 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
     WalletLegacyTransaction& transaction = m_transactionsCache.getTransaction(context->transactionId);
 
     std::vector<TxBuildInput> inputs;
-    prepareInputs(context->selectedTransfers, context->outs, inputs, context->mixIn);
+    prepareInputs(context->selectedTransfers, context->outs, inputs, context->inputMixins,
+                  context->mixingBuckets, context->mixingOuts);
 
     TxBuildOutput changeDts;
     changeDts.amount = 0;
@@ -236,11 +599,13 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
 }
 
 std::shared_ptr<WalletRequest> WalletTransactionSender::makeGetRandomOutsRequest(std::shared_ptr<SendTransactionContext> context) {
-  uint64_t outsCount = context->mixIn + 1;// add one to make possible (if need) to skip real output key
+  uint64_t outsCount = maxInputMixin(context->inputMixins) + 1;// add one to make possible (if need) to skip real output key
   std::vector<uint64_t> amounts;
 
   for (const auto& td : context->selectedTransfers) {
-    amounts.push_back(td.amount);
+    amounts.push_back(td.type == TransactionTypes::OutputType::Confidential
+      ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+      : td.amount);
   }
 
   return std::make_shared<WalletGetRandomOutsByAmountsRequest>(amounts, outsCount, context, std::bind(&WalletTransactionSender::sendTransactionRandomOutsByAmount,
@@ -249,7 +614,7 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::makeGetRandomOutsRequest
 
 void WalletTransactionSender::sendTransactionRandomOutsByAmount(std::shared_ptr<SendTransactionContext> context, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
     boost::optional<std::shared_ptr<WalletRequest> >& nextRequest, std::error_code ec) {
-  
+
   if (m_isStoping) {
     ec = make_error_code(error::TX_CANCELLED);
   }
@@ -259,13 +624,56 @@ void WalletTransactionSender::sendTransactionRandomOutsByAmount(std::shared_ptr<
     return;
   }
 
-  auto scanty_it = std::find_if(context->outs.begin(), context->outs.end(), 
-    [&] (COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount& out) {return out.outs.size() < context->mixIn;});
+  // Shrink transparent input rings to the decoys their buckets returned (and
+  // drop optional swept dust that can't reach CT_MIN_RING_SIZE) before the
+  // strict check below, which now only gates confidential (Triptych) inputs.
+  adaptTransparentRings(context);
 
-  if (scanty_it != context->outs.end()) {
+  try {
+    checkIfEnoughMixins(context->outs, context->inputMixins);
+  } catch (const std::system_error&) {
     events.push_back(makeCompleteEvent(m_transactionsCache, context->transactionId, make_error_code(error::MIXIN_COUNT_TOO_BIG)));
     return;
   }
+
+  // Chain a second request for CT cross-bucket decoys if any input opted into
+  // mixing. The legacy wallet's request pipeline accepts a follow-up request
+  // via nextRequest; the callback (sendTransactionMixingOutsByAmount) then
+  // runs doSendTransaction with both native and mixing decoys.
+  if (std::any_of(context->mixingBuckets.begin(), context->mixingBuckets.end(),
+                  [](uint64_t b) { return b != 0; })) {
+    std::vector<uint64_t> filteredAmounts;
+    filterMixingAmounts(context->mixingBuckets, filteredAmounts, context->mixingOriginalIndex);
+    context->mixingOutsRaw.clear();
+    nextRequest = std::make_shared<WalletGetMixingOutsByAmountsRequest>(
+      filteredAmounts,
+      CryptoNote::parameters::CT_MIXING_DECOYS_PER_INPUT + 1,
+      context,
+      std::bind(&WalletTransactionSender::sendTransactionMixingOutsByAmount,
+        this, context, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+    return;
+  }
+
+  std::shared_ptr<WalletRequest> req = doSendTransaction(context, events);
+  if (req)
+    nextRequest = req;
+}
+
+void WalletTransactionSender::sendTransactionMixingOutsByAmount(std::shared_ptr<SendTransactionContext> context, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
+    boost::optional<std::shared_ptr<WalletRequest> >& nextRequest, std::error_code ec) {
+  if (m_isStoping) {
+    ec = make_error_code(error::TX_CANCELLED);
+  }
+  // Mixing is best-effort: a failure here is not fatal — we proceed with the
+  // native-bucket-only ring rather than aborting the user's spend.
+  if (ec) {
+    context->mixingOuts.clear();
+  } else {
+    expandMixingOuts(context->mixingOutsRaw, context->mixingOriginalIndex,
+                     context->mixingBuckets.size(), context->mixingOuts);
+  }
+  context->mixingOutsRaw.clear();
+  context->mixingOriginalIndex.clear();
 
   std::shared_ptr<WalletRequest> req = doSendTransaction(context, events);
   if (req)
@@ -283,21 +691,131 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::doSendTransaction(std::s
     WalletLegacyTransaction& transaction = m_transactionsCache.getTransaction(context->transactionId);
 
     std::vector<TxBuildInput> inputs;
-    prepareInputs(context->selectedTransfers, context->outs, inputs, context->mixIn);
+    prepareInputs(context->selectedTransfers, context->outs, inputs, context->inputMixins,
+                  context->mixingBuckets, context->mixingOuts);
 
-    TxBuildOutput changeDts;
-    changeDts.amount = 0;
     uint64_t totalAmount = -transaction.totalAmount;
-    createChangeDestinations(m_keys.address, totalAmount, context->foundMoney, changeDts);
+    uint64_t changeAmount = context->foundMoney > totalAmount ? context->foundMoney - totalAmount : 0;
 
-    std::vector<TxBuildOutput> splittedDests;
-    splitDestinations(transaction.firstTransferId, transaction.transferCount, changeDts, context->dustPolicy, splittedDests);
+    const bool useCT = !m_forceLegacy &&
+    m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
 
-    auto itx = buildTransaction(inputs, splittedDests, m_keys.viewSecretKey,
-        transaction.extra, transaction.unlockTime, m_upperTransactionSizeLimit, context->tx_key);
     Transaction tx;
-    if (!fromBinaryArray(tx, itx->getTransactionData()))
-      throw std::system_error(make_error_code(error::INTERNAL_WALLET_ERROR));
+    if (useCT) {
+      // CT path: canonical denomination decomposition + confidential transaction.
+      // Sub-floor change residue is absorbed into fee so no new CT dust is ever created.
+
+      // Reject non-canonical destination amounts up-front.
+      for (TransferId idx = transaction.firstTransferId;
+           idx < transaction.firstTransferId + transaction.transferCount; ++idx) {
+        const WalletLegacyTransfer& de = m_transactionsCache.getTransfer(idx);
+        const uint64_t amt = static_cast<uint64_t>(de.amount);
+        if (amt == 0 || amt % CryptoNote::MIN_CT_DENOMINATION != 0) {
+          throw std::system_error(make_error_code(error::WRONG_AMOUNT),
+            "Confidential transactions require amounts to be a multiple of 0.01 KRB");
+        }
+      }
+
+      // Split change into canonical + sub-floor residue; fold residue into the fee.
+      uint64_t changeCanonical = (changeAmount / CryptoNote::MIN_CT_DENOMINATION)
+                                * CryptoNote::MIN_CT_DENOMINATION;
+      uint64_t dustResidue = changeAmount - changeCanonical;
+      uint64_t fee = transaction.fee + dustResidue;
+
+      // Decompose each destination into canonical denominations
+      std::vector<CTBuildOutput> ctOutputs;
+      for (TransferId idx = transaction.firstTransferId;
+           idx < transaction.firstTransferId + transaction.transferCount; ++idx) {
+        WalletLegacyTransfer& de = m_transactionsCache.getTransfer(idx);
+        AccountPublicAddress addr;
+        if (!m_currency.parseAccountAddressString(de.address, addr))
+          throw std::system_error(make_error_code(error::BAD_ADDRESS));
+        auto denoms = decomposeAmount(static_cast<uint64_t>(de.amount));
+        for (uint64_t d : denoms) {
+          ctOutputs.push_back(CTBuildOutput{addr, d});
+        }
+      }
+
+      // Canonical change output (residue is in fee, not here).
+      if (changeCanonical > 0) {
+        auto changeDenoms = decomposeAmount(changeCanonical);
+        for (uint64_t d : changeDenoms) {
+          ctOutputs.push_back(CTBuildOutput{m_keys.address, d});
+        }
+      }
+
+      // Convert TxBuildInput → CTBuildInput. Each ring member is self-describing
+      // via its own (amount, outputIndex), so the same code path handles mixed
+      // transparent/confidential rings — relies on prepareInputs() populating
+      // GlobalOutput.amount per member.
+      std::vector<CTBuildInput> ctInputs;
+      for (auto& inp : inputs) {
+        CTBuildInput cti;
+        const auto& ki = inp.keyInfo;
+        const size_t ringSize = ki.outputs.size();
+        cti.ringMembers.reserve(ringSize);
+
+        for (size_t k = 0; k < ringSize; ++k) {
+          const auto& gout = ki.outputs[k];
+          const uint64_t memberAmount = gout.isConfidential
+            ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+            : gout.amount;
+          if (memberAmount == 0) {
+            throw std::runtime_error("CT ring member " + std::to_string(k)
+              + " has zero amount bucket in input " + std::to_string(ctInputs.size()));
+          }
+          Crypto::EllipticCurvePoint ringCommit{};
+          if (gout.isConfidential) {
+            ringCommit = gout.commitment;
+          } else {
+            if (!Crypto::transparent_amount_to_commitment(memberAmount, ringCommit)) {
+              throw std::runtime_error("Failed to compute CT ring commitment for input "
+                + std::to_string(ctInputs.size()));
+            }
+          }
+          cti.ringMembers.push_back(CTBuildRingMember{
+            memberAmount, gout.outputIndex, gout.targetKey, ringCommit
+          });
+        }
+
+        cti.realIndex = ki.realOutput.transactionIndex;
+        if (cti.realIndex >= ringSize) {
+          throw std::system_error(make_error_code(error::INTERNAL_WALLET_ERROR));
+        }
+        // Derive ephemeral spend key
+        KeyPair ephKeys;
+        Crypto::KeyImage dummy_ki;
+        CryptoNote::generate_key_image_helper(inp.senderKeys,
+            ki.realOutput.transactionPublicKey,
+            ki.realOutput.outputInTransaction,
+            ephKeys, dummy_ki);
+        cti.spendPrivkey = ephKeys.secretKey;
+        cti.realBlinding = ki.realOutputBlinding;
+        cti.amount = ki.realOutputAmount;
+        // Route transparent dust (real KeyOutput) as a v2 KeyInput so the
+        // shielded value enters the CT pool visibly. ConfidentialOutput
+        // inputs stay confidential — Triptych is only useful when the real
+        // amount is genuinely hidden.
+        cti.isTransparent = !ki.realOutputIsConfidential;
+        ctInputs.push_back(std::move(cti));
+      }
+
+      tx = buildConfidentialTransaction(ctInputs, ctOutputs, m_keys.viewSecretKey,
+                                         fee, transaction.extra, context->tx_key);
+    } else {
+      // Pre-fork: transparent transaction path (original)
+      TxBuildOutput changeDts;
+      changeDts.amount = 0;
+      createChangeDestinations(m_keys.address, totalAmount, context->foundMoney, changeDts);
+
+      std::vector<TxBuildOutput> splittedDests;
+      splitDestinations(transaction.firstTransferId, transaction.transferCount, changeDts, context->dustPolicy, splittedDests);
+
+      auto itx = buildTransaction(inputs, splittedDests, m_keys.viewSecretKey,
+          transaction.extra, transaction.unlockTime, m_upperTransactionSizeLimit, context->tx_key);
+      if (!fromBinaryArray(tx, itx->getTransactionData()))
+        throw std::system_error(make_error_code(error::INTERNAL_WALLET_ERROR));
+    }
 
     getObjectHash(tx, transaction.hash);
     transaction.secretKey = context->tx_key;
@@ -305,7 +823,7 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::doSendTransaction(std::s
     m_transactionsCache.updateTransaction(context->transactionId, tx, totalAmount, context->selectedTransfers, context->tx_key);
 
     notifyBalanceChanged(events);
-   
+
     return std::make_shared<WalletRelayTransactionRequest>(tx, std::bind(&WalletTransactionSender::relayTransactionCallback, this, context,
         std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
   }
@@ -370,30 +888,131 @@ void WalletTransactionSender::digitSplitStrategy(TransferId firstTransferId, siz
 void WalletTransactionSender::prepareInputs(
   const std::list<TransactionOutputInformation>& selectedTransfers,
   std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& outs,
-  std::vector<TxBuildInput>& inputs, uint64_t mixIn) {
+  std::vector<TxBuildInput>& inputs, const std::vector<uint64_t>& inputMixins,
+  const std::vector<uint64_t>& mixingBuckets,
+  const std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixingOuts) {
 
   size_t i = 0;
+  assert(inputMixins.size() == selectedTransfers.size());
 
   for (const auto& td: selectedTransfers) {
     inputs.resize(inputs.size() + 1);
     TxBuildInput& inp = inputs.back();
+    const uint64_t inputMixin = inputMixins[i];
 
-    inp.keyInfo.amount = td.amount;
+    const bool realIsConfidential = td.type == TransactionTypes::OutputType::Confidential;
+    inp.keyInfo.amount = realIsConfidential
+      ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+      : td.amount;
     inp.senderKeys = m_keys;
 
+    TransactionInformation txInfo;
+    bool haveTxInfo = m_transferDetails.getTransactionInformation(td.transactionHash, txInfo);
+    const bool realIsCoinbase = haveTxInfo && txInfo.isBase;
+    const uint32_t realBlockHeight = haveTxInfo ? txInfo.blockHeight : 0;
+
+    // Reserve some ring slots for cross-bucket mixing decoys when this input
+    // has a mixing bucket allocated and mixing response is available.
+    const uint64_t mixingBucket = (i < mixingBuckets.size()) ? mixingBuckets[i] : 0;
+    const size_t requestedMixing = (mixingBucket != 0 && i < mixingOuts.size())
+      ? CryptoNote::parameters::CT_MIXING_DECOYS_PER_INPUT
+      : 0;
+    const uint64_t nativeQuota = (inputMixin > requestedMixing) ? inputMixin - requestedMixing : inputMixin;
+
     //paste mixin transaction
-    if (outs.size()) {
+    if (inputMixin != 0 && outs.size()) {
       std::sort(outs[i].outs.begin(), outs[i].outs.end(),
         [](const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& a, const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& b){ return a.global_amount_index < b.global_amount_index; });
+
+      const uint64_t decoyBucket = outs[i].amount;
       for (auto& daemon_oe: outs[i].outs) {
         if (td.globalOutputIndex == daemon_oe.global_amount_index)
           continue;
         TransactionTypes::GlobalOutput go;
         go.outputIndex = static_cast<uint32_t>(daemon_oe.global_amount_index);
         go.targetKey = daemon_oe.out_key;
+        go.commitment = daemon_oe.commitment;
+        go.blockHeight = daemon_oe.block_height;
+        go.isCoinbase = daemon_oe.is_coinbase != 0;
+        go.isConfidential = daemon_oe.output_type == static_cast<uint8_t>(TransactionTypes::OutputType::Confidential);
+        go.amount = decoyBucket;
         inp.keyInfo.outputs.push_back(go);
-        if (inp.keyInfo.outputs.size() >= mixIn)
+        if (inp.keyInfo.outputs.size() >= nativeQuota)
           break;
+      }
+    }
+
+    // Cross-bucket mixing decoys: append up to CT_MIXING_DECOYS_PER_INPUT
+    // members from a different bucket. Best-effort: drops duplicates and the
+    // real-output collision case. If the daemon couldn't supply enough, the
+    // back-fill loop below tops the ring back up from native outs so we never
+    // hand Triptych a non-{4,8,16} ring.
+    if (requestedMixing > 0 && i < mixingOuts.size() && !mixingOuts[i].outs.empty()) {
+      auto mixOuts = mixingOuts[i].outs; // copy: don't disturb caller
+      std::sort(mixOuts.begin(), mixOuts.end(),
+        [](const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& a,
+           const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& b) {
+          return a.global_amount_index < b.global_amount_index;
+        });
+      const uint64_t mixDecoyBucket = mixingOuts[i].amount;
+      const uint64_t realBucket = realIsConfidential
+        ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+        : td.amount;
+      size_t mixedAdded = 0;
+      for (auto& daemon_oe : mixOuts) {
+        if (mixedAdded >= requestedMixing) break;
+        if (mixDecoyBucket == realBucket && daemon_oe.global_amount_index == td.globalOutputIndex) {
+          continue;
+        }
+        bool duplicate = false;
+        for (const auto& existing : inp.keyInfo.outputs) {
+          if (existing.amount == mixDecoyBucket && existing.outputIndex == daemon_oe.global_amount_index) {
+            duplicate = true;
+            break;
+          }
+        }
+        if (duplicate) continue;
+
+        TransactionTypes::GlobalOutput go;
+        go.outputIndex = static_cast<uint32_t>(daemon_oe.global_amount_index);
+        go.targetKey = daemon_oe.out_key;
+        go.commitment = daemon_oe.commitment;
+        go.blockHeight = daemon_oe.block_height;
+        go.isCoinbase = daemon_oe.is_coinbase != 0;
+        go.isConfidential = daemon_oe.output_type == static_cast<uint8_t>(TransactionTypes::OutputType::Confidential);
+        go.amount = mixDecoyBucket;
+        inp.keyInfo.outputs.push_back(std::move(go));
+        ++mixedAdded;
+      }
+    }
+
+    // Back-fill: if cross-bucket mixing fell short (best-effort by design),
+    // top the ring up with additional native decoys to reach inputMixin.
+    // Triptych enforces exact ring sizes {4, 8, 16}; checkIfEnoughMixins has
+    // already guaranteed outs[i].outs.size() >= inputMixin + 1, so we always
+    // have enough native material to draw on.
+    if (inputMixin != 0 && i < outs.size() && inp.keyInfo.outputs.size() < inputMixin) {
+      const uint64_t decoyBucket = outs[i].amount;
+      for (auto& daemon_oe : outs[i].outs) {
+        if (inp.keyInfo.outputs.size() >= inputMixin) break;
+        if (td.globalOutputIndex == daemon_oe.global_amount_index) continue;
+        bool duplicate = false;
+        for (const auto& existing : inp.keyInfo.outputs) {
+          if (existing.amount == decoyBucket && existing.outputIndex == daemon_oe.global_amount_index) {
+            duplicate = true;
+            break;
+          }
+        }
+        if (duplicate) continue;
+        TransactionTypes::GlobalOutput go;
+        go.outputIndex = static_cast<uint32_t>(daemon_oe.global_amount_index);
+        go.targetKey = daemon_oe.out_key;
+        go.commitment = daemon_oe.commitment;
+        go.blockHeight = daemon_oe.block_height;
+        go.isCoinbase = daemon_oe.is_coinbase != 0;
+        go.isConfidential = daemon_oe.output_type == static_cast<uint8_t>(TransactionTypes::OutputType::Confidential);
+        go.amount = decoyBucket;
+        inp.keyInfo.outputs.push_back(std::move(go));
       }
     }
 
@@ -404,25 +1023,47 @@ void WalletTransactionSender::prepareInputs(
     TransactionTypes::GlobalOutput real_go;
     real_go.outputIndex = td.globalOutputIndex;
     real_go.targetKey = td.outputKey;
+    real_go.commitment = td.commitment;
+    real_go.blockHeight = realBlockHeight;
+    real_go.isCoinbase = realIsCoinbase;
+    real_go.isConfidential = realIsConfidential;
+    real_go.amount = realIsConfidential
+      ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+      : td.amount;
 
     auto inserted_it = inp.keyInfo.outputs.insert(it_to_insert, real_go);
 
     inp.keyInfo.realOutput.transactionPublicKey = td.transactionPublicKey;
     inp.keyInfo.realOutput.transactionIndex = inserted_it - inp.keyInfo.outputs.begin();
     inp.keyInfo.realOutput.outputInTransaction = td.outputInTransaction;
+    if (realIsConfidential) {
+      inp.keyInfo.realOutputAmount = td.amount;
+      inp.keyInfo.realOutputBlinding = td.blindingFactor;
+    } else {
+      TransactionOutput transparentOutput;
+      transparentOutput.amount = td.amount;
+      transparentOutput.target = KeyOutput();
+      inp.keyInfo.realOutputAmount = transparentOutput.amount;
+      std::memset(&inp.keyInfo.realOutputBlinding, 0, sizeof(inp.keyInfo.realOutputBlinding));
+    }
+    inp.keyInfo.realOutputIsConfidential = realIsConfidential;
     ++i;
   }
 }
 
 void WalletTransactionSender::notifyBalanceChanged(std::deque<std::shared_ptr<WalletLegacyEvent>>& events) {
   uint64_t unconfirmedOutsAmount = m_transactionsCache.unconfrimedOutsAmount();
-  uint64_t change = unconfirmedOutsAmount - m_transactionsCache.unconfirmedTransactionsAmount();
+  uint64_t change = changeAmount(m_transactionsCache);
 
-  uint64_t actualBalance = m_transferDetails.balance(ITransfersContainer::IncludeKeyUnlocked) - unconfirmedOutsAmount;
-  uint64_t pendingBalance = m_transferDetails.balance(ITransfersContainer::IncludeKeyNotUnlocked) + change;
+  uint32_t actualFlags = m_forceLegacy ? ITransfersContainer::IncludeKeyUnlocked : ITransfersContainer::IncludeDefault;
+  uint32_t pendingFlags = m_forceLegacy ? ITransfersContainer::IncludeKeyNotUnlocked : ITransfersContainer::IncludeAllLocked;
+  uint64_t balance = m_transferDetails.balance(actualFlags);
+  uint64_t actualBalance = safeSubtract(balance, unconfirmedOutsAmount);
+  uint64_t pendingBalance = m_transferDetails.balance(pendingFlags) + change;
 
   events.push_back(std::make_shared<WalletActualBalanceUpdatedEvent>(actualBalance));
   events.push_back(std::make_shared<WalletPendingBalanceUpdatedEvent>(pendingBalance));
+  events.push_back(std::make_shared<WalletTotalBalanceUpdatedEvent>(calculateTotalBalance(m_transferDetails, m_transactionsCache)));
 }
 
 namespace {
@@ -450,46 +1091,175 @@ T popRandomValue(URNG& randomGenerator, std::vector<T>& vec) {
 }
 
 
-uint64_t WalletTransactionSender::selectTransfersToSend(uint64_t neededMoney, bool addUnmixable, uint64_t dust, std::list<TransactionOutputInformation>& selectedTransfers) {
+uint64_t WalletTransactionSender::selectTransfersToSend(
+  uint64_t neededMoney,
+  bool addUnmixable,
+  uint64_t dust,
+  std::list<TransactionOutputInformation>& selectedTransfers,
+  bool includeNonCanonical) {
 
   std::vector<size_t> unusedTransfers;
   std::vector<size_t> unusedDust;
   std::vector<size_t> unusedUnmixable;
-  
+  std::vector<size_t> coinbaseOutputs;
+  std::vector<size_t> nonCanonicalOutputs;
+
   std::vector<TransactionOutputInformation> outputs;
-  m_transferDetails.getOutputs(outputs, ITransfersContainer::IncludeKeyUnlocked);
+  m_transferDetails.getOutputs(outputs, ITransfersContainer::IncludeDefault);
+  std::vector<uint64_t> spendableAmounts(outputs.size(), 0);
+  std::vector<uint8_t> used(outputs.size(), 0);
 
   for (size_t i = 0; i < outputs.size(); ++i) {
     const auto& out = outputs[i];
-    if (!m_transactionsCache.isUsed(out)) {
-      if (is_valid_decomposed_amount(out.amount)) {
-        if (dust < out.amount) {
-          unusedTransfers.push_back(i);
-        } else {
-          unusedDust.push_back(i);
-        }
-      } else {
-        unusedUnmixable.push_back(i);
+    if (m_transactionsCache.isUsed(out)) continue;
+
+    // Legacy v1 path (useCT==false → includeNonCanonical==false) cannot spend
+    // ConfidentialOutputs — consensus rejects a v1 KeyInput whose ring members
+    // resolve to a ConfidentialOutput, and the v1 fee derivation has no way
+    // to declare the hidden value. Skip them so --legacy-tx sends don't trip
+    // on shielded inputs that are spendable only via v2.
+    if (!includeNonCanonical && out.type == TransactionTypes::OutputType::Confidential) {
+      continue;
+    }
+
+    const uint64_t spendableAmount = resolveSpendableAmount(out);
+    spendableAmounts[i] = spendableAmount;
+
+    if (includeNonCanonical && addUnmixable && isCoinbaseOutput(out)) {
+      coinbaseOutputs.push_back(i);
+      continue;
+    }
+
+    if (isTransparentNonCanonicalCtAmount(out)) {
+      nonCanonicalOutputs.push_back(i);
+      if (includeNonCanonical) {
+        continue;
       }
+    }
+
+    if (out.type == TransactionTypes::OutputType::Confidential || is_valid_decomposed_amount(out.amount)) {
+      if (dust < spendableAmount) {
+        unusedTransfers.push_back(i);
+      } else {
+        unusedDust.push_back(i);
+      }
+    } else {
+      unusedUnmixable.push_back(i);
     }
   }
 
   uint64_t foundMoney = 0;
-
-  while (foundMoney < neededMoney && (!unusedTransfers.empty() || !unusedDust.empty() || (addUnmixable && !unusedUnmixable.empty()))) {
-    size_t idx;
-    std::mt19937 urng = Random::generator();
-    if (addUnmixable && !unusedUnmixable.empty()) {
-      idx = popRandomValue(urng, unusedUnmixable);
-    } else {
-      idx = !unusedTransfers.empty() ? popRandomValue(urng, unusedTransfers) : popRandomValue(urng, unusedDust);
+  auto selectOutput = [&](size_t idx) {
+    if (used[idx]) {
+      return false;
     }
+    used[idx] = 1;
     selectedTransfers.push_back(outputs[idx]);
-    foundMoney += outputs[idx].amount;
+    foundMoney += spendableAmounts[idx];
+    return true;
+  };
+  std::mt19937 urng = Random::generator();
+
+  // In CT mode, a user-selected anonymity 0 is primarily for mined coinbase
+  // outputs, which can be spent as ring-size-1 KeyInputs. Prefer those first
+  // so large miner wallets do not pull in decoy-requiring inputs prematurely.
+  if (!coinbaseOutputs.empty()) {
+    std::sort(coinbaseOutputs.begin(), coinbaseOutputs.end(),
+              [&spendableAmounts](size_t a, size_t b) {
+                return spendableAmounts[a] > spendableAmounts[b];
+              });
+    for (size_t idx : coinbaseOutputs) {
+      if (foundMoney >= neededMoney ||
+          selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
+        break;
+      }
+      selectOutput(idx);
+    }
+  }
+
+  if (includeNonCanonical && addUnmixable && foundMoney < neededMoney) {
+    auto selectLargestFirst = [&](std::vector<size_t>& indexes) {
+      std::sort(indexes.begin(), indexes.end(),
+                [&spendableAmounts](size_t a, size_t b) {
+                  return spendableAmounts[a] > spendableAmounts[b];
+                });
+      for (size_t idx : indexes) {
+        if (foundMoney >= neededMoney ||
+            selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
+          break;
+        }
+        selectOutput(idx);
+      }
+    };
+
+    selectLargestFirst(unusedTransfers);
+    selectLargestFirst(unusedDust);
+    selectLargestFirst(unusedUnmixable);
+  }
+
+  // Phase 1: prefer canonical / mixable inputs.
+  if (!(includeNonCanonical && addUnmixable)) {
+    while (foundMoney < neededMoney &&
+           selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS &&
+           (!unusedTransfers.empty() || !unusedDust.empty() || (addUnmixable && !unusedUnmixable.empty()))) {
+      size_t idx;
+      if (addUnmixable && !unusedUnmixable.empty()) {
+        idx = popRandomValue(urng, unusedUnmixable);
+      } else {
+        idx = !unusedTransfers.empty() ? popRandomValue(urng, unusedTransfers) : popRandomValue(urng, unusedDust);
+      }
+      selectOutput(idx);
+    }
+  }
+
+  // Phase 2: if a shortfall remains, fall back to non-canonical inputs (sub-floor
+  // residue, V5+ coinbase whose single output is not a multiple of MIN_CT_DENOMINATION,
+  // etc.). The CT path absorbs the residue into the fee. Bounded only by CT_MAX_INPUTS.
+  //
+  // Sort descending by spendable amount and pick largest-first instead of random:
+  // a wallet with a mix of large V5+ coinbase outputs (~tens of KRB each) and many
+  // tiny sub-floor pieces (sub-cent) would otherwise random-walk through the dust
+  // and exhaust CT_MAX_INPUTS long before covering the spend.
+  if (includeNonCanonical && foundMoney < neededMoney && !nonCanonicalOutputs.empty()) {
+    std::sort(nonCanonicalOutputs.begin(), nonCanonicalOutputs.end(),
+              [&spendableAmounts](size_t a, size_t b) {
+                return spendableAmounts[a] > spendableAmounts[b];
+              });
+    for (size_t idx : nonCanonicalOutputs) {
+      if (foundMoney >= neededMoney ||
+          selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
+        break;
+      }
+      selectOutput(idx);
+    }
+  }
+
+  // Once funded, CT anonymity-0 sends may proactively pull in sub-floor
+  // transparent dust. That removes dust from the wallet and lets the CT
+  // builder either absorb it into the fee or roll it into canonical CT change.
+  // Gated on addUnmixable (mixIn == 0): the user has already waived privacy,
+  // so revealing extra transparent dust via ring-1 KeyInputs is acceptable.
+  // On mixin>0 sends we never proactively append transparent dust — that would
+  // link those outputs to an otherwise-shielded spend. (Dust still gets spent
+  // if genuinely needed to fund the tx; it just isn't swept opportunistically.)
+  if (includeNonCanonical && addUnmixable && foundMoney >= neededMoney && !nonCanonicalOutputs.empty() &&
+      selectedTransfers.size() < CryptoNote::parameters::CT_MAX_INPUTS) {
+    std::sort(nonCanonicalOutputs.begin(), nonCanonicalOutputs.end(),
+              [&spendableAmounts](size_t a, size_t b) {
+                return spendableAmounts[a] < spendableAmounts[b];
+              });
+    for (size_t idx : nonCanonicalOutputs) {
+      if (selectedTransfers.size() >= CryptoNote::parameters::CT_MAX_INPUTS) {
+        break;
+      }
+      if (!isPurgeableCtDust(outputs[idx], spendableAmounts[idx])) {
+        continue;
+      }
+      selectOutput(idx);
+    }
   }
 
   return foundMoney;
-
 }
 
 } /* namespace CryptoNote */

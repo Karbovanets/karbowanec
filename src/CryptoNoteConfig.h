@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -30,6 +31,15 @@ namespace parameters {
 const uint64_t DIFFICULTY_TARGET                             = 240; // seconds
 const uint64_t EXPECTED_NUMBER_OF_BLOCKS_PER_DAY             = 24 * 60 * 60 / DIFFICULTY_TARGET;
 const uint64_t CRYPTONOTE_MAX_BLOCK_NUMBER                   = 500000000;
+// Maximum unlock_time accepted at block major v6+. Plain txs at v6+ must use
+// height interpretation only and stay at or below this cap; the timestamp
+// branch is removed. Pre-v6 outputs whose tx carries an unlock_time exceeding
+// this cap (e.g. accidental Unix timestamps in seconds) are treated as
+// unlocked when referenced from a v6+ tip, recovering funds that were
+// effectively frozen by user error under the dual height/timestamp scheme.
+// 10,000,000 blocks ≈ 76 years from genesis at 240s/block — well beyond any
+// legitimate lock; clearly bogus for everything above it.
+const uint64_t CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6               = UINT64_C(10000000);
 const size_t   CRYPTONOTE_MAX_BLOCK_BLOB_SIZE                = 500000000;
 const size_t   CRYPTONOTE_MAX_TX_SIZE                        = 1000000000;
 const uint64_t CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX       = 111; // addresses start with "K"
@@ -37,7 +47,7 @@ const uint64_t CRYPTONOTE_TX_PROOF_BASE58_PREFIX             = 3576968; // (0x36
 const uint64_t CRYPTONOTE_RESERVE_PROOF_BASE58_PREFIX        = 44907175188; // (0xa74ad1d14), starts with "RsrvPrf..."
 const uint64_t CRYPTONOTE_KEYS_SIGNATURE_BASE58_PREFIX       = 176103705; // (0xa7f2119), starts with "SigV1..."
 const size_t   CRYPTONOTE_MINED_MONEY_UNLOCK_WINDOW          = 10;
-const size_t   CRYPTONOTE_TX_SPENDABLE_AGE                   = 6;
+const size_t   CRYPTONOTE_TX_SPENDABLE_AGE                   = 2;
 const uint64_t CRYPTONOTE_BLOCK_FUTURE_TIME_LIMIT            = DIFFICULTY_TARGET * 7;
 const uint64_t CRYPTONOTE_BLOCK_FUTURE_TIME_LIMIT_V1         = DIFFICULTY_TARGET * 3;
 const size_t   BLOCKCHAIN_TIMESTAMP_CHECK_WINDOW             = 60;
@@ -50,6 +60,7 @@ const uint64_t TAIL_EMISSION_REWARD                          = UINT64_C(10000000
 const size_t CRYPTONOTE_COIN_VERSION                         = 1;
 const unsigned EMISSION_SPEED_FACTOR                         = 18;
 static_assert(EMISSION_SPEED_FACTOR <= 8 * sizeof(uint64_t), "Bad EMISSION_SPEED_FACTOR");
+
 
 const size_t   CRYPTONOTE_REWARD_BLOCKS_WINDOW               = 100;
 const size_t   CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE     = 1000000; //size of block (bytes) after which reward for block calculated using block size
@@ -65,10 +76,35 @@ const uint64_t MINIMUM_FEE_V3                                = UINT64_C(10000000
 const uint64_t MINIMUM_FEE                                   = MINIMUM_FEE_V3;
 const uint64_t MAXIMUM_FEE                                   = UINT64_C(100000000000);
 
-const uint64_t DEFAULT_DUST_THRESHOLD                        = UINT64_C(100000000);
+const uint64_t DEFAULT_DUST_THRESHOLD                        = UINT64_C(10000000000);
 const uint64_t MIN_TX_MIXIN_SIZE                             = 2;
-const uint64_t MAX_TX_MIXIN_SIZE                             = 20;
+const uint64_t MAX_TX_MIXIN_SIZE                             = 20; // legacy, actual max mixin is defined in CT_MAX_RING_SIZE
 const uint64_t MAX_EXTRA_SIZE                                = 1024;
+
+// Confidential transaction parameters
+const size_t   CT_MIN_RING_SIZE                              = 4;     // min ring members per CT input
+const size_t   CT_MAX_RING_SIZE                              = 16;    // max ring members per CT input
+const uint64_t DEFAULT_TX_MIXIN                              = CT_MAX_RING_SIZE - 1; // decoys, gives ring size 16
+// Mixed-bucket decoy sampling for CT inputs (wallet policy, not consensus).
+// When a CT input's ring is at least CT_MIN_RING_SIZE_FOR_MIXING members,
+// the wallet reserves CT_MIXING_DECOYS_PER_INPUT slots for decoys drawn
+// from a *different* amount bucket than the real spend's bucket. Consensus
+// already supports mixed rings via the per-member ConfidentialInput schema;
+// these knobs control how aggressively the wallet exploits that capability.
+const size_t   CT_MIXING_DECOYS_PER_INPUT                    = 2;
+const size_t   CT_MIN_RING_SIZE_FOR_MIXING                   = 8;
+const uint64_t CT_MINIMUM_FEE                                = UINT64_C(10000000000);    // 0.01 KRB (= MIN_CT_DENOMINATION)
+const uint64_t CT_MAXIMUM_FEE                                = UINT64_C(100000000000000); // 100 KRB
+const uint64_t CT_CONFIDENTIAL_OUTPUT_AMOUNT                 = UINT64_MAX;      // internal bucket for hidden-output rings
+// Per-tx structural caps. CT_MAX_INPUTS sized for coinbase batch
+// consolidation (a long-running miner can spend many cheap KeyInput
+// shields in one tx; KeyInput verify is microseconds, Triptych
+// ConfidentialInput verify is single-digit ms even batched, so the
+// worst-case all-Triptych ring-16 shape is still under ~2 s/tx).
+// CT_MAX_OUTPUTS stays narrow because GK output proofs are the real
+// asymmetric verifier cost.
+const size_t   CT_MAX_INPUTS                                 = 512;
+const size_t   CT_MAX_OUTPUTS                                = 64;
 
 const uint64_t MAX_TRANSACTION_SIZE_LIMIT                    = CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE_CURRENT / 4 - CRYPTONOTE_COINBASE_BLOB_RESERVED_SIZE;
 
@@ -109,6 +145,8 @@ const uint32_t UPGRADE_HEIGHT_V4_2                           = 500000; // Fee pe
 const uint32_t UPGRADE_HEIGHT_V4_3                           = 667000; // Fixed min fee + fee per-byte for extra
 const uint32_t UPGRADE_HEIGHT_V5                             = 700000; // Block v5, back to LWMA1+, Alt. Signed Proof-of-Work
 const uint32_t UPGRADE_HEIGHT_V6                             = 4294967294; // Block v6
+const uint32_t UPGRADE_HEIGHT_V7                             = 4294967294; // Block v7 (reserved for future PQ-plain activation)
+const uint32_t CT_FORK_HEIGHT                                = UPGRADE_HEIGHT_V6; // Confidential Transactions, Pubkey-referenced rings for CT transactions, enable mempool-based zero-conf transactions chaining
 
 const unsigned UPGRADE_VOTING_THRESHOLD                      = 90; // percent
 const uint32_t UPGRADE_VOTING_WINDOW                         = EXPECTED_NUMBER_OF_BLOCKS_PER_DAY;  // blocks
@@ -142,13 +180,65 @@ const char     GENESIS_COINBASE_TX_HEX[]                     =
 "f904925cc23f86f9f3565188862275dc556a9bdfb6aec22c5aca7f0177c45ba8"; // tx pubkey
 const char     DNS_CHECKPOINTS_HOST[]                        = "checkpoints.karbo.org";
 
+// Approved signer addresses for DNS checkpoint records.
+//
+// DNS TXT records served from DNS_CHECKPOINTS_HOST must be in the form
+//   "<height>:<block_hash_hex>:<signature>"
+// where <signature> is produced by signing the string "<height>:<block_hash_hex>"
+// with one of the wallets whose address appears in DNS_CHECKPOINT_SIGNERS. The
+// signature scheme is the one wired into simplewallet's `sign_message` command
+// (CryptoNoteFormatUtils::signMessage / verifyMessage) — Schnorr over the
+// account's spend keypair, Base58-encoded with the
+// CRYPTONOTE_KEYS_SIGNATURE_BASE58_PREFIX tag.
+//
+// Operational workflow for a maintainer:
+//   1. simplewallet --generate-new-wallet checkpoint-signer.wallet
+//   2. note the printed address, e.g. "Kxxx..."; add it to this array in the
+//      next release build.
+//   3. encrypt the wallet file and keep it offline; it should never receive
+//      funds — the only operation it performs is `sign_message`.
+//      Any funds sent to it are simply donations to the project.
+//   4. to publish a new checkpoint, load the wallet on an offline machine,
+//      run `sign_message`, enter "<height>:<block_hash_hex>", and copy the
+//      signature into the corresponding DNS TXT record.
+//
+// Multi-signer / any-of-N semantics: a DNS record is accepted if its signature
+// verifies against ANY address in this list. This lets the project rotate a
+// signing wallet (add the new address in release N, drop the old one in
+// release N+1) without an emergency rollout, and lets multiple maintainers
+// hold independent signers without coordinating on a single hot key.
+//
+// Empty signer set: leave just the nullptr sentinel below — DNS checkpoint
+// loading then fail-closes (the loader logs once and skips every record).
+// This is the safe default before keys are provisioned.
+//
+// Implementation note: nullptr-terminated C array, not std::array. The
+// previous std::array<const char*, N> form required maintainers to update
+// N manually each time they added or removed a signer; under MSVC the
+// extra initializers were silently dropped (no diagnostic, COUNT stayed
+// at N), which fail-closed the loader even with real signers configured —
+// the security-degrading kind of "silent". The sentinel scheme makes
+// COUNT auto-track the entry count via sizeof, requires no manual sizing,
+// and works for any count including zero (MSVC rejects zero-element C
+// arrays, but a one-element `{ nullptr }` is well-formed).
+constexpr const char* const DNS_CHECKPOINT_SIGNERS[]         = {
+  // "Kxxx...maintainer-1-address...",
+  // "Kxxx...maintainer-2-address...",
+  "Kdns13W9JuUHg8D12yWk9CSMREzZRw5bzFP4qHuMuAYtDwdgQbCdFJJMZEn6iPuZuAMRDuY5S4QcWTj55P7aYfP2SXtTQz7",
+  nullptr   // sentinel — must remain the final entry
+};
+constexpr size_t DNS_CHECKPOINT_SIGNERS_COUNT                =
+  (sizeof(DNS_CHECKPOINT_SIGNERS) / sizeof(DNS_CHECKPOINT_SIGNERS[0])) - 1;
+
 const uint8_t  CURRENT_TRANSACTION_VERSION                   =  1;
+const uint8_t  TRANSACTION_VERSION_CT                        =  2;
 const uint8_t  BLOCK_MAJOR_VERSION_1                         =  1;
 const uint8_t  BLOCK_MAJOR_VERSION_2                         =  2;
 const uint8_t  BLOCK_MAJOR_VERSION_3                         =  3;
 const uint8_t  BLOCK_MAJOR_VERSION_4                         =  4;
 const uint8_t  BLOCK_MAJOR_VERSION_5                         =  5;
 const uint8_t  BLOCK_MAJOR_VERSION_6                         =  6;
+const uint8_t  BLOCK_MAJOR_VERSION_7                         =  7;
 const uint8_t  BLOCK_MINOR_VERSION_0                         =  0;
 const uint8_t  BLOCK_MINOR_VERSION_1                         =  1;
 

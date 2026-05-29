@@ -44,6 +44,12 @@ public:
 
   INode& getNode() { return m_node; }
 
+  // Force v1 plain (transparent) transactions even after the CT fork. When
+  // set, transfer paths skip the CT codepath regardless of chain height.
+  // Used by GreenWallet --legacy-tx and walletd's legacy-tx config option.
+  void setForceLegacyTxs(bool force) { m_forceLegacyTxs = force; }
+  bool forceLegacyTxs() const { return m_forceLegacyTxs; }
+
   virtual void initialize(const std::string& path, const std::string& password) override;
   virtual void initializeWithViewKey(const std::string& path, const std::string& password, const Crypto::SecretKey& viewSecretKey) override;
   virtual void initializeWithViewKey(const std::string& path, const std::string& password, const Crypto::SecretKey& viewSecretKey, const uint64_t& creationTimestamp) override;
@@ -269,7 +275,8 @@ protected:
 
   size_t doTransfer(const TransactionParameters& transactionParameters, Crypto::SecretKey& txSecretKey);
 
-  void checkIfEnoughMixins(std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult, uint64_t mixIn) const;
+  void checkIfEnoughMixins(std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult,
+    const std::vector<uint64_t>& inputMixins) const;
   std::vector<WalletTransfer> convertOrdersToTransfers(const std::vector<WalletOrder>& orders) const;
   uint64_t countNeededMoney(const std::vector<CryptoNote::WalletTransfer>& destinations, uint64_t fee) const;
   CryptoNote::AccountPublicAddress parseAccountAddressString(const std::string& addressString) const;
@@ -281,19 +288,55 @@ protected:
   void validateTransactionParameters(const TransactionParameters& transactionParameters) const;
 
   void requestMixinOuts(const std::vector<OutputToTransfer>& selectedTransfers,
-    uint64_t mixIn,
+    const std::vector<uint64_t>& inputMixins,
     std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult);
+
+  // Returns the per-input mixing-bucket assignment when CT is active. A zero
+  // entry means "do not mix for this input" (ring too small, or no sensible
+  // mixing bucket exists). The bucket is always *different* from the input's
+  // native bucket so decoys actually broaden the ring's type signature.
+  std::vector<uint64_t> chooseCtMixingBuckets(const std::vector<OutputToTransfer>& selectedTransfers,
+    const std::vector<uint64_t>& inputMixins,
+    bool useCT) const;
+
+  // Pulls a small batch of cross-bucket decoys for CT inputs whose native
+  // bucket appears in mixingBuckets[i] != 0. Single daemon round trip; the
+  // result is parallel to selectedTransfers and may be empty for inputs that
+  // opted out of mixing. Errors are non-fatal: an input that fails to get
+  // mixing decoys falls back to a pure native-bucket ring.
+  void requestCtMixingDecoys(const std::vector<OutputToTransfer>& selectedTransfers,
+    const std::vector<uint64_t>& mixingBuckets,
+    std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixingResult);
 
   void prepareInputs(const std::vector<OutputToTransfer>& selectedTransfers,
     std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult,
-    uint64_t mixIn,
-    std::vector<InputInfo>& keysInfo);
+    const std::vector<uint64_t>& inputMixins,
+    std::vector<InputInfo>& keysInfo,
+    const std::vector<uint64_t>& mixingBuckets = {},
+    const std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixingResult = {});
 
   uint64_t selectTransfers(uint64_t needeMoney,
     bool dust,
     uint64_t dustThreshold,
     std::vector<WalletOuts>&& wallets,
-    std::vector<OutputToTransfer>& selectedTransfers);
+    std::vector<OutputToTransfer>& selectedTransfers,
+    bool includeNonCanonical = false,
+    std::vector<OutputToTransfer>* sweptDust = nullptr);
+
+  bool isCoinbaseOutput(const OutputToTransfer& output) const;
+  // Shrinks each transparent (KeyInput) input's ring to the decoys its bucket
+  // returned — any ring size is valid for a KeyInput — so a decoy shortfall
+  // degrades the ring instead of failing the send. Confidential (Triptych)
+  // inputs are left strict. Optional swept dust that can't reach
+  // CT_MIN_RING_SIZE is dropped (rebuilding the parallel per-input vectors)
+  // rather than included as a revealed input; required inputs are never dropped.
+  void adaptTransparentRings(const std::vector<OutputToTransfer>& sweptDust,
+    std::vector<OutputToTransfer>& selectedTransfers,
+    std::vector<uint64_t>& inputMixins,
+    std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& mixinResult,
+    uint64_t& foundMoney) const;
+  std::vector<uint64_t> chooseInputMixins(const std::vector<OutputToTransfer>& selectedTransfers,
+    uint64_t requestedMixin, bool useCT) const;
 
   std::vector<ReceiverAmounts> splitDestinations(const std::vector<WalletTransfer>& destinations,
     uint64_t dustThreshold, const Currency& currency);
@@ -301,6 +344,12 @@ protected:
 
   std::unique_ptr<CryptoNote::ITransaction> makeTransaction(const std::vector<ReceiverAmounts>& decomposedOutputs,
     std::vector<InputInfo>& keysInfo, const std::string& extra, uint64_t unlockTimestamp, Crypto::SecretKey& txSecretKey);
+
+  // Build a confidential (CT v2) transaction from decomposed outputs and prepared inputs.
+  // For the transition period (spending pre-fork transparent inputs), ring member commitments
+  // are computed as amount*H (implicit transparent commitment, blinding factor = 0).
+  CryptoNote::Transaction makeConfidentialTransaction(const std::vector<ReceiverAmounts>& decomposedOutputs,
+    std::vector<InputInfo>& keysInfo, uint64_t fee, const std::string& extra, Crypto::SecretKey& txSecretKey);
 
   void sendTransaction(const CryptoNote::Transaction& cryptoNoteTransaction);
   size_t validateSaveAndSendTransaction(const ITransactionReader& transaction, const std::vector<WalletTransfer>& destinations, bool send);
@@ -371,6 +420,7 @@ protected:
   INode& m_node;
   mutable Logging::LoggerRef m_logger;
   bool m_stopped;
+  bool m_forceLegacyTxs = false;
 
   WalletsContainer m_walletsContainer;
   ContainerStorage m_containerStorage;

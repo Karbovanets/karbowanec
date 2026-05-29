@@ -24,6 +24,7 @@
 #include <tuple>
 
 #include "Common/StringTools.h"
+#include "Denominations.h"
 #include "CryptoNoteCore/Currency.h"
 #include "CryptoNoteCore/TransactionApi.h"
 #include "CryptoNoteCore/TransactionApiExtra.h"
@@ -739,6 +740,83 @@ TEST_F(WalletApi, transferFromOneAddress) {
   ASSERT_EQ(TEST_BLOCK_REWARD - SENT - FEE, alice.getActualBalance(aliceAddress) + alice.getPendingBalance(aliceAddress));
 
   bob.shutdown();
+  wait(100);
+}
+
+TEST_F(WalletApi, confidentialOutputCanBeRescannedReorgedAndSpentAgain) {
+  CryptoNote::WalletGreen bob(dispatcher, currency, node, logger, TRANSACTION_SOFTLOCK_TIME);
+  bob.initialize(BOB_WALLET_PATH, "pass2");
+  std::string bobAddress = bob.createAddress();
+
+  // Amounts must be multiples of MIN_CT_DENOMINATION (0.01 KRB).
+  const uint64_t fundingAmount = 100 * CryptoNote::MIN_CT_DENOMINATION; // 1 KRB
+  const uint64_t spendAmount = 50 * CryptoNote::MIN_CT_DENOMINATION;    // 0.5 KRB
+  const uint64_t fee = CryptoNote::parameters::CT_MINIMUM_FEE;
+
+  setMinerTo(alice);
+  ASSERT_TRUE(generator.generateFromBaseTx(generator.getMinerAccount()));
+  unlockMoney();
+
+  size_t fundingTx;
+  {
+    SCOPED_TRACE("funding Bob with a CT output");
+    node.setLastLocalBlockHeight(CryptoNote::parameters::CT_FORK_HEIGHT);
+    fundingTx = sendMoney(bobAddress, fundingAmount, fee, 0);
+    node.clearLastLocalBlockHeightOverride();
+    node.updateObservers();
+    waitForTransactionConfirmed(alice, fundingTx);
+  }
+
+  generator.generateEmptyBlocks(static_cast<size_t>(TRANSACTION_SOFTLOCK_TIME + 2));
+  for (size_t i = 0; i < 3 && bob.getActualBalance() != fundingAmount; ++i) {
+    node.updateObservers();
+    ASSERT_TRUE(waitForWalletEvent(bob, WalletEventType::SYNC_COMPLETED, std::chrono::seconds(5)));
+  }
+  ASSERT_EQ(fundingAmount, bob.getActualBalance());
+
+  {
+    SCOPED_TRACE("saving Bob keys-only before rescan");
+    bob.save(WalletSaveLevel::SAVE_KEYS_ONLY);
+    bob.shutdown();
+  }
+
+  CryptoNote::WalletGreen rescannedBob(dispatcher, currency, node, logger, TRANSACTION_SOFTLOCK_TIME);
+  {
+    SCOPED_TRACE("loading Bob and rescanning CT output");
+    rescannedBob.load(BOB_WALLET_PATH, "pass2");
+    node.updateObservers();
+    waitForActualBalance(rescannedBob, fundingAmount);
+  }
+
+  size_t firstSpendTx;
+  {
+    SCOPED_TRACE("spending rescanned CT output");
+    node.setLastLocalBlockHeight(CryptoNote::parameters::CT_FORK_HEIGHT);
+    firstSpendTx = sendMoney(rescannedBob, RANDOM_ADDRESS, spendAmount, fee, 3);
+    node.clearLastLocalBlockHeightOverride();
+    node.updateObservers();
+    waitForTransactionConfirmed(rescannedBob, firstSpendTx);
+  }
+
+  uint32_t detachedSpendHeight = static_cast<uint32_t>(generator.getBlockchain().size() - 1);
+  {
+    SCOPED_TRACE("detaching CT spend and restoring balance");
+    node.startAlternativeChain(detachedSpendHeight);
+    generator.generateEmptyBlocks(1);
+    node.updateObservers();
+    waitForActualBalance(rescannedBob, fundingAmount);
+  }
+
+  {
+    SCOPED_TRACE("spending restored CT output again");
+    node.setLastLocalBlockHeight(CryptoNote::parameters::CT_FORK_HEIGHT);
+    size_t secondSpendTx = sendMoney(rescannedBob, RANDOM_ADDRESS, spendAmount, fee, 3);
+    node.clearLastLocalBlockHeightOverride();
+    node.updateObservers();
+    waitForTransactionConfirmed(rescannedBob, secondSpendTx);
+  }
+
+  rescannedBob.shutdown();
   wait(100);
 }
 
@@ -3526,7 +3604,8 @@ TEST_F(WalletApi, transferFailsIfNoChangeDestinationAndMultipleSourceAddressesSe
 }
 
 TEST_F(WalletApi, transferSendsChangeToAddress) {
-  const uint64_t MONEY = SENT + FEE + 1;
+  const uint64_t CHANGE = currency.defaultDustThreshold();
+  const uint64_t MONEY = SENT + FEE + CHANGE;
 
   generator.getSingleOutputTransaction(parseAddress(aliceAddress), MONEY);
   unlockMoney();
@@ -3536,17 +3615,17 @@ TEST_F(WalletApi, transferSendsChangeToAddress) {
   params.fee = FEE;
   params.changeDestination = alice.createAddress();
 
-  alice.transfer(params);
+  auto txId = alice.transfer(params);
   node.updateObservers();
 
-  waitActualBalanceUpdated(MONEY);
+  waitForTransactionConfirmed(alice, txId);
 
-  EXPECT_EQ(MONEY - SENT - FEE, alice.getPendingBalance());
+  EXPECT_EQ(CHANGE, alice.getPendingBalance());
   EXPECT_EQ(0, alice.getActualBalance());
   EXPECT_EQ(0, alice.getActualBalance(aliceAddress));
   EXPECT_EQ(0, alice.getPendingBalance(aliceAddress));
   EXPECT_EQ(0, alice.getActualBalance(alice.getAddress(1)));
-  EXPECT_EQ(MONEY - SENT - FEE, alice.getPendingBalance(alice.getAddress(1)));
+  EXPECT_EQ(CHANGE, alice.getPendingBalance(alice.getAddress(1)));
 }
 
 TEST_F(WalletApi, checkBaseTransaction) {
@@ -3783,6 +3862,9 @@ TEST_F(WalletApi, walletHandlesResetAndSwitchingToAlternativeChain) {
   generator.generateEmptyBlocks(alternativeChainSize - detachHeight);
   node.updateObservers();
   waitForWalletEvent(alice, CryptoNote::SYNC_COMPLETED, std::chrono::seconds(30));
+  waitForPredicate(alice, [&] {
+    return alice.getTransaction(tx2).state == WalletTransactionState::CANCELLED;
+  });
 
   // Make sure transaction 2 was cancelled
   ASSERT_EQ(WalletTransactionState::SUCCEEDED, alice.getTransaction(tx1).state);

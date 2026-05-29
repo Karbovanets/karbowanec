@@ -131,6 +131,9 @@ int main(int argc, char **argv)
 
     /* Create the wallet instance */
     CryptoNote::WalletGreen* wallet = new CryptoNote::WalletGreen(dispatcher, currency, *node, logManager);
+    /* --legacy-tx opts out of CT and forces v1 plain transactions even when
+       the chain is post-fork. */
+    wallet->setForceLegacyTxs(config.legacyTx);
     std::unique_ptr<CryptoNote::WalletGreen> walletGuard(wallet);
 
     /* Run the interactive wallet interface */

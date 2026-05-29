@@ -82,9 +82,13 @@ public:
     }
   }
 
-  void mineBlocksFor(size_t node, const std::string& address, size_t blockCount) {
+  // Takes AccountKeys directly now — TestNode::startMining can't accept a
+  // Base58 address anymore because Karbo v5+ signed-PoW requires the spend
+  // secret to sign blocks. Callers extract keys from their wallet via
+  // Tests::accountKeysFromWallet(...) before calling here.
+  void mineBlocksFor(size_t node, const CryptoNote::AccountKeys& minerKeys, size_t blockCount) {
     auto prevHeight = nodeDaemons[node]->getLocalHeight();
-    nodeDaemons[node]->startMining(1, address);
+    nodeDaemons[node]->startMining(1, minerKeys);
 
     do {
       std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -107,7 +111,7 @@ public:
     auto& wallet = *wallets[walletNum];
     auto& node = *nodeDaemons[nodeNum];
 
-    node.startMining(1, wallet.getAddress());
+    node.startMining(1, Tests::accountKeysFromWallet(wallet));
     walletObservers[walletNum]->waitActualBalanceChange();
     node.stopMining();
 
@@ -214,7 +218,7 @@ TEST_F(IntegrationTest, BlockPropagationSpeed) {
 
     const size_t BLOCKS_COUNT = 10;
 
-    nodeDaemons.front()->startMining(1, wallet->getAddress());
+    nodeDaemons.front()->startMining(1, Tests::accountKeysFromWallet(*wallet));
 
     for (size_t blockNumber = 0; blockNumber < BLOCKS_COUNT; ++blockNumber) {
       uint32_t localHeight = localObserver.waitLastKnownBlockHeightUpdated();

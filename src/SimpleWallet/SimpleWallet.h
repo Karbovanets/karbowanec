@@ -117,6 +117,7 @@ namespace CryptoNote
     bool show_unlocked_outputs_count(const std::vector<std::string> &args);
     bool list_transfers(const std::vector<std::string> &args);
     bool transfer(const std::vector<std::string> &args);
+    bool dust_sweep(const std::vector<std::string> &args);
     bool prepare_tx(const std::vector<std::string>& args);
     bool print_address(const std::vector<std::string> &args = std::vector<std::string>());
     bool save_address_to_file(const std::vector<std::string> &args = std::vector<std::string>());
@@ -218,6 +219,9 @@ namespace CryptoNote
     bool m_do_not_relay_tx;
     bool m_dump_keys_file;
     bool m_initial_remote_fee_mess;
+    // --legacy-tx: force v1 plain (transparent) transactions even after the CT
+    // fork. Default false; wallets default to CT post-fork.
+    bool m_legacy_tx = false;
     
     std::unique_ptr<std::promise<std::error_code>> m_initResultPromise;
 

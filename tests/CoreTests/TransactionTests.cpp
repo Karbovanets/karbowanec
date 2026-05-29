@@ -125,8 +125,9 @@ bool test_transaction_generation_and_ring_signature()
   output_keys.push_back(&boost::get<KeyOutput>(tx_mine_4.outputs[0].target).key);
   output_keys.push_back(&boost::get<KeyOutput>(tx_mine_5.outputs[0].target).key);
   output_keys.push_back(&boost::get<KeyOutput>(tx_mine_6.outputs[0].target).key);
+  const std::vector<Crypto::Signature>& signatures = keyInputSig(tx_rc1.signatures[0]);
   r = Crypto::check_ring_signature(pref_hash, boost::get<KeyInput>(tx_rc1.inputs[0]).keyImage,
-    output_keys, &tx_rc1.signatures[0][0]);
+    output_keys, signatures.data());
   CHECK_AND_ASSERT_MES(r, false, "failed to check ring signature");
 
   std::vector<size_t> outs;
@@ -150,11 +151,11 @@ bool test_block_creation()
   std::vector<uint64_t> szs(&vszs[0], &vszs[90]);
   CryptoNote::Currency currency = CryptoNote::CurrencyBuilder(logger).currency();
 
-  AccountPublicAddress adr;
-  bool r = currency.parseAccountAddressString("272xWzbWsP4cfNFfxY5ETN5moU8x81PKfWPwynrrqsNGDBQGLmD1kCkKCvPeDUXu5XfmZkCrQ53wsWmdfvHBGLNjGcRiDcK", adr);
-  CHECK_AND_ASSERT_MES(r, false, "failed to import");
+  AccountBase account;
+  account.generate();
+  AccountPublicAddress adr = account.getAccountKeys().address;
   Block b;
-  r = currency.constructMinerTx(BLOCK_MAJOR_VERSION_1, 90, Common::medianValue(szs), 3553616528562147, 33094, 10000000, adr, b.baseTransaction, BinaryArray(), 11);
+  bool r = currency.constructMinerTx(BLOCK_MAJOR_VERSION_1, 90, Common::medianValue(szs), 3553616528562147, 33094, 10000000, adr, b.baseTransaction, BinaryArray(), 11);
   return r;
 }
 

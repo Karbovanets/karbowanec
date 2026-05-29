@@ -38,7 +38,17 @@
 namespace CryptoNote {
 
 // ─── On-disk block metadata ────────────────────────────────────────────────
-// Stored packed, 100 bytes per record.
+// Stored packed, 116 bytes per record.
+//
+// confidentialSupply: total visible value currently locked inside the ECC CT
+//   pool at this block height (cumulative; updated by every block from the
+//   per-tx visible delta — see Blockchain::computeTxVisibleCtDelta).
+// pqPlainSupply:      total visible value held by PQ-owned plain outputs at
+//   this height. Stubbed at 0 today (no PQ output types exist yet) and tracked
+//   ahead of activation so the consensus supply invariant
+//     visible_plain_supply + pqPlainSupply + confidentialSupply
+//       == alreadyGeneratedCoins
+//   remains a single 64-bit subtraction once PQ-plain ships.
 #pragma pack(push, 1)
 struct DbBlockMeta {
   uint8_t  hash[32];
@@ -46,6 +56,8 @@ struct DbBlockMeta {
   uint64_t timestamp;
   uint64_t cumulativeDifficulty;
   uint64_t alreadyGeneratedCoins;
+  uint64_t confidentialSupply;
+  uint64_t pqPlainSupply;
   uint32_t blockCumulativeSize;
   uint32_t height;
   uint16_t txCount;
@@ -53,7 +65,7 @@ struct DbBlockMeta {
   uint8_t  minorVersion;  // was 'pad'; used for upgrade-detector voting
 };
 #pragma pack(pop)
-static_assert(sizeof(DbBlockMeta) == 100, "DbBlockMeta must be 100 bytes");
+static_assert(sizeof(DbBlockMeta) == 116, "DbBlockMeta must be 116 bytes");
 
 // ─── Exception thrown when LMDB map is full ────────────────────────────────
 class LMDBMapFullException : public std::runtime_error {

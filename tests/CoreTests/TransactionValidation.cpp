@@ -101,7 +101,7 @@ namespace
         }
 
         m_tx.signatures.push_back(std::vector<Crypto::Signature>());
-        std::vector<Crypto::Signature>& sigs = m_tx.signatures.back();
+        std::vector<Crypto::Signature>& sigs = keyInputSig(m_tx.signatures.back());
         sigs.resize(src_entr.keyInfo.outputs.size());
         generate_ring_signature(m_tx_prefix_hash, boost::get<KeyInput>(m_tx.inputs[i]).keyImage,
           keys_ptrs, m_in_contexts[i].secretKey, src_entr.keyInfo.realOutput.transactionIndex, sigs.data());
@@ -277,7 +277,9 @@ bool gen_tx_has_inputs_no_outputs::generate(std::vector<test_event_entry>& event
   builder.step4_calc_hash();
   builder.step5_sign(sources);
 
+  DO_CALLBACK(events, "mark_invalid_tx");
   events.push_back(builder.m_tx);
+  DO_CALLBACK(events, "mark_invalid_block");
   MAKE_NEXT_BLOCK_TX1(events, blk_1, blk_0r, miner_account, builder.m_tx);
 
   return true;
@@ -294,7 +296,7 @@ bool gen_tx_invalid_input_amount::generate(std::vector<test_event_entry>& events
   std::vector<TxBuildInput> sources;
   std::vector<TxBuildOutput> destinations;
   fill_tx_sources_and_destinations(events, blk_0, miner_account, miner_account, MK_COINS(1), m_currency.minimumFee(), 0, sources, destinations);
-  sources.front().amount++;
+  sources.front().keyInfo.amount++;
 
   tx_builder builder;
   builder.step1_init();
@@ -350,17 +352,17 @@ bool gen_tx_key_offest_points_to_foreign_key::generate(std::vector<test_event_en
   REWIND_BLOCKS(events, blk_1r, blk_1, miner_account);
   MAKE_ACCOUNT(events, alice_account);
   MAKE_ACCOUNT(events, bob_account);
-  MAKE_TX_LIST_START(events, txs_0, miner_account, bob_account, MK_COINS(60) + 1, blk_1);
-  MAKE_TX_LIST(events, txs_0, miner_account, alice_account, MK_COINS(60) + 1, blk_1);
+  MAKE_TX_LIST_START(events, txs_0, miner_account, bob_account, MK_COINS(10) + 1, blk_1);
+  MAKE_TX_LIST(events, txs_0, miner_account, alice_account, MK_COINS(10) + 1, blk_1);
   MAKE_NEXT_BLOCK_TX_LIST(events, blk_2, blk_1r, miner_account, txs_0);
 
   std::vector<TxBuildInput> sources_bob;
   std::vector<TxBuildOutput> destinations_bob;
-  fill_tx_sources_and_destinations(events, blk_2, bob_account, miner_account, MK_COINS(60) + 1 - m_currency.minimumFee(), m_currency.minimumFee(), 0, sources_bob, destinations_bob);
+  fill_tx_sources_and_destinations(events, blk_2, bob_account, miner_account, MK_COINS(10) + 1 - m_currency.minimumFee(), m_currency.minimumFee(), 0, sources_bob, destinations_bob);
 
   std::vector<TxBuildInput> sources_alice;
   std::vector<TxBuildOutput> destinations_alice;
-  fill_tx_sources_and_destinations(events, blk_2, alice_account, miner_account, MK_COINS(60) + 1 - m_currency.minimumFee(), m_currency.minimumFee(), 0, sources_alice, destinations_alice);
+  fill_tx_sources_and_destinations(events, blk_2, alice_account, miner_account, MK_COINS(10) + 1 - m_currency.minimumFee(), m_currency.minimumFee(), 0, sources_alice, destinations_alice);
 
   tx_builder builder;
   builder.step1_init();
@@ -464,8 +466,8 @@ bool gen_tx_key_image_not_derive_from_tx_key::generate(std::vector<test_event_en
 
   // Tx with invalid key image can't be subscribed, so create empty signature
   builder.m_tx.signatures.resize(1);
-  builder.m_tx.signatures[0].resize(1);
-  builder.m_tx.signatures[0][0] = boost::value_initialized<Crypto::Signature>();
+  builder.m_tx.signatures[0] = std::vector<Crypto::Signature>(1);
+  keyInputSig(builder.m_tx.signatures[0])[0] = boost::value_initialized<Crypto::Signature>();
 
   DO_CALLBACK(events, "mark_invalid_tx");
   events.push_back(builder.m_tx);
@@ -498,8 +500,8 @@ bool gen_tx_key_image_is_invalid::generate(std::vector<test_event_entry>& events
 
   // Tx with invalid key image can't be subscribed, so create empty signature
   builder.m_tx.signatures.resize(1);
-  builder.m_tx.signatures[0].resize(1);
-  builder.m_tx.signatures[0][0] = boost::value_initialized<Crypto::Signature>();
+  builder.m_tx.signatures[0] = std::vector<Crypto::Signature>(1);
+  keyInputSig(builder.m_tx.signatures[0])[0] = boost::value_initialized<Crypto::Signature>();
 
   DO_CALLBACK(events, "mark_invalid_tx");
   events.push_back(builder.m_tx);
@@ -562,7 +564,7 @@ bool gen_tx_check_input_unlock_time::generate(std::vector<test_event_entry>& eve
   make_tx_from_acc(1, false);
   make_tx_from_acc(2, false);
   make_tx_from_acc(3, true);
-  make_tx_from_acc(4, false);
+  make_tx_from_acc(4, true);
   make_tx_from_acc(5, true);
   MAKE_NEXT_BLOCK_TX_LIST(events, blk_3, blk_2, miner_account, txs_1);
 
@@ -697,15 +699,14 @@ bool GenerateTransactionWithZeroFee::generate(std::vector<test_event_entry>& eve
   CryptoNote::Transaction tx;
   construct_tx_to_key(m_logger, events, tx, blk_0, alice_account, bob_account, MK_COINS(1), 0, 0);
 
-  if (!m_keptByBlock) {
-    DO_CALLBACK(events, "mark_invalid_tx");
-  } else {
+  if (m_keptByBlock) {
     event_visitor_settings settings;
     settings.txs_keeped_by_block = true;
     settings.valid_mask = 1;
     events.push_back(settings);
   }
 
+  DO_CALLBACK(events, "mark_invalid_tx");
   events.push_back(tx);
 
   return true;

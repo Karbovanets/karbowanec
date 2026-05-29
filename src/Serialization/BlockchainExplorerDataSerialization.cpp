@@ -23,19 +23,22 @@
 #include <boost/variant/static_visitor.hpp>
 #include <boost/variant/apply_visitor.hpp>
 
+#include "CryptoNoteConfig.h"
 #include "CryptoNoteCore/CryptoNoteSerialization.h"
+#include "CryptoNoteCore/CryptoNoteTools.h"
 
 #include "Serialization/SerializationOverloads.h"
 
 namespace CryptoNote {
 
-enum class SerializationTag : uint8_t { Base = 0xff, Key = 0x2, Transaction = 0xcc, Block = 0xbb };
+enum class SerializationTag : uint8_t { Base = 0xff, Key = 0x2, Confidential = 0x4, Transaction = 0xcc, Block = 0xbb };
 
 namespace {
 
 struct BinaryVariantTagGetter: boost::static_visitor<uint8_t> {
   uint8_t operator()(const CryptoNote::BaseInputDetails) { return static_cast<uint8_t>(SerializationTag::Base); }
   uint8_t operator()(const CryptoNote::KeyInputDetails) { return static_cast<uint8_t>(SerializationTag::Key); }
+  uint8_t operator()(const CryptoNote::ConfidentialInputDetails) { return static_cast<uint8_t>(SerializationTag::Confidential); }
 };
 
 struct VariantSerializer : boost::static_visitor<> {
@@ -48,8 +51,8 @@ struct VariantSerializer : boost::static_visitor<> {
   const std::string name;
 };
 
-void getVariantValue(CryptoNote::ISerializer& serializer, uint8_t tag, boost::variant<CryptoNote::BaseInputDetails,
-                                                                                      CryptoNote::KeyInputDetails> in) {
+void getVariantValue(CryptoNote::ISerializer& serializer, uint8_t tag,
+                     CryptoNote::transactionInputDetails2& in) {
   switch (static_cast<SerializationTag>(tag)) {
   case SerializationTag::Base: {
     CryptoNote::BaseInputDetails v;
@@ -59,6 +62,12 @@ void getVariantValue(CryptoNote::ISerializer& serializer, uint8_t tag, boost::va
   }
   case SerializationTag::Key: {
     CryptoNote::KeyInputDetails v;
+    serializer(v, "data");
+    in = v;
+    break;
+  }
+  case SerializationTag::Confidential: {
+    CryptoNote::ConfidentialInputDetails v;
     serializer(v, "data");
     in = v;
     break;
@@ -98,6 +107,33 @@ void serialize(KeyInputDetails& inputToKey, ISerializer& serializer) {
   serializer(inputToKey.outputs, "outputs");
 }
 
+void serialize(RingMemberRef& member, ISerializer& serializer) {
+  serializer(member.amount, "amount");
+  serializer(member.outputIndex, "outputIndex");
+}
+
+void serialize(ConfidentialInputDetails& ctIn, ISerializer& serializer) {
+  serializePod(ctIn.keyImage, "keyImage", serializer);
+  serializePod(ctIn.pseudoCommitment, "pseudoCommitment", serializer);
+  serializer(ctIn.mixin, "mixin");
+  size_t ringSize = ctIn.ringMembers.size();
+  serializer.beginArray(ringSize, "ringMembers");
+  if (serializer.type() == ISerializer::INPUT) {
+    ctIn.ringMembers.resize(ringSize);
+  }
+  for (size_t i = 0; i < ringSize; ++i) {
+    // Each ring member has two differently-typed fields (amount, outputIndex).
+    // The JSON / KV-binary array protocol requires each element to be a
+    // self-contained object — calling the free serialize() directly emits
+    // the fields flat at array-element level, which leaves the
+    // standalone explorer seeing members[k] without an outputIndex.
+    // Routing through serializer() wraps each element in begin/endObject.
+    serializer(ctIn.ringMembers[i], "");
+  }
+  serializer.endArray();
+  serializer(ctIn.outputs, "outputs");
+}
+
 void serialize(transactionInputDetails2& input, ISerializer& serializer) {
   if (serializer.type() == ISerializer::OUTPUT) {
     BinaryVariantTagGetter tagGetter;
@@ -134,6 +170,7 @@ void serialize(TransactionDetails& transaction, ISerializer& serializer) {
   serializer(transaction.totalInputsAmount, "totalInputsAmount");
   serializer(transaction.totalOutputsAmount, "totalOutputsAmount");
   serializer(transaction.mixin, "mixin");
+  serializer(transaction.minMixin, "minMixin");
   serializer(transaction.unlockTime, "unlockTime");
   serializer(transaction.timestamp, "timestamp");
   serializer(transaction.version, "version");
@@ -145,31 +182,66 @@ void serialize(TransactionDetails& transaction, ISerializer& serializer) {
   serializer(transaction.inputs, "inputs");
   serializer(transaction.outputs, "outputs");
 
-  //serializer(transaction.signatures, "signatures");
-  if (serializer.type() == ISerializer::OUTPUT) {
-    std::vector<std::pair<size_t, Crypto::Signature>> signaturesForSerialization;
-    signaturesForSerialization.reserve(transaction.signatures.size());
-    size_t ctr = 0;
-    for (const auto& signaturesV : transaction.signatures) {
-      for (auto signature : signaturesV) {
-        signaturesForSerialization.emplace_back(ctr, std::move(signature));
+  // Per-input authorization variant. Emitted as an array of self-describing
+  // objects so the JSON consumer (standalone explorer / RPC clients) can
+  // dispatch without external context:
+  //   { "type": "base" }                            — coinbase slot
+  //   { "type": "key",  "sigs": [<Signature>, …] } — legacy ring signature
+  //   { "type": "ct",   <Triptych fields>         } — Triptych spend proof
+  // On input we read the tag and populate the matching variant alternative.
+  {
+    size_t sigCount = transaction.signatures.size();
+    serializer.beginArray(sigCount, "signatures");
+    if (serializer.type() == ISerializer::INPUT) {
+      transaction.signatures.resize(sigCount);
+    }
+    for (size_t i = 0; i < sigCount; ++i) {
+      serializer.beginObject("");
+      if (serializer.type() == ISerializer::OUTPUT) {
+        if (isCtInputSig(transaction.signatures[i])) {
+          std::string tag = "ct";
+          serializer(tag, "type");
+          serialize(ctInputSig(transaction.signatures[i]), serializer);
+        } else if (isKeyInputSig(transaction.signatures[i])) {
+          std::string tag = "key";
+          serializer(tag, "type");
+          auto& sigs = keyInputSig(transaction.signatures[i]);
+          size_t n = sigs.size();
+          serializer.beginArray(n, "sigs");
+          for (auto& s : sigs) serializePod(s, "", serializer);
+          serializer.endArray();
+        } else {
+          std::string tag = "base";
+          serializer(tag, "type");
+        }
+      } else {
+        std::string tag;
+        serializer(tag, "type");
+        if (tag == "ct") {
+          transaction.signatures[i] = CTInputSignature{};
+          serialize(ctInputSig(transaction.signatures[i]), serializer);
+        } else if (tag == "key") {
+          std::vector<Crypto::Signature> sigs;
+          size_t n = 0;
+          serializer.beginArray(n, "sigs");
+          sigs.resize(n);
+          for (auto& s : sigs) serializePod(s, "", serializer);
+          serializer.endArray();
+          transaction.signatures[i] = std::move(sigs);
+        } else {
+          transaction.signatures[i] = boost::blank{};
+        }
       }
-      ++ctr;
+      serializer.endObject();
     }
-    size_t size = transaction.signatures.size();
-    serializer(size, "signaturesSize");
-    serializer(signaturesForSerialization, "signatures");
-  } else {
-    size_t size = 0;
-    serializer(size, "signaturesSize");
-    transaction.signatures.resize(size);
+    serializer.endArray();
+  }
 
-    std::vector<std::pair<size_t, Crypto::Signature>> signaturesForSerialization;
-    serializer(signaturesForSerialization, "signatures");
-
-    for (const auto& signatureWithIndex : signaturesForSerialization) {
-      transaction.signatures[signatureWithIndex.first].push_back(signatureWithIndex.second);
-    }
+  // CT (v2) output proof body — GK denomination proofs, balance kernel.
+  // (Per-input Triptych proofs ride along in the signatures variant above.)
+  if (transaction.version == TRANSACTION_VERSION_CT) {
+    serializer(transaction.ctProofs, "ctProofs");
+    serializer(transaction.kernel, "kernel");
   }
 }
 
@@ -191,6 +263,8 @@ void serialize(BlockDetails& block, ISerializer& serializer) {
   serializer(block.blockSize, "blockSize");
   serializer(block.transactionsCumulativeSize, "transactionsCumulativeSize");
   serializer(block.alreadyGeneratedCoins, "alreadyGeneratedCoins");
+  serializer(block.confidentialSupply, "confidentialSupply");
+  serializer(block.pqPlainSupply, "pqPlainSupply");
   serializer(block.alreadyGeneratedTransactions, "alreadyGeneratedTransactions");
   serializer(block.sizeMedian, "sizeMedian");
   serializer(block.effectiveSizeMedian, "effectiveSizeMedian");
