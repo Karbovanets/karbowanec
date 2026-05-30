@@ -155,6 +155,135 @@ bool memEq(const void* a, const void* b, size_t n) {
     }                                                                          \
   } while (0)
 
+// v3 CT->CN unshield with MIXED outputs: a transparent KeyOutput (plain payout)
+// alongside a ConfidentialOutput (CT change). Confirms the output-variant codec
+// round-trips a mix of target types, and that the prefix hash (getObjectHash,
+// same serialization) covers both.
+Transaction buildMixedOutputV3() {
+  Transaction tx;
+  tx.version = TRANSACTION_VERSION_UNSHIELD;
+  tx.unlockTime = 0;
+  tx.fee = 10000000000ULL;
+  tx.extra = {0x01, 0x11, 0x22};
+
+  // One ConfidentialInput spends the confidential value (ring size 4, n=2).
+  ConfidentialInput cin;
+  for (size_t k = 0; k < 4; ++k) {
+    cin.ringMembers.push_back(RingMemberRef{
+        100000000ULL + k, static_cast<uint32_t>(k)});
+    cin.ringPubkeys.push_back(makePod<Crypto::PublicKey>(0x20 + k));
+    cin.ringCommitments.push_back(makePod<Crypto::EllipticCurvePoint>(0x30 + k));
+  }
+  cin.pseudoCommitment = makePod<Crypto::EllipticCurvePoint>(0x40);
+  cin.keyImage = makePod<Crypto::KeyImage>(0x50);
+  tx.inputs.push_back(cin);
+
+  // Output 0: transparent KeyOutput (plain payout), amount != 0.
+  KeyOutput ko;
+  ko.key = makePod<Crypto::PublicKey>(0x61);
+  TransactionOutput out0;
+  out0.amount = 100000000ULL;
+  out0.target = ko;
+  tx.outputs.push_back(out0);
+
+  // Output 1: ConfidentialOutput (CT change), amount field 0.
+  ConfidentialOutput cout;
+  cout.targetKey = makePod<Crypto::PublicKey>(0x62);
+  cout.commitment = makePod<Crypto::EllipticCurvePoint>(0x72);
+  std::memset(cout.maskedAmount.data(), 0x82, 8);
+  TransactionOutput out1;
+  out1.amount = 0;
+  out1.target = cout;
+  tx.outputs.push_back(out1);
+
+  // One CTInputSignature (Triptych) for the single ConfidentialInput.
+  tx.signatures.resize(1);
+  tx.signatures[0] = CTInputSignature{};
+  CTInputSignature& cs = ctInputSig(tx.signatures[0]);
+  cs.I_bits.resize(2); cs.A.resize(2); cs.B.resize(2);
+  cs.Q_P.resize(2); cs.Q_M.resize(2); cs.Q_U.resize(2);
+  cs.z.resize(2); cs.za.resize(2); cs.zb.resize(2);
+  for (size_t j = 0; j < 2; ++j) {
+    cs.I_bits[j] = makePod<Crypto::EllipticCurvePoint>(0xA0 + j);
+    cs.A[j]      = makePod<Crypto::EllipticCurvePoint>(0xA2 + j);
+    cs.B[j]      = makePod<Crypto::EllipticCurvePoint>(0xA4 + j);
+    cs.Q_P[j]    = makePod<Crypto::EllipticCurvePoint>(0xA6 + j);
+    cs.Q_M[j]    = makePod<Crypto::EllipticCurvePoint>(0xA8 + j);
+    cs.Q_U[j]    = makePod<Crypto::EllipticCurvePoint>(0xAA + j);
+    cs.z[j]      = makePod<Crypto::EllipticCurveScalar>(0xAC + j);
+    cs.za[j]     = makePod<Crypto::EllipticCurveScalar>(0xAE + j);
+    cs.zb[j]     = makePod<Crypto::EllipticCurveScalar>(0xB0 + j);
+  }
+  cs.f_P = makePod<Crypto::EllipticCurveScalar>(0xB2);
+  cs.f_M = makePod<Crypto::EllipticCurveScalar>(0xB3);
+  cs.f_U = makePod<Crypto::EllipticCurveScalar>(0xB4);
+
+  // One CT output proof, for the single ConfidentialOutput.
+  tx.ctProofs.resize(1);
+  CTOutputProof& proof = tx.ctProofs[0];
+  for (size_t i = 0; i < 6; ++i) {
+    proof.I[i]  = makePod<Crypto::EllipticCurvePoint>(0xC0 + i);
+    proof.A[i]  = makePod<Crypto::EllipticCurvePoint>(0xC6 + i);
+    proof.B[i]  = makePod<Crypto::EllipticCurvePoint>(0xCC + i);
+    proof.Q[i]  = makePod<Crypto::EllipticCurvePoint>(0xD2 + i);
+    proof.z[i]  = makePod<Crypto::EllipticCurveScalar>(0xD8 + i);
+    proof.za[i] = makePod<Crypto::EllipticCurveScalar>(0xDE + i);
+    proof.zb[i] = makePod<Crypto::EllipticCurveScalar>(0xE4 + i);
+  }
+  proof.f = makePod<Crypto::EllipticCurveScalar>(0xEA);
+
+  tx.kernel.excessCommitment = makePod<Crypto::EllipticCurvePoint>(0xF0);
+  tx.kernel.sigE = makePod<Crypto::EllipticCurveScalar>(0xF1);
+  tx.kernel.sigS = makePod<Crypto::EllipticCurveScalar>(0xF2);
+
+  return tx;
+}
+
+int runV3() {
+  Transaction src = buildMixedOutputV3();
+
+  BinaryArray ba;
+  if (!toBinaryArray(src, ba)) {
+    std::fprintf(stderr, "v3 toBinaryArray failed\n");
+    return 1;
+  }
+  std::printf("v3 mixed-output serialized %zu bytes\n", ba.size());
+
+  Transaction dst;
+  if (!fromBinaryArray(dst, ba)) {
+    std::fprintf(stderr, "v3 fromBinaryArray failed (stream did not reach end?)\n");
+    return 1;
+  }
+
+  CHECK(dst.version == TRANSACTION_VERSION_UNSHIELD);
+  CHECK(dst.fee == src.fee);
+  CHECK(dst.outputs.size() == 2);
+
+  // Output 0: transparent KeyOutput survives as KeyOutput with amount + key.
+  CHECK(dst.outputs[0].target.type() == typeid(KeyOutput));
+  CHECK(dst.outputs[0].amount == 100000000ULL);
+  CHECK(memEq(&boost::get<KeyOutput>(dst.outputs[0].target).key,
+              &boost::get<KeyOutput>(src.outputs[0].target).key, 32));
+
+  // Output 1: ConfidentialOutput survives with amount field 0.
+  CHECK(dst.outputs[1].target.type() == typeid(ConfidentialOutput));
+  CHECK(dst.outputs[1].amount == 0);
+  CHECK(memEq(&boost::get<ConfidentialOutput>(dst.outputs[1].target).commitment,
+              &boost::get<ConfidentialOutput>(src.outputs[1].target).commitment, 32));
+
+  // ctProofs / kernel survive.
+  CHECK(dst.ctProofs.size() == 1);
+  CHECK(memEq(&dst.kernel.excessCommitment, &src.kernel.excessCommitment, 32));
+
+  // Prefix hash must be stable across the round-trip — confirms the mixed
+  // output set is fully covered by the signing/prefix hash.
+  CHECK(getObjectHash(*static_cast<const TransactionPrefix*>(&src)) ==
+        getObjectHash(*static_cast<const TransactionPrefix*>(&dst)));
+
+  std::printf("OK: v3 mixed-output round-trip (KeyOutput + ConfidentialOutput) preserved\n");
+  return 0;
+}
+
 int run() {
   Transaction src = buildMixedV2();
 
@@ -242,5 +371,7 @@ int run() {
 }  // namespace
 
 int main() {
-  return run();
+  int rc = run();
+  rc |= runV3();
+  return rc;
 }
