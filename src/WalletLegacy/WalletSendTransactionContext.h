@@ -68,6 +68,10 @@ struct SendTransactionContext
   std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount> mixingOutsRaw;
   std::vector<size_t> mixingOriginalIndex;
   Crypto::SecretKey tx_key = NULL_SECRET_KEY;
+  // CT->CN unshield (tx v3): when true, payout destinations are emitted as
+  // transparent KeyOutputs with cleartext amounts (the amount is revealed
+  // on-chain) while change stays confidential. Requires CT to be active.
+  bool unshield = false;
 };
 
 } //namespace CryptoNote

@@ -117,6 +117,7 @@ namespace CryptoNote
     bool show_unlocked_outputs_count(const std::vector<std::string> &args);
     bool list_transfers(const std::vector<std::string> &args);
     bool transfer(const std::vector<std::string> &args);
+    bool unshield(const std::vector<std::string> &args);
     bool dust_sweep(const std::vector<std::string> &args);
     bool prepare_tx(const std::vector<std::string>& args);
     bool print_address(const std::vector<std::string> &args = std::vector<std::string>());
@@ -217,6 +218,7 @@ namespace CryptoNote
     bool m_daemon_ssl;
     bool m_daemon_no_verify;
     bool m_do_not_relay_tx;
+    bool m_unshield_tx;                   // CT->CN unshield (tx v3): payouts transparent
     bool m_dump_keys_file;
     bool m_initial_remote_fee_mess;
     // --legacy-tx: force v1 plain (transparent) transactions even after the CT

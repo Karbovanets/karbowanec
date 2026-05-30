@@ -712,6 +712,7 @@ simple_wallet::simple_wallet(System::Dispatcher& dispatcher, const CryptoNote::C
   m_walletSynchronized(false),
   m_trackingWallet(false),
   m_do_not_relay_tx(false),
+  m_unshield_tx(false),
   m_initial_remote_fee_mess(false)
 {
   m_consoleHandler.setHandler("start_mining", std::bind(&simple_wallet::start_mining, this, std::placeholders::_1), "start_mining [<number_of_threads>] - Start mining in daemon");
@@ -732,6 +733,11 @@ simple_wallet::simple_wallet(System::Dispatcher& dispatcher, const CryptoNote::C
     " - Transfer <amount_1>,... <amount_N> to <address_1>,... <address_N>, respectively. "
     "<ring_size> is the total number of ring members (real + decoys). CT accepts 4, 8, or 16 "
     "(other values round up). Default 16. Coinbase inputs always spend at ring 1.");
+  m_consoleHandler.setHandler("unshield", std::bind(&simple_wallet::unshield, this, std::placeholders::_1),
+    "unshield <addr_1> <amount_1> [<addr_2> <amount_2> ...] [-p payment_id] [-f fee] [-m ring_size]"
+    " - Send confidential funds to transparent address(es). The payout amount is published "
+    "on-chain (privacy-reducing); change stays confidential. If your confidential balance is "
+    "short, plain (CN) coins are spent alongside it, linking them to this transaction.");
   m_consoleHandler.setHandler("dust_sweep", std::bind(&simple_wallet::dust_sweep, this, std::placeholders::_1),
     "dust_sweep [max_inputs] - Consolidate non-aligned transparent outputs to your wallet address");
   m_consoleHandler.setHandler("prepare", std::bind(&simple_wallet::prepare_tx, this, std::placeholders::_1),
@@ -2394,7 +2400,7 @@ bool simple_wallet::transfer(const std::vector<std::string> &args) {
     CryptoNote::TransactionId tx;
 
     if (!m_do_not_relay_tx) {
-      tx = m_wallet->sendTransaction(cmd.dsts, cmd.fee, extraString, cmd.fake_outs_count, 0);
+      tx = m_wallet->sendTransaction(cmd.dsts, cmd.fee, extraString, cmd.fake_outs_count, 0, m_unshield_tx);
     }
     else {
       raw_tx = m_wallet->prepareRawTransaction(tx, cmd.dsts, cmd.fee, extraString, cmd.fake_outs_count, 0);
@@ -2560,6 +2566,42 @@ bool simple_wallet::prepare_tx(const std::vector<std::string>& args) {
   m_do_not_relay_tx = true;
   bool r = transfer(args);
   m_do_not_relay_tx = false;
+  return r;
+}
+//----------------------------------------------------------------------------------------------------
+bool simple_wallet::unshield(const std::vector<std::string>& args) {
+  if (m_trackingWallet) {
+    fail_msg_writer() << "This is tracking wallet. Spending is impossible.";
+    return true;
+  }
+
+  // Unshield is privacy-reducing: it publishes the payout amount on-chain as a
+  // transparent output. Require an explicit confirmation before proceeding.
+  success_msg_writer() << "UNSHIELD permanently reveals the payout amount on-chain.";
+  std::cout << "The amount(s) you send become transparent (non-confidential) outputs that"
+            << std::endl
+            << "anyone can see forever. Any change returns to you as confidential. If your"
+            << std::endl
+            << "confidential balance can't cover the payout, plain (CN) coins are spent"
+            << std::endl
+            << "alongside the confidential ones, linking them to this transaction."
+            << std::endl
+            << "Continue? (y/n): ";
+
+  std::string answer;
+  std::getline(std::cin, answer);
+  if (std::cin.fail() || std::cin.eof()) {
+    std::cin.clear();
+    return true;
+  }
+  if (answer != "y" && answer != "Y") {
+    fail_msg_writer() << "Unshield cancelled.";
+    return true;
+  }
+
+  m_unshield_tx = true;
+  bool r = transfer(args);
+  m_unshield_tx = false;
   return r;
 }
 //----------------------------------------------------------------------------------------------------

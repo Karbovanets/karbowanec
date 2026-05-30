@@ -72,6 +72,10 @@ private:
   //json_rpc
   bool on_get_balance(const wallet_rpc::COMMAND_RPC_GET_BALANCE::request& req, wallet_rpc::COMMAND_RPC_GET_BALANCE::response& res);
   bool on_transfer(const wallet_rpc::COMMAND_RPC_TRANSFER::request& req, wallet_rpc::COMMAND_RPC_TRANSFER::response& res);
+  bool on_unshield(const wallet_rpc::COMMAND_RPC_TRANSFER::request& req, wallet_rpc::COMMAND_RPC_TRANSFER::response& res);
+  // Shared body for transfer/unshield. unshield=true emits a v3 CT->CN tx whose
+  // payout outputs are transparent (cleartext amount) while change stays confidential.
+  bool transfer_impl(const wallet_rpc::COMMAND_RPC_TRANSFER::request& req, wallet_rpc::COMMAND_RPC_TRANSFER::response& res, bool unshield);
   bool on_dust_sweep(const wallet_rpc::COMMAND_RPC_DUST_SWEEP::request& req, wallet_rpc::COMMAND_RPC_DUST_SWEEP::response& res);
   bool on_store(const wallet_rpc::COMMAND_RPC_STORE::request& req, wallet_rpc::COMMAND_RPC_STORE::response& res);
   bool on_stop_wallet(const wallet_rpc::COMMAND_RPC_STOP::request& req, wallet_rpc::COMMAND_RPC_STOP::response& res);

@@ -255,6 +255,7 @@ void wallet_rpc_server::processRequest(const CryptoNote::HttpRequest& request, C
     {
             { "get_balance"       , makeMemberMethod(&wallet_rpc_server::on_get_balance)       },
             { "transfer"          , makeMemberMethod(&wallet_rpc_server::on_transfer)          },
+            { "unshield"          , makeMemberMethod(&wallet_rpc_server::on_unshield)          },
             { "dust_sweep"        , makeMemberMethod(&wallet_rpc_server::on_dust_sweep)        },
             { "store"             , makeMemberMethod(&wallet_rpc_server::on_store)             },
             { "stop_wallet"       , makeMemberMethod(&wallet_rpc_server::on_stop_wallet)       },
@@ -337,6 +338,22 @@ bool wallet_rpc_server::on_get_balance(const wallet_rpc::COMMAND_RPC_GET_BALANCE
 bool wallet_rpc_server::on_transfer(const wallet_rpc::COMMAND_RPC_TRANSFER::request& req,
   wallet_rpc::COMMAND_RPC_TRANSFER::response& res)
 {
+  return transfer_impl(req, res, false);
+}
+
+//------------------------------------------------------------------------------------------------------------------------------
+
+bool wallet_rpc_server::on_unshield(const wallet_rpc::COMMAND_RPC_TRANSFER::request& req,
+  wallet_rpc::COMMAND_RPC_TRANSFER::response& res)
+{
+  return transfer_impl(req, res, true);
+}
+
+//------------------------------------------------------------------------------------------------------------------------------
+
+bool wallet_rpc_server::transfer_impl(const wallet_rpc::COMMAND_RPC_TRANSFER::request& req,
+  wallet_rpc::COMMAND_RPC_TRANSFER::response& res, bool unshield)
+{
   if (req.fee < m_node.getMinimalFee()) {
     logger(Logging::ERROR) << "Fee " << std::to_string(req.fee) << " is too low";
     throw JsonRpc::JsonRpcError(WALLET_RPC_ERROR_CODE_WRONG_FEE,
@@ -414,7 +431,7 @@ bool wallet_rpc_server::on_transfer(const wallet_rpc::COMMAND_RPC_TRANSFER::requ
     CryptoNote::WalletHelper::SendCompleteResultObserver sent;
     WalletHelper::IWalletRemoveObserverGuard removeGuard(m_wallet, sent);
 
-    CryptoNote::TransactionId tx = m_wallet.sendTransaction(transfers, req.fee == 0 ? m_node.getMinimalFee() : req.fee, extraString, req.mixin, req.unlock_time);
+    CryptoNote::TransactionId tx = m_wallet.sendTransaction(transfers, req.fee == 0 ? m_node.getMinimalFee() : req.fee, extraString, req.mixin, req.unlock_time, unshield);
     if (tx == WALLET_LEGACY_INVALID_TRANSACTION_ID)
       throw std::runtime_error("Couldn't send transaction");
 

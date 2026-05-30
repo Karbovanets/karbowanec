@@ -398,7 +398,7 @@ void WalletTransactionSender::checkIfEnoughMixins(
 }
 
 std::shared_ptr<WalletRequest> WalletTransactionSender::makeSendRequest(TransactionId& transactionId, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
-    const std::vector<WalletLegacyTransfer>& transfers, const std::list<TransactionOutputInformation>& selectedOuts, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp) {
+    const std::vector<WalletLegacyTransfer>& transfers, const std::list<TransactionOutputInformation>& selectedOuts, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp, bool unshield) {
 
   using namespace CryptoNote;
 
@@ -408,7 +408,15 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::makeSendRequest(Transact
   const bool useCT = !m_forceLegacy &&
     m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
 
+  // Unshield (v3) consumes confidential value and produces a transparent
+  // payout; it is meaningless on the legacy v1 path or before CT activation.
+  if (unshield && !useCT) {
+    throw std::system_error(make_error_code(error::WRONG_PARAMETERS),
+      "Unshield requires confidential transactions to be active (post-fork, non --legacy-tx)");
+  }
+
   std::shared_ptr<SendTransactionContext> context = std::make_shared<SendTransactionContext>();
+  context->unshield = unshield;
 
   if (selectedOuts.size() > 0) {
     for (auto& out : selectedOuts) {
@@ -700,17 +708,27 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::doSendTransaction(std::s
     const bool useCT = !m_forceLegacy &&
     m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
 
+    const bool unshield = context->unshield;
+
     Transaction tx;
     if (useCT) {
       // CT path: canonical denomination decomposition + confidential transaction.
       // Sub-floor change residue is absorbed into fee so no new CT dust is ever created.
 
-      // Reject non-canonical destination amounts up-front.
+      // Reject non-canonical destination amounts up-front. Skipped for unshield:
+      // its payout destinations become transparent KeyOutputs, which follow v1
+      // plain rules (any amount > 0, no canonical-denomination requirement). The
+      // confidential CHANGE is still canonicalised below.
       for (TransferId idx = transaction.firstTransferId;
            idx < transaction.firstTransferId + transaction.transferCount; ++idx) {
         const WalletLegacyTransfer& de = m_transactionsCache.getTransfer(idx);
         const uint64_t amt = static_cast<uint64_t>(de.amount);
-        if (amt == 0 || amt % CryptoNote::MIN_CT_DENOMINATION != 0) {
+        if (unshield) {
+          if (amt == 0) {
+            throw std::system_error(make_error_code(error::WRONG_AMOUNT),
+              "Unshield destination amount must be non-zero");
+          }
+        } else if (amt == 0 || amt % CryptoNote::MIN_CT_DENOMINATION != 0) {
           throw std::system_error(make_error_code(error::WRONG_AMOUNT),
             "Confidential transactions require amounts to be a multiple of 0.01 KRB");
         }
@@ -722,7 +740,10 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::doSendTransaction(std::s
       uint64_t dustResidue = changeAmount - changeCanonical;
       uint64_t fee = transaction.fee + dustResidue;
 
-      // Decompose each destination into canonical denominations
+      // Build each destination output. For unshield each payout is a single
+      // transparent KeyOutput carrying the cleartext amount (NOT decomposed into
+      // canonical CT denominations). For a normal CT send each payout is
+      // decomposed and stays confidential.
       std::vector<CTBuildOutput> ctOutputs;
       for (TransferId idx = transaction.firstTransferId;
            idx < transaction.firstTransferId + transaction.transferCount; ++idx) {
@@ -730,9 +751,13 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::doSendTransaction(std::s
         AccountPublicAddress addr;
         if (!m_currency.parseAccountAddressString(de.address, addr))
           throw std::system_error(make_error_code(error::BAD_ADDRESS));
-        auto denoms = decomposeAmount(static_cast<uint64_t>(de.amount));
-        for (uint64_t d : denoms) {
-          ctOutputs.push_back(CTBuildOutput{addr, d});
+        if (unshield) {
+          ctOutputs.push_back(CTBuildOutput{addr, static_cast<uint64_t>(de.amount), /*isTransparent=*/true});
+        } else {
+          auto denoms = decomposeAmount(static_cast<uint64_t>(de.amount));
+          for (uint64_t d : denoms) {
+            ctOutputs.push_back(CTBuildOutput{addr, d});
+          }
         }
       }
 
