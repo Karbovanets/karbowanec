@@ -83,6 +83,9 @@ bool checkTransactionConsensusShape(const Transaction& tx,
   // computeCtPoolDelta sums output.amount over all outputs to derive the CT
   // pool delta; a nonzero CT-output amount would skew confidential_supply
   // accounting and split consensus.
+  // v3 unshield: mixed — each output is a ConfidentialOutput (amount==0) or a
+  // KeyOutput (amount > 0, v1 rules). The transparent values feed the balance
+  // kernel's -(Sum plain_out)*H term.
   {
     std::string outErr;
     if (!check_outs_valid(tx, &outErr)) {

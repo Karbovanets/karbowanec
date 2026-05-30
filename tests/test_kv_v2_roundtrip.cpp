@@ -16,6 +16,8 @@
 #include "CryptoNoteConfig.h"
 #include "CryptoNoteCore/CryptoNoteSerialization.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
+#include "CryptoNoteCore/CryptoNoteFormatUtils.h"
+#include "crypto/crypto.h"
 #include "CryptoNoteProtocol/CryptoNoteProtocolDefinitions.h"
 #include "Rpc/CoreRpcServerCommandsDefinitions.h"
 #include "Serialization/SerializationTools.h"
@@ -165,12 +167,76 @@ int tryRoundtrip(const char* label, const TransactionPrefix& src) {
   return 0;
 }
 
+// ── v3 output-shape checks (Session 2: check_outs_valid relaxation) ──────────
+TransactionOutput makeConfOut() {
+  ConfidentialOutput cout;
+  cout.targetKey = makePod<Crypto::PublicKey>(0x60);
+  cout.commitment = makePod<Crypto::EllipticCurvePoint>(0x70);
+  std::memset(cout.maskedAmount.data(), 0x80, 8);
+  TransactionOutput out;
+  out.amount = 0;
+  out.target = cout;
+  return out;
+}
+
+// KeyOutput.key must be a valid prime-order point (check_key), so generate a
+// real keypair rather than random bytes.
+TransactionOutput makeKeyOut(uint64_t amount) {
+  Crypto::PublicKey pub;
+  Crypto::SecretKey sec;
+  Crypto::generate_keys(pub, sec);
+  KeyOutput ko;
+  ko.key = pub;
+  TransactionOutput out;
+  out.amount = amount;
+  out.target = ko;
+  return out;
+}
+
+TransactionPrefix mkPrefix(uint8_t version, std::vector<TransactionOutput> outs) {
+  TransactionPrefix p;
+  p.version = version;
+  p.unlockTime = 0;
+  p.fee = 0;
+  p.outputs = std::move(outs);
+  return p;
+}
+
+int runShapeChecks() {
+  std::string err;
+  // v3 all-confidential → accepted
+  CHECK(check_outs_valid(mkPrefix(TRANSACTION_VERSION_UNSHIELD, {makeConfOut(), makeConfOut()}), &err));
+  // v3 all-plain → accepted
+  CHECK(check_outs_valid(mkPrefix(TRANSACTION_VERSION_UNSHIELD, {makeKeyOut(100), makeKeyOut(200)}), &err));
+  // v3 mixed (confidential + plain) → accepted
+  CHECK(check_outs_valid(mkPrefix(TRANSACTION_VERSION_UNSHIELD, {makeConfOut(), makeKeyOut(100)}), &err));
+  // v2 with a KeyOutput → rejected (v2 stays strictly all-confidential)
+  CHECK(!check_outs_valid(mkPrefix(TRANSACTION_VERSION_CT, {makeConfOut(), makeKeyOut(100)}), &err));
+  // v3 confidential output with nonzero amount field → rejected
+  {
+    TransactionOutput co = makeConfOut();
+    co.amount = 5;
+    CHECK(!check_outs_valid(mkPrefix(TRANSACTION_VERSION_UNSHIELD, {co}), &err));
+  }
+  // v3 plain output with zero amount → rejected
+  CHECK(!check_outs_valid(mkPrefix(TRANSACTION_VERSION_UNSHIELD, {makeKeyOut(0)}), &err));
+  // v3 duplicate plain key → rejected
+  {
+    TransactionOutput k = makeKeyOut(100);
+    TransactionOutput kdup = k;  // identical key
+    CHECK(!check_outs_valid(mkPrefix(TRANSACTION_VERSION_UNSHIELD, {k, kdup}), &err));
+  }
+  std::printf("OK: v3 output-shape (all-conf/all-plain/mixed accepted; v2+KeyOutput, bad-amount, dup rejected)\n");
+  return 0;
+}
+
 int run() {
   int rc = 0;
   rc |= tryRoundtrip("pure-CT v2",        buildPureCtV2Prefix());
   rc |= tryRoundtrip("pure-KeyInput v2",  buildPureKeyInputV2Prefix());
   rc |= tryRoundtrip("mixed v2",          buildMixedV2Prefix());
   rc |= tryRoundtrip("unshield v3",       buildUnshieldV3Prefix());
+  rc |= runShapeChecks();
   if (rc != 0) return 1;
 
   std::printf("OK: KV-binary prefix round-trip (pure-CT, pure-KeyInput, mixed v2, unshield v3)\n");

@@ -2228,6 +2228,22 @@ bool Blockchain::checkTransactionInputs(const Transaction& tx,
   if (isCtFamilyTransactionVersion(tx.version)) {
     if (pmax_used_block_height) *pmax_used_block_height = 0;
     Crypto::Hash transactionHash = getObjectHash(tx);
+
+    // INTERIM (Session 2 -> Session 4): v3 unshield now permits transparent
+    // KeyOutputs in the shape check (check_outs_valid), but the CT crypto and
+    // balance pipeline below still assumes every output is a ConfidentialOutput
+    // (boost::get would throw, and the balance kernel has no plain-output term
+    // yet). Until Session 4 adds the -(Sum plain_out)*H term, reject any
+    // CT-family tx carrying a non-confidential output rather than crashing or
+    // mis-balancing. Covers both the full and checkpointed-structure paths.
+    for (const auto& out : tx.outputs) {
+      if (out.target.type() != typeid(ConfidentialOutput)) {
+        logger(ERROR) << "CT validation: transparent output in v3 tx not yet "
+                         "supported (Session 4 balance kernel) in tx " << transactionHash;
+        return false;
+      }
+    }
+
     // Under a confirmed checkpoint the block hash is already trusted by the
     // network. Run only cheap structural checks so historical CT blocks can
     // stream through the pool/index path without re-verifying Triptych, GK and

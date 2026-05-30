@@ -191,9 +191,9 @@ bool check_inputs_types_supported(const TransactionPrefix& tx) {
 }
 
 bool check_outs_valid(const TransactionPrefix& tx, std::string* error) {
-  if (isCtFamilyTransactionVersion(tx.version)) {
-    // CT transaction: outputs must be ConfidentialOutput
-    // (v3 unshield relaxes this to allow mixed plain+confidential — Session 2)
+  if (tx.version == TRANSACTION_VERSION_CT) {
+    // v2 CT: strictly all-confidential outputs. ConfidentialOutput only, with
+    // the amount field == 0 (the value lives in the Pedersen commitment).
     for (const TransactionOutput& out : tx.outputs) {
       if (out.target.type() != typeid(ConfidentialOutput)) {
         if (error) {
@@ -205,6 +205,53 @@ bool check_outs_valid(const TransactionPrefix& tx, std::string* error) {
       if (out.amount != 0) {
         if (error) {
           *error = "CT output must have zero amount field";
+        }
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (tx.version == TRANSACTION_VERSION_UNSHIELD) {
+    // v3 CT->CN unshield: mixed outputs permitted. Each output is either a
+    // ConfidentialOutput (amount field == 0; value in the commitment) or a
+    // transparent KeyOutput (amount > 0, key on the prime-order subgroup, no
+    // duplicate key) — the same per-type rules v2 and v1 use respectively.
+    // The plain-output value is accounted for by the balance kernel's
+    // -(Sum plain_out)*H term (Blockchain::checkConfidentialTransaction).
+    std::unordered_set<PublicKey> keys_seen;
+    for (const TransactionOutput& out : tx.outputs) {
+      if (out.target.type() == typeid(ConfidentialOutput)) {
+        if (out.amount != 0) {
+          if (error) {
+            *error = "CT output must have zero amount field";
+          }
+          return false;
+        }
+      } else if (out.target.type() == typeid(KeyOutput)) {
+        if (out.amount == 0) {
+          if (error) {
+            *error = "Zero amount output";
+          }
+          return false;
+        }
+        const PublicKey& key = boost::get<KeyOutput>(out.target).key;
+        if (!check_key(key)) {
+          if (error) {
+            *error = "Output with invalid key";
+          }
+          return false;
+        }
+        if (keys_seen.find(key) != keys_seen.end()) {
+          if (error) {
+            *error = "The same output target is present more than once";
+          }
+          return false;
+        }
+        keys_seen.insert(key);
+      } else {
+        if (error) {
+          *error = "Output with invalid type";
         }
         return false;
       }
