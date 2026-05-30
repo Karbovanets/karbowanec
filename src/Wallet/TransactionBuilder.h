@@ -92,12 +92,30 @@ struct CTBuildInput {
 };
 
 // CT output: a single canonical denomination going to a destination address.
+//
+// `isTransparent` selects the on-wire output shape (v3 CT->CN unshield only):
+//   false → ConfidentialOutput: amount is hidden in a Pedersen commitment +
+//           GK denomination proof. `amount` must be a canonical denomination.
+//           This is the only shape v2 CT permits.
+//   true  → transparent KeyOutput: `amount` is published in the clear (the
+//           output's TransactionOutput.amount field), no commitment, mask, or
+//           GK proof. Used for the plain payout of an unshield. `amount` need
+//           not be a canonical CT denomination (it follows v1 plain rules).
+//           Presence of any transparent output makes the tx version v3
+//           (TRANSACTION_VERSION_UNSHIELD) instead of v2.
 struct CTBuildOutput {
   AccountPublicAddress destination;
-  uint64_t amount;  // must be a canonical denomination (from DENOMINATIONS[0..63])
+  uint64_t amount;  // confidential: canonical denomination; transparent: any amount > 0
+  bool isTransparent = false;
 };
 
-// Build a complete confidential (v2 CT) transaction.
+// Build a complete confidential transaction.
+//
+// Version is chosen automatically: if every output is confidential the result
+// is a v2 CT transaction; if any output is transparent (CTBuildOutput::
+// isTransparent) the result is a v3 CT->CN unshield (TRANSACTION_VERSION_
+// UNSHIELD) carrying mixed outputs. The spend/input path is identical either
+// way — only the output side and version tag differ. See CT-DESIGN.md.
 //
 // Construction order:
 //   1. Deterministic tx key from viewSecretKey + inputs hash

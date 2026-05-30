@@ -172,9 +172,26 @@ Transaction buildConfidentialTransaction(
     throw std::invalid_argument("CT transaction must have at least one output");
   }
 
-  // Validate all output amounts are canonical denominations
+  // Determine whether this is a v3 unshield (any transparent output) or a v2
+  // all-confidential tx. The version tag is set in Step 3 below.
+  bool hasTransparentOutput = false;
   for (const auto& out : outputs) {
-    if (denominationIndex(out.amount) < 0) {
+    if (out.isTransparent) {
+      hasTransparentOutput = true;
+      break;
+    }
+  }
+
+  // Output amount validation, per output type:
+  //   confidential → must be a canonical denomination (GK proof requires it)
+  //   transparent  → just non-zero (v1 plain-output rule); the amount is
+  //                  published in the clear and carries no GK proof.
+  for (const auto& out : outputs) {
+    if (out.isTransparent) {
+      if (out.amount == 0) {
+        throw std::invalid_argument("Transparent unshield output amount must be non-zero");
+      }
+    } else if (denominationIndex(out.amount) < 0) {
       throw std::invalid_argument("CT output amount is not a canonical denomination: "
                                   + std::to_string(out.amount));
     }
@@ -307,7 +324,11 @@ Transaction buildConfidentialTransaction(
   // deterministic tx key, so that getObjectHash(tx.inputs) matches the hash
   // used by isOurOutgoingTransaction() in TransfersConsumer.cpp.
   Transaction tx;
-  tx.version = TRANSACTION_VERSION_CT;
+  // v3 unshield when any output is transparent; otherwise v2 all-confidential.
+  // Both share the entire CT wire format and input/spend path (see CT-DESIGN.md
+  // "Transaction version ladder"); only the version tag + output side differ.
+  tx.version = hasTransparentOutput ? TRANSACTION_VERSION_UNSHIELD
+                                    : TRANSACTION_VERSION_CT;
   // Caller-supplied unlockTime. The consensus rule is `<= CRYPTONOTE_MAX_
   // UNLOCK_HEIGHT_V6` (same height-only cap as v6 plain). 0 means
   // immediately spendable; non-zero values enable refund-on-timeout
@@ -405,18 +426,30 @@ Transaction buildConfidentialTransaction(
       throw std::runtime_error("Failed to generate key derivation for output " + std::to_string(i));
     }
 
+    // Derive one-time stealth address: P = Hs(shared_secret || idx)*G + B_spend.
+    // Both output shapes need this — a transparent unshield output is still a
+    // stealth KeyOutput so only the recipient can spend it.
+    if (!Crypto::derive_public_key(sharedSecret, i, outputs[i].destination.spendPublicKey,
+                                    outputTargetKeys[i])) {
+      throw std::runtime_error("Failed to derive one-time output key for output " + std::to_string(i));
+    }
+
+    if (outputs[i].isTransparent) {
+      // Transparent unshield output: value is published in the clear, no
+      // commitment / blinding / mask / GK proof. Leave outputBlindings[i] zero
+      // (the kernel treats the plain output as amount*H with zero G-blinding,
+      // mirroring a transparent KeyInput), so it makes no contribution to the
+      // excess scalar. denomIndex unused for transparent outputs.
+      outputDenomIndices[i] = -1;
+      continue;
+    }
+
     // Derive blinding factor: r = Hs(shared_secret || output_index)
     Crypto::derive_blinding_factor(sharedSecret, i, outputBlindings[i]);
 
     // Compute Pedersen commitment: C = amount*H + r*G
     if (!Crypto::pedersen_commit(outputs[i].amount, outputBlindings[i], outputCommitments[i])) {
       throw std::runtime_error("Failed to compute Pedersen commitment for output " + std::to_string(i));
-    }
-
-    // Derive one-time stealth address: P = Hs(shared_secret || idx)*G + B_spend
-    if (!Crypto::derive_public_key(sharedSecret, i, outputs[i].destination.spendPublicKey,
-                                    outputTargetKeys[i])) {
-      throw std::runtime_error("Failed to derive one-time output key for output " + std::to_string(i));
     }
 
     // ECDH-mask the amount
@@ -430,14 +463,24 @@ Transaction buildConfidentialTransaction(
   // Build outputs (prefix only — GK proofs go in tx.ctProofs)
   tx.outputs.resize(outputs.size());
   for (size_t i = 0; i < outputs.size(); ++i) {
-    ConfidentialOutput cout;
-    cout.targetKey = outputTargetKeys[i];
-    std::memcpy(&cout.commitment, &outputCommitments[i], 32);
-    cout.maskedAmount = outputMaskedAmounts[i];
-
     TransactionOutput txout;
-    txout.amount = 0;  // CT outputs: amount field is 0 (real amount is in commitment)
-    txout.target = std::move(cout);
+    if (outputs[i].isTransparent) {
+      // v3 unshield plain output: a transparent KeyOutput carrying the visible
+      // amount, exactly like a v1 output. Lands in the normal per-amount global
+      // index (Blockchain.cpp output indexing) so it is later spendable as an
+      // ordinary ring member.
+      KeyOutput kout;
+      kout.key = outputTargetKeys[i];
+      txout.amount = outputs[i].amount;  // published in the clear
+      txout.target = std::move(kout);
+    } else {
+      ConfidentialOutput cout;
+      cout.targetKey = outputTargetKeys[i];
+      std::memcpy(&cout.commitment, &outputCommitments[i], 32);
+      cout.maskedAmount = outputMaskedAmounts[i];
+      txout.amount = 0;  // CT outputs: amount field is 0 (real amount is in commitment)
+      txout.target = std::move(cout);
+    }
     tx.outputs[i] = std::move(txout);
   }
 
@@ -446,9 +489,22 @@ Transaction buildConfidentialTransaction(
   // hash naturally excludes them — no custom hash function needed.
   Crypto::Hash signingHash = getObjectHash(*static_cast<const TransactionPrefix*>(&tx));
 
-  // ── Step 5: Generate GK denomination proofs for each output ────────────────
-  tx.ctProofs.resize(outputs.size());
+  // ── Step 5: Generate GK denomination proofs for each CONFIDENTIAL output ────
+  // One proof per confidential output, in output order. Transparent (unshield)
+  // outputs carry no GK proof, so tx.ctProofs is sized to the confidential count
+  // and indexed by confProofIdx — this MUST match the consensus expectation
+  // (checkConfidentialTransaction: ctProofs.size() == numConfidentialOutputs,
+  // proofs consumed in confidential-output order).
+  size_t numConfidentialOutputs = 0;
+  for (const auto& o : outputs) {
+    if (!o.isTransparent) ++numConfidentialOutputs;
+  }
+  tx.ctProofs.resize(numConfidentialOutputs);
+  size_t confProofIdx = 0;
   for (size_t i = 0; i < outputs.size(); ++i) {
+    if (outputs[i].isTransparent) {
+      continue;  // no GK denomination proof for a transparent unshield output
+    }
     Crypto::GKProof proof;
     Crypto::EllipticCurvePoint commitPoint;
     std::memcpy(&commitPoint, &outputCommitments[i], 32);
@@ -460,7 +516,8 @@ Transaction buildConfidentialTransaction(
     }
 
     // Copy proof into transaction body
-    auto& gkp = tx.ctProofs[i];
+    auto& gkp = tx.ctProofs[confProofIdx];
+    ++confProofIdx;
     for (size_t j = 0; j < 6; ++j) {
       ge_p3_tobytes(reinterpret_cast<unsigned char*>(&gkp.I[j]), &proof.I[j]);
       ge_p3_tobytes(reinterpret_cast<unsigned char*>(&gkp.A[j]), &proof.A[j]);
@@ -564,7 +621,10 @@ Transaction buildConfidentialTransaction(
   // ── Step 7: Compute excess and sign kernel ─────────────────────────────────
   // excess = sum(pseudo_blindings) - sum(output_blindings)
   // For transparent pre-fork inputs, realBlinding is zero, so pseudo_blinding
-  // contributes fully. The balance equation:
+  // contributes fully. v3 transparent (unshield) OUTPUTS likewise keep a zero
+  // blinding (Step 4 skips derive_blinding_factor for them), so they add
+  // nothing to the output-blinding sum — matching the kernel treating a plain
+  // output as amount*H + 0*G. The balance equation:
   //   sum(C'_in) - sum(C_out) - fee*H = excess*G
   Crypto::EllipticCurveScalar excessScalar;
   cleanup.excessScalar = &excessScalar;
