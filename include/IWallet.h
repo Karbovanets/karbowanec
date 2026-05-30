@@ -121,6 +121,12 @@ struct TransactionParameters {
   uint64_t unlockTimestamp = 0;
   DonationSettings donation;
   std::string changeDestination;
+  // CT->CN unshield (transaction version 3): when true, the `destinations`
+  // (payouts) are produced as transparent KeyOutputs with cleartext amounts
+  // while any change stays confidential. Requires CT to be active. This is a
+  // privacy-reducing action (the payout amount is published on-chain), so it is
+  // a deliberate, separate intent rather than a default.
+  bool unshield = false;
 };
 
 struct WalletTransactionWithTransfers {

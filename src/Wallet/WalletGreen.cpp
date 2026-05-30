@@ -1632,7 +1632,8 @@ void WalletGreen::prepareTransaction(std::vector<WalletOuts>&& wallets,
   const DonationSettings& donation,
   const CryptoNote::AccountPublicAddress& changeDestination,
   PreparedTransaction& preparedTransaction,
-  Crypto::SecretKey& txSecretKey) {
+  Crypto::SecretKey& txSecretKey,
+  bool unshield) {
 
   preparedTransaction.destinations = convertOrdersToTransfers(orders);
   preparedTransaction.neededMoney = countNeededMoney(preparedTransaction.destinations, fee);
@@ -1643,6 +1644,14 @@ void WalletGreen::prepareTransaction(std::vector<WalletOuts>&& wallets,
   // walletd legacy-tx config), in which case v1 plain is sent instead.
   const bool useCT = !m_forceLegacyTxs &&
     m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
+
+  // Unshield (v3) requires the confidential path: it consumes confidential
+  // value (plus optional transparent top-up) and produces a transparent payout.
+  // It is meaningless on the legacy v1 path or before CT activation.
+  if (unshield && !useCT) {
+    throw std::system_error(make_error_code(error::WRONG_PARAMETERS),
+      "Unshield requires confidential transactions to be active (post-fork, non --legacy-tx)");
+  }
 
   std::vector<OutputToTransfer> selectedTransfers;
   // Opportunistic mixable-dust sweep: on mixin>0 sends, selectTransfers tags
@@ -1699,14 +1708,28 @@ void WalletGreen::prepareTransaction(std::vector<WalletOuts>&& wallets,
   if (useCT) {
     // Reject non-canonical destination amounts up-front. CT denominations start at
     // MIN_CT_DENOMINATION (0.01 KRB); sub-floor pieces cannot become CT outputs.
-    for (const auto& destination : preparedTransaction.destinations) {
-      if (destination.type == WalletTransferType::CHANGE) continue;
-      const uint64_t amt = static_cast<uint64_t>(destination.amount);
-      if (amt == 0 || amt % CryptoNote::MIN_CT_DENOMINATION != 0) {
-        m_logger(ERROR, BRIGHT_RED) << "CT destination amount " << amt
-          << " is not a multiple of MIN_CT_DENOMINATION (" << CryptoNote::MIN_CT_DENOMINATION << ")";
-        throw std::system_error(make_error_code(error::WRONG_AMOUNT),
-          "Confidential transactions require amounts to be a multiple of 0.01 KRB");
+    // Skipped for unshield: its payout destinations become transparent KeyOutputs,
+    // which follow v1 plain rules (any amount > 0, no canonical-denomination
+    // requirement). The confidential CHANGE is still canonicalised below.
+    if (!unshield) {
+      for (const auto& destination : preparedTransaction.destinations) {
+        if (destination.type == WalletTransferType::CHANGE) continue;
+        const uint64_t amt = static_cast<uint64_t>(destination.amount);
+        if (amt == 0 || amt % CryptoNote::MIN_CT_DENOMINATION != 0) {
+          m_logger(ERROR, BRIGHT_RED) << "CT destination amount " << amt
+            << " is not a multiple of MIN_CT_DENOMINATION (" << CryptoNote::MIN_CT_DENOMINATION << ")";
+          throw std::system_error(make_error_code(error::WRONG_AMOUNT),
+            "Confidential transactions require amounts to be a multiple of 0.01 KRB");
+        }
+      }
+    } else {
+      // Unshield payouts only need to be non-zero (v1 plain-output rule).
+      for (const auto& destination : preparedTransaction.destinations) {
+        if (destination.type == WalletTransferType::CHANGE) continue;
+        if (static_cast<uint64_t>(destination.amount) == 0) {
+          throw std::system_error(make_error_code(error::WRONG_AMOUNT),
+            "Unshield destination amount must be non-zero");
+        }
       }
     }
 
@@ -1719,12 +1742,22 @@ void WalletGreen::prepareTransaction(std::vector<WalletOuts>&& wallets,
     uint64_t actualFee = fee + dustResidue;
     preparedTransaction.changeAmount = changeCanonical;
 
+    // At this point destinations holds only the payouts (confidential change is
+    // appended below). For unshield each payout is a single transparent
+    // KeyOutput carrying the cleartext amount — NOT decomposed into canonical CT
+    // denominations. For a normal CT send each payout is decomposed and stays
+    // confidential.
     std::vector<ReceiverAmounts> decomposedOutputs;
     for (const auto& destination : preparedTransaction.destinations) {
       AccountPublicAddress address = parseAccountAddressString(destination.address);
       ReceiverAmounts ra;
       ra.receiver = address;
-      ra.amounts = decomposeAmount(static_cast<uint64_t>(destination.amount));
+      if (unshield) {
+        ra.isTransparent = true;
+        ra.amounts = { static_cast<uint64_t>(destination.amount) };
+      } else {
+        ra.amounts = decomposeAmount(static_cast<uint64_t>(destination.amount));
+      }
       decomposedOutputs.push_back(std::move(ra));
     }
 
@@ -2087,7 +2120,8 @@ size_t WalletGreen::doTransfer(const TransactionParameters& transactionParameter
     transactionParameters.donation,
     changeDestination,
     preparedTransaction,
-    txSecretKey);
+    txSecretKey,
+    transactionParameters.unshield);
 
   return validateSaveAndSendTransaction(*preparedTransaction.transaction, preparedTransaction.destinations, true);
 }
@@ -2145,7 +2179,8 @@ size_t WalletGreen::makeTransaction(const TransactionParameters& sendingTransact
     sendingTransaction.donation,
     changeDestination,
     preparedTransaction,
-    txSecretKey);
+    txSecretKey,
+    sendingTransaction.unshield);
 
   id = validateSaveAndSendTransaction(*preparedTransaction.transaction, preparedTransaction.destinations, false);
   return id;
@@ -2670,7 +2705,9 @@ CryptoNote::Transaction WalletGreen::makeConfidentialTransaction(
   std::vector<CTBuildOutput> ctOutputs;
   for (const auto& receiver : decomposedOutputs) {
     for (uint64_t amount : receiver.amounts) {
-      ctOutputs.push_back(CTBuildOutput{receiver.receiver, amount});
+      // isTransparent flows through to a KeyOutput (v3 unshield payout) vs a
+      // ConfidentialOutput; buildConfidentialTransaction picks the tx version.
+      ctOutputs.push_back(CTBuildOutput{receiver.receiver, amount, receiver.isTransparent});
     }
   }
 

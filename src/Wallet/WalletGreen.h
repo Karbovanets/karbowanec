@@ -181,6 +181,9 @@ protected:
   struct ReceiverAmounts {
     CryptoNote::AccountPublicAddress receiver;
     std::vector<uint64_t> amounts;
+    // v3 unshield: when true these amounts become transparent KeyOutputs
+    // (cleartext, no GK proof) instead of ConfidentialOutputs.
+    bool isTransparent = false;
   };
 
   struct WalletOuts {
@@ -271,7 +274,8 @@ protected:
     const DonationSettings& donation,
     const CryptoNote::AccountPublicAddress& changeDestinationAddress,
     PreparedTransaction& preparedTransaction,
-    Crypto::SecretKey& txSecretKey);
+    Crypto::SecretKey& txSecretKey,
+    bool unshield = false);
 
   size_t doTransfer(const TransactionParameters& transactionParameters, Crypto::SecretKey& txSecretKey);
 
