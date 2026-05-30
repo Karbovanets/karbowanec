@@ -370,8 +370,110 @@ int run() {
 
 }  // namespace
 
+// ── Session 5: CT pool liability accounting (computeCtPoolDelta) ─────────────
+//
+// confidential_supply is a per-block snapshot: pushBlock applies each tx's
+// (inflow - outflow) on top of the previous block's stored value, and the
+// debit a v3 unshield applies to the pool is exactly computeCtPoolDelta's
+// `outflow`. (Reorg rollback restores the pool automatically because pop
+// drops the tip's meta snapshot — there is no separate running counter to
+// rewind; see Blockchain::removeLastBlock / getConfidentialSupply.) These
+// vectors pin the accounting half for every shield direction: the pool only
+// moves by VISIBLE value, never by the hidden CT amounts.
+
+static CryptoNote::TransactionOutput keyOut(uint64_t amount, uint8_t seed) {
+  KeyOutput ko;
+  ko.key = makePod<Crypto::PublicKey>(seed);
+  CryptoNote::TransactionOutput out;
+  out.amount = amount;
+  out.target = ko;
+  return out;
+}
+
+static CryptoNote::TransactionOutput confOut(uint8_t seed) {
+  ConfidentialOutput co;
+  co.targetKey = makePod<Crypto::PublicKey>(seed);
+  co.commitment = makePod<Crypto::EllipticCurvePoint>(seed + 1);
+  std::memset(co.maskedAmount.data(), seed + 2, 8);
+  CryptoNote::TransactionOutput out;
+  out.amount = 0;  // CT outputs carry no visible amount
+  out.target = co;
+  return out;
+}
+
+static int checkDelta(const char* label, const Transaction& tx, uint64_t fee,
+                      uint64_t wantInflow, uint64_t wantOutflow) {
+  uint64_t inflow = 0, outflow = 0;
+  if (!CryptoNote::computeCtPoolDelta(tx, fee, inflow, outflow)) {
+    std::fprintf(stderr, "[%s] computeCtPoolDelta returned false (overflow)\n", label);
+    return 1;
+  }
+  if (inflow != wantInflow || outflow != wantOutflow) {
+    std::fprintf(stderr, "[%s] delta mismatch: got inflow=%llu outflow=%llu, want inflow=%llu outflow=%llu\n",
+                 label, (unsigned long long)inflow, (unsigned long long)outflow,
+                 (unsigned long long)wantInflow, (unsigned long long)wantOutflow);
+    return 1;
+  }
+  std::printf("[%s] pool delta OK (inflow=%llu outflow=%llu)\n",
+              label, (unsigned long long)inflow, (unsigned long long)outflow);
+  return 0;
+}
+
+int runV3PoolDelta() {
+  int rc = 0;
+
+  // Pure unshield: CT input -> plain payout 90 + fee 10. 100 visible leaves pool.
+  {
+    Transaction tx;
+    tx.version = TRANSACTION_VERSION_UNSHIELD;
+    tx.inputs.push_back(ConfidentialInput{});      // hidden amount -> 0 plain_in
+    tx.outputs.push_back(keyOut(90, 0x60));
+    rc |= checkDelta("v3 pure unshield", tx, /*fee=*/10, /*inflow=*/0, /*outflow=*/100);
+  }
+
+  // Partial unshield: CT input -> CT change (hidden) + plain payout 35 + fee 5.
+  // Only the visible 35 + 5 leaves the pool; the CT change stays inside.
+  {
+    Transaction tx;
+    tx.version = TRANSACTION_VERSION_UNSHIELD;
+    tx.inputs.push_back(ConfidentialInput{});
+    tx.outputs.push_back(confOut(0x70));
+    tx.outputs.push_back(keyOut(35, 0x80));
+    rc |= checkDelta("v3 partial unshield", tx, /*fee=*/5, /*inflow=*/0, /*outflow=*/40);
+  }
+
+  // Shield (v2-style, for contrast): plain input 100 -> CT output + fee 10.
+  // 90 visible value enters the pool.
+  {
+    Transaction tx;
+    tx.version = TRANSACTION_VERSION_CT;
+    KeyInput ki;
+    ki.amount = 100;
+    ki.outputIndexes = {1};
+    ki.keyImage = makePod<Crypto::KeyImage>(0x11);
+    tx.inputs.push_back(ki);
+    tx.outputs.push_back(confOut(0x90));
+    rc |= checkDelta("shield (plain->CT)", tx, /*fee=*/10, /*inflow=*/90, /*outflow=*/0);
+  }
+
+  // CT->CT: CT input -> CT output + fee 10. Only the visible fee leaves the pool.
+  {
+    Transaction tx;
+    tx.version = TRANSACTION_VERSION_CT;
+    tx.inputs.push_back(ConfidentialInput{});
+    tx.outputs.push_back(confOut(0xA0));
+    rc |= checkDelta("CT->CT", tx, /*fee=*/10, /*inflow=*/0, /*outflow=*/10);
+  }
+
+  if (rc == 0) {
+    std::printf("OK: v3 CT pool delta accounting (unshield/partial/shield/CT-to-CT)\n");
+  }
+  return rc;
+}
+
 int main() {
   int rc = run();
   rc |= runV3();
+  rc |= runV3PoolDelta();
   return rc;
 }
