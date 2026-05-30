@@ -1276,7 +1276,7 @@ std::error_code WalletService::getAddressesCount(size_t& addressesCount) {
   return std::error_code();
 }
 
-std::error_code WalletService::sendTransaction(const SendTransaction::Request& request, std::string& transactionHash, std::string& transactionSecretKey) {
+std::error_code WalletService::sendTransaction(const SendTransaction::Request& request, std::string& transactionHash, std::string& transactionSecretKey, bool unshield) {
   try {
     System::EventLock lk(readyEvent);
 
@@ -1300,13 +1300,17 @@ std::error_code WalletService::sendTransaction(const SendTransaction::Request& r
     sendParams.mixIn = request.anonymity;
     sendParams.unlockTimestamp = request.unlockTime;
     sendParams.changeDestination = request.changeAddress;
+    // CT->CN unshield (tx v3): payouts become transparent KeyOutputs with
+    // cleartext amounts (the amount is revealed on-chain) while change stays
+    // confidential. Requires CT to be active; rejected otherwise downstream.
+    sendParams.unshield = unshield;
 
     Crypto::SecretKey tx_key;
     size_t transactionId = wallet.transfer(sendParams, tx_key);
     transactionHash = Common::podToHex(wallet.getTransaction(transactionId).hash);
     transactionSecretKey = Common::podToHex(tx_key);
 
-    logger(Logging::DEBUGGING) << "Transaction " << transactionHash << " has been sent";
+    logger(Logging::DEBUGGING) << (unshield ? "Unshield transaction " : "Transaction ") << transactionHash << " has been sent";
   } catch (std::system_error& x) {
     logger(Logging::WARNING, Logging::BRIGHT_YELLOW) << "Error while sending transaction: " << x.what();
     return x.code();
