@@ -2228,21 +2228,11 @@ bool Blockchain::checkTransactionInputs(const Transaction& tx,
   if (isCtFamilyTransactionVersion(tx.version)) {
     if (pmax_used_block_height) *pmax_used_block_height = 0;
     Crypto::Hash transactionHash = getObjectHash(tx);
-
-    // INTERIM (Session 2 -> Session 4): v3 unshield now permits transparent
-    // KeyOutputs in the shape check (check_outs_valid), but the CT crypto and
-    // balance pipeline below still assumes every output is a ConfidentialOutput
-    // (boost::get would throw, and the balance kernel has no plain-output term
-    // yet). Until Session 4 adds the -(Sum plain_out)*H term, reject any
-    // CT-family tx carrying a non-confidential output rather than crashing or
-    // mis-balancing. Covers both the full and checkpointed-structure paths.
-    for (const auto& out : tx.outputs) {
-      if (out.target.type() != typeid(ConfidentialOutput)) {
-        logger(ERROR) << "CT validation: transparent output in v3 tx not yet "
-                         "supported (Session 4 balance kernel) in tx " << transactionHash;
-        return false;
-      }
-    }
+    // v2 is all-confidential outputs; v3 (unshield) permits mixed
+    // ConfidentialOutput + transparent KeyOutput. Both are handled by the CT
+    // pipeline below: plain outputs enter the balance kernel as amount*H and
+    // are skipped by the GK/curve-membership loops (their key validity is
+    // enforced upstream by check_outs_valid).
 
     // Under a confirmed checkpoint the block hash is already trusted by the
     // network. Run only cheap structural checks so historical CT blocks can
@@ -2439,10 +2429,19 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
   // are in the Transaction body, not the prefix, so the prefix hash naturally excludes them.
   const Crypto::Hash ct_signing_hash = getObjectHash(*static_cast<const TransactionPrefix*>(&tx));
 
-  // Step 2: For each output: verify subgroup membership of commitment C and
-  // of the stealth public key. Output variant is guaranteed ConfidentialOutput
-  // by the shape helper.
+  // Step 2: For each CONFIDENTIAL output: verify subgroup membership of
+  // commitment C and of the stealth public key. v2 is all-confidential; v3
+  // unshield may also carry transparent KeyOutputs, which have no commitment
+  // or CT stealth key — their key validity (on-curve, non-zero amount, no
+  // duplicates) is enforced upstream by check_outs_valid. We count confidential
+  // outputs here so the GK-proof count check below can require exactly one GK
+  // proof per confidential output (and zero for a pure unshield).
+  size_t numConfidentialOutputs = 0;
   for (size_t i = 0; i < tx.outputs.size(); ++i) {
+    if (tx.outputs[i].target.type() != typeid(ConfidentialOutput)) {
+      continue;  // transparent KeyOutput (v3 unshield) — no CT curve checks
+    }
+    ++numConfidentialOutputs;
     const auto& cout = boost::get<ConfidentialOutput>(tx.outputs[i].target);
 
     // Verify targetKey is a valid prime-order CT public key (stealth address)
@@ -2457,10 +2456,14 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
     }
   }
 
-  // Verify proof/signature count matches input/output count.
-  if (tx.ctProofs.size() != tx.outputs.size()) {
+  // GK denomination proofs: exactly one per confidential output. For a v2 tx
+  // this equals tx.outputs.size(); for a v3 unshield with transparent outputs
+  // it is strictly fewer, and a pure unshield (no confidential outputs) carries
+  // zero GK proofs. ctProofs[j] corresponds to the j-th confidential output in
+  // output order — the wallet builder MUST emit proofs in this same order.
+  if (tx.ctProofs.size() != numConfidentialOutputs) {
     logger(ERROR) << "CT validation: ctProofs count " << tx.ctProofs.size()
-                  << " != outputs count " << tx.outputs.size() << " in tx " << txHash;
+                  << " != confidential-output count " << numConfidentialOutputs << " in tx " << txHash;
     return false;
   }
   // Wire deserialization enforces tx.signatures.size() == tx.inputs.size(),
@@ -2489,9 +2492,14 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
   gkCommitments.reserve(tx.outputs.size());
   gkProofs.reserve(tx.outputs.size());
 
+  size_t confProofIdx = 0;
   for (size_t i = 0; i < tx.outputs.size(); ++i) {
+    if (tx.outputs[i].target.type() != typeid(ConfidentialOutput)) {
+      continue;  // transparent KeyOutput (v3 unshield) — no GK denomination proof
+    }
     const auto& cout = boost::get<ConfidentialOutput>(tx.outputs[i].target);
-    const auto& gkp = tx.ctProofs[i];
+    const auto& gkp = tx.ctProofs[confProofIdx];
+    ++confProofIdx;
     Crypto::GKProof proof;
     for (size_t j = 0; j < 6; ++j) {
       if (ge_frombytes_vartime(&proof.I[j],
@@ -2981,12 +2989,43 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
       }
     }
 
-    // Collect output commitments
+    // Collect output commitments per output type:
+    //   ConfidentialOutput        → its Pedersen commitment C = v*H + r*G
+    //   KeyOutput (v3 unshield)   → transparent_amount_to_commitment(amount)
+    //                               = amount*H + 0*G  (visible value leaving pool)
+    //
+    // This is the -(Sum plain_out)*H balance-kernel term — the one genuinely new
+    // consensus surface for v3. A plain output contributes amount*H to the output
+    // side, mirroring how a transparent KeyInput contributes amount*H to the
+    // input side. Critically it carries ZERO blinding on G: a plain term must add
+    // no G-component to the excess. Any G leaking from a "plain" output is an
+    // inflation bug. The amount bound here is the SAME out.amount consumed by
+    // computeCtPoolDelta (pool debit) and by output indexing, so the unshielded
+    // value is bound identically across kernel, pool accounting, and the index.
+    //
+    // Attack note (inflate-the-change): in a partial unshield the attacker's only
+    // free variable is the hidden value of a ConfidentialOutput "change". The
+    // equation Sum(C_in) - Sum(C_out) - fee*H = excess forces that hidden change
+    // value: plain_in and plain_out are pinned to visible amounts (amount*H, no
+    // G), so the change commitment cannot absorb extra value without breaking the
+    // kernel signature. The GK range proof additionally bounds the change to a
+    // canonical denomination, preventing a negative/wrapped change value.
     std::vector<Crypto::EllipticCurvePoint> output_commits;
     output_commits.reserve(tx.outputs.size());
     for (const auto& txout : tx.outputs) {
-      const auto& cout = boost::get<ConfidentialOutput>(txout.target);
-      output_commits.push_back(cout.commitment);
+      if (txout.target.type() == typeid(ConfidentialOutput)) {
+        output_commits.push_back(boost::get<ConfidentialOutput>(txout.target).commitment);
+      } else {
+        // Transparent KeyOutput: amount*H. check_outs_valid guarantees
+        // amount > 0, so the amount==0 reject path inside
+        // transparent_amount_to_commitment cannot fire here.
+        Crypto::EllipticCurvePoint c;
+        if (!Crypto::transparent_amount_to_commitment(txout.amount, c)) {
+          logger(ERROR) << "CT validation: KeyOutput amount-to-commitment failed in tx " << txHash;
+          return false;
+        }
+        output_commits.push_back(c);
+      }
     }
 
     // Map CryptoNote::TransactionKernel to Crypto::TransactionKernel
@@ -3082,13 +3121,24 @@ bool Blockchain::checkConfidentialTransactionStructure(const Transaction& tx,
   // structural checks (ctProofs count, curve membership, ring-size bounds,
   // key-image domain, double-spend).
 
-  if (tx.ctProofs.size() != tx.outputs.size()) {
+  // One GK proof per confidential output (v3 unshield may carry transparent
+  // KeyOutputs that have none); count confidential outputs first.
+  size_t numConfidentialOutputs = 0;
+  for (const auto& out : tx.outputs) {
+    if (out.target.type() == typeid(ConfidentialOutput)) {
+      ++numConfidentialOutputs;
+    }
+  }
+  if (tx.ctProofs.size() != numConfidentialOutputs) {
     logger(ERROR) << "CT structural validation: ctProofs count " << tx.ctProofs.size()
-                  << " != outputs count " << tx.outputs.size() << " in tx " << txHash;
+                  << " != confidential-output count " << numConfidentialOutputs << " in tx " << txHash;
     return false;
   }
 
   for (size_t i = 0; i < tx.outputs.size(); ++i) {
+    if (tx.outputs[i].target.type() != typeid(ConfidentialOutput)) {
+      continue;  // transparent KeyOutput (v3 unshield) — key validity enforced by check_outs_valid
+    }
     const auto& cout = boost::get<ConfidentialOutput>(tx.outputs[i].target);
     if (!Crypto::ct_public_key_valid(cout.targetKey)) {
       logger(ERROR) << "CT structural validation: output " << i

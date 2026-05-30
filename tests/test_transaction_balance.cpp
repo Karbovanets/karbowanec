@@ -444,6 +444,212 @@ static void test_mixed_multi() {
   PASS();
 }
 
+// ── v3 unshield: plain-OUTPUT balance kernel (audit centerpiece) ─────
+//
+// v3 (CT->CN unshield) adds the -(Sum plain_out)*H term: a transparent
+// KeyOutput contributes amount*H (ZERO blinding on G) to the output side, the
+// mirror of how a transparent KeyInput contributes amount*H to the input side.
+// checkConfidentialTransaction (Blockchain.cpp) builds exactly this commitment
+// vector via transparent_amount_to_commitment(), so these crypto-level vectors
+// exercise the new term directly: balanced unshields accept, and every way of
+// conjuring value (inflated change, value tamper, H-sign confusion, fee tamper)
+// must be rejected by the kernel signature.
+
+// Pure unshield: 1 CT input -> 1 transparent (plain) output + fee.
+static void test_v3_pure_unshield() {
+  TEST("v3 unshield: CT input -> plain output + fee balances");
+
+  uint64_t v_in = 100, v_plain = 90, fee = 10;  // v_in == v_plain + fee
+
+  Crypto::EllipticCurveScalar r_in;
+  test_random_scalar(r_in);
+  Crypto::EllipticCurvePoint C_in;
+  make_commitment(v_in, r_in, C_in);  // pseudo-commitment v_in*H + r_in*G
+
+  Crypto::EllipticCurvePoint C_out;
+  if (!Crypto::transparent_amount_to_commitment(v_plain, C_out))
+    FAIL("transparent_amount_to_commitment failed");  // v_plain*H, no G
+
+  // Excess = r_in - 0 (the plain output carries zero blinding).
+  Crypto::EllipticCurveScalar zero_blind;
+  memset(&zero_blind, 0, 32);
+  Crypto::EllipticCurveScalar excess;
+  Crypto::compute_excess_scalar(&r_in, 1, &zero_blind, 1, excess);
+
+  Crypto::Hash tx_hash; random_hash(tx_hash);
+  Crypto::TransactionKernel kernel;
+  if (!Crypto::sign_transaction_kernel(excess, tx_hash, kernel))
+    FAIL("sign_transaction_kernel failed");
+
+  if (!Crypto::verify_transaction_balance(&C_in, 1, &C_out, 1, fee, tx_hash, kernel))
+    FAIL("balanced pure unshield rejected");
+  PASS();
+}
+
+// Partial unshield: 1 CT input -> CT change + plain output + fee.
+static void test_v3_partial_unshield() {
+  TEST("v3 unshield: CT input -> CT change + plain output + fee balances");
+
+  uint64_t v_in = 100, v_change = 60, v_plain = 35, fee = 5;  // 60+35+5 == 100
+
+  Crypto::EllipticCurveScalar r_in, r_change;
+  test_random_scalar(r_in);
+  test_random_scalar(r_change);
+
+  Crypto::EllipticCurvePoint C_in;
+  make_commitment(v_in, r_in, C_in);
+
+  // Output order mirrors the kernel: [ConfidentialOutput change, plain KeyOutput].
+  Crypto::EllipticCurvePoint C_out[2];
+  make_commitment(v_change, r_change, C_out[0]);           // v_change*H + r_change*G
+  if (!Crypto::transparent_amount_to_commitment(v_plain, C_out[1]))
+    FAIL("transparent_amount_to_commitment failed");        // v_plain*H, no G
+
+  // Excess = r_in - (r_change + 0).
+  Crypto::EllipticCurveScalar out_blinds[2];
+  out_blinds[0] = r_change;
+  memset(&out_blinds[1], 0, 32);
+  Crypto::EllipticCurveScalar excess;
+  Crypto::compute_excess_scalar(&r_in, 1, out_blinds, 2, excess);
+
+  Crypto::Hash tx_hash; random_hash(tx_hash);
+  Crypto::TransactionKernel kernel;
+  if (!Crypto::sign_transaction_kernel(excess, tx_hash, kernel))
+    FAIL("sign_transaction_kernel failed");
+
+  if (!Crypto::verify_transaction_balance(&C_in, 1, C_out, 2, fee, tx_hash, kernel))
+    FAIL("balanced partial unshield rejected");
+  PASS();
+}
+
+// THE partial-mode attack: keep the plain output and fee honest but inflate the
+// hidden value of the CT change commitment. The leftover -(delta)*H makes the
+// computed excess not a pure multiple of G, so the kernel signature can't verify.
+static void test_v3_inflate_change_rejected() {
+  TEST("v3 unshield: inflated CT change value rejected (inflate-the-change)");
+
+  uint64_t v_in = 100, v_plain = 50, fee = 10;   // honest change == 40
+  uint64_t v_change_inflated = 80;               // attacker claims +40
+
+  Crypto::EllipticCurveScalar r_in, r_change;
+  test_random_scalar(r_in);
+  test_random_scalar(r_change);
+
+  Crypto::EllipticCurvePoint C_in;
+  make_commitment(v_in, r_in, C_in);
+
+  Crypto::EllipticCurvePoint C_out[2];
+  make_commitment(v_change_inflated, r_change, C_out[0]);  // inflated change
+  if (!Crypto::transparent_amount_to_commitment(v_plain, C_out[1]))
+    FAIL("transparent_amount_to_commitment failed");
+
+  // Attacker can only sign for the blinding they control: r_in - r_change.
+  Crypto::EllipticCurveScalar out_blinds[2];
+  out_blinds[0] = r_change;
+  memset(&out_blinds[1], 0, 32);
+  Crypto::EllipticCurveScalar excess;
+  Crypto::compute_excess_scalar(&r_in, 1, out_blinds, 2, excess);
+
+  Crypto::Hash tx_hash; random_hash(tx_hash);
+  Crypto::TransactionKernel kernel;
+  Crypto::sign_transaction_kernel(excess, tx_hash, kernel);
+
+  if (Crypto::verify_transaction_balance(&C_in, 1, C_out, 2, fee, tx_hash, kernel))
+    FAIL("inflated-change unshield was accepted (inflation hole)");
+  PASS();
+}
+
+// H-sign confusion: if a plain output's amount*H were accumulated on the INPUT
+// side (a sign error in the new kernel term), the balance is off by 2*v_plain*H
+// and verification must fail. Guards against the H-vs-side bug class.
+static void test_v3_plain_wrong_side_rejected() {
+  TEST("v3 unshield: plain term on wrong (input) side rejected");
+
+  uint64_t v_in = 100, v_plain = 90, fee = 10;
+
+  Crypto::EllipticCurveScalar r_in;
+  test_random_scalar(r_in);
+  Crypto::EllipticCurvePoint C_in, C_plain;
+  make_commitment(v_in, r_in, C_in);
+  if (!Crypto::transparent_amount_to_commitment(v_plain, C_plain))
+    FAIL("transparent_amount_to_commitment failed");
+
+  Crypto::EllipticCurveScalar zero_blind;
+  memset(&zero_blind, 0, 32);
+  Crypto::EllipticCurveScalar excess;
+  Crypto::compute_excess_scalar(&r_in, 1, &zero_blind, 1, excess);  // honest excess
+
+  Crypto::Hash tx_hash; random_hash(tx_hash);
+  Crypto::TransactionKernel kernel;
+  Crypto::sign_transaction_kernel(excess, tx_hash, kernel);
+
+  // Both value commitments fed as inputs, none as outputs: the +v_plain*H
+  // that should have been subtracted is now added → off by 2*v_plain*H.
+  Crypto::EllipticCurvePoint inputs_wrong[2] = { C_in, C_plain };
+  if (Crypto::verify_transaction_balance(inputs_wrong, 2, nullptr, 0, fee, tx_hash, kernel))
+    FAIL("plain term on input side was accepted (H-sign confusion)");
+  PASS();
+}
+
+// Value binding: tampering the plain output amount after signing breaks the
+// kernel (the visible amount is pinned to amount*H, not a free variable).
+static void test_v3_plain_amount_tamper_rejected() {
+  TEST("v3 unshield: tampered plain output amount rejected");
+
+  uint64_t v_in = 100, v_plain = 90, fee = 10;
+
+  Crypto::EllipticCurveScalar r_in;
+  test_random_scalar(r_in);
+  Crypto::EllipticCurvePoint C_in;
+  make_commitment(v_in, r_in, C_in);
+
+  Crypto::EllipticCurveScalar zero_blind;
+  memset(&zero_blind, 0, 32);
+  Crypto::EllipticCurveScalar excess;
+  Crypto::compute_excess_scalar(&r_in, 1, &zero_blind, 1, excess);
+
+  Crypto::Hash tx_hash; random_hash(tx_hash);
+  Crypto::TransactionKernel kernel;
+  Crypto::sign_transaction_kernel(excess, tx_hash, kernel);  // signed for v_plain=90
+
+  // Verifier is handed a plain output claiming a different amount (91).
+  Crypto::EllipticCurvePoint C_out_tampered;
+  if (!Crypto::transparent_amount_to_commitment(v_plain + 1, C_out_tampered))
+    FAIL("transparent_amount_to_commitment failed");
+
+  if (Crypto::verify_transaction_balance(&C_in, 1, &C_out_tampered, 1, fee, tx_hash, kernel))
+    FAIL("tampered plain output amount was accepted");
+  PASS();
+}
+
+// Fee tamper: inflating the fee after signing must fail (fee is a plain *H term,
+// counted exactly once).
+static void test_v3_unshield_fee_tamper_rejected() {
+  TEST("v3 unshield: inflated fee rejected");
+
+  uint64_t v_in = 100, v_plain = 90, fee = 10;
+
+  Crypto::EllipticCurveScalar r_in;
+  test_random_scalar(r_in);
+  Crypto::EllipticCurvePoint C_in, C_out;
+  make_commitment(v_in, r_in, C_in);
+  if (!Crypto::transparent_amount_to_commitment(v_plain, C_out))
+    FAIL("transparent_amount_to_commitment failed");
+
+  Crypto::EllipticCurveScalar zero_blind;
+  memset(&zero_blind, 0, 32);
+  Crypto::EllipticCurveScalar excess;
+  Crypto::compute_excess_scalar(&r_in, 1, &zero_blind, 1, excess);
+
+  Crypto::Hash tx_hash; random_hash(tx_hash);
+  Crypto::TransactionKernel kernel;
+  Crypto::sign_transaction_kernel(excess, tx_hash, kernel);  // signed for fee=10
+
+  if (Crypto::verify_transaction_balance(&C_in, 1, &C_out, 1, fee + 10, tx_hash, kernel))
+    FAIL("inflated fee was accepted");
+  PASS();
+}
+
 // ── Test 11: compute_excess_commitment directly ──────────────────────
 
 static void test_compute_excess_commitment() {
@@ -668,6 +874,14 @@ int main() {
   test_transparent_zero();
   test_mixed_transparent_ct();
   test_mixed_multi();
+
+  printf("\n[v3 unshield: plain-output kernel term]\n");
+  test_v3_pure_unshield();
+  test_v3_partial_unshield();
+  test_v3_inflate_change_rejected();
+  test_v3_plain_wrong_side_rejected();
+  test_v3_plain_amount_tamper_rejected();
+  test_v3_unshield_fee_tamper_rejected();
 
   printf("\n[Kernel signature properties]\n");
   test_kernel_zero_excess_rejected();
