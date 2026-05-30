@@ -128,6 +128,11 @@ bool handleCommand(const std::string command,
     {
         txProof(walletInfo->wallet);
     }
+    else if (command == "unshield")
+    {
+        transfer(walletInfo, node.getLastKnownBlockHeight(), false,
+                 node.feeAddress(), node.feeAmount(), true);
+    }
     else if (command == "sign_message")
     {
       signMessage(walletInfo, walletInfo->viewWallet);

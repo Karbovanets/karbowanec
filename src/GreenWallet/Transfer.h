@@ -15,12 +15,14 @@
 
 enum BalanceInfo { NotEnoughBalance, EnoughBalance, SetMixinToZero };
 void transfer(std::shared_ptr<WalletInfo> walletInfo, uint32_t height,
-    bool sendAll = false, std::string nodeAddress = std::string(), uint64_t nodeFee = 0);
+    bool sendAll = false, std::string nodeAddress = std::string(), uint64_t nodeFee = 0,
+    bool unshield = false);
 
 void doTransfer(std::string address, uint64_t amount, uint64_t fee,
                 std::string extra, std::shared_ptr<WalletInfo> walletInfo,
                 uint32_t height, uint64_t mixin = WalletConfig::defaultMixin,
-                std::string nodeAddress = std::string(), uint64_t nodeFee = 0);
+                std::string nodeAddress = std::string(), uint64_t nodeFee = 0,
+                bool unshield = false);
 
 void sendMultipleTransactions(CryptoNote::WalletGreen &wallet,
                               std::vector<CryptoNote::TransactionParameters>
@@ -30,7 +32,8 @@ void splitTx(CryptoNote::WalletGreen &wallet,
              CryptoNote::TransactionParameters p);
 
 bool confirmTransaction(CryptoNote::TransactionParameters t,
-                        std::shared_ptr<WalletInfo> walletInfo, uint64_t nodeFee);
+                        std::shared_ptr<WalletInfo> walletInfo, uint64_t nodeFee,
+                        bool unshield = false);
 
 bool parseAmount(std::string strAmount, uint64_t &amount);
 

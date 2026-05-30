@@ -110,10 +110,32 @@ bool parseAmount(std::string strAmount, uint64_t &amount)
 }
 
 bool confirmTransaction(CryptoNote::TransactionParameters t,
-                        std::shared_ptr<WalletInfo> walletInfo, uint64_t nodeFee)
+                        std::shared_ptr<WalletInfo> walletInfo, uint64_t nodeFee,
+                        bool unshield)
 {
-    std::cout << std::endl
-              << InformationMsg("Confirm Transaction?") << std::endl;
+    std::cout << std::endl;
+
+    if (unshield)
+    {
+        std::cout << WarningMsg("UNSHIELD - this permanently reveals the payout "
+                                "amount on-chain.")
+                  << std::endl
+                  << "The amount below is published as a transparent "
+                  << "(non-confidential) output"
+                  << std::endl
+                  << "that anyone can see forever. Change returns to you as "
+                  << "confidential."
+                  << std::endl
+                  << "If your confidential balance can't cover it, plain (CN) "
+                  << "coins are spent"
+                  << std::endl
+                  << "alongside the confidential ones, linking them to this "
+                  << "transaction."
+                  << std::endl << std::endl;
+    }
+
+    std::cout << InformationMsg(unshield ? "Confirm Unshield?"
+                                         : "Confirm Transaction?") << std::endl;
 
     std::cout << "You are sending "
               << SuccessMsg(formatAmount(t.destinations[0].amount))
@@ -301,8 +323,18 @@ void splitTx(CryptoNote::WalletGreen &wallet,
     }
 }
 
-void transfer(std::shared_ptr<WalletInfo> walletInfo, uint32_t height, bool sendAll, std::string nodeAddress, uint64_t nodeFee)
+void transfer(std::shared_ptr<WalletInfo> walletInfo, uint32_t height, bool sendAll, std::string nodeAddress, uint64_t nodeFee, bool unshield)
 {
+    if (unshield)
+    {
+        std::cout << InformationMsg("Unshield: move confidential funds to a "
+                                    "transparent address.")
+                  << std::endl
+                  << WarningMsg("The payout amount will be revealed "
+                                "permanently on-chain.")
+                  << std::endl << std::endl;
+    }
+
     std::cout << InformationMsg("Note: You can type cancel at any time to "
                                 "cancel the transaction")
               << std::endl << std::endl;
@@ -435,7 +467,7 @@ void transfer(std::shared_ptr<WalletInfo> walletInfo, uint32_t height, bool send
 
     const std::string extra = maybeExtra.x;
 
-    doTransfer(address, amount, fee, extra, walletInfo, height, mixin, nodeAddress, nodeFee);
+    doTransfer(address, amount, fee, extra, walletInfo, height, mixin, nodeAddress, nodeFee, unshield);
 }
 
 BalanceInfo doWeHaveEnoughBalance(uint64_t amount, uint64_t fee,
@@ -472,7 +504,7 @@ BalanceInfo doWeHaveEnoughBalance(uint64_t amount, uint64_t fee,
 void doTransfer(std::string address, uint64_t amount, uint64_t fee,
                 std::string extra, std::shared_ptr<WalletInfo> walletInfo,
                 uint32_t height, uint64_t mixin,
-                std::string nodeAddress, uint64_t nodeFee)
+                std::string nodeAddress, uint64_t nodeFee, bool unshield)
 {
     Crypto::SecretKey txSecretKey;
     const uint64_t balance = walletInfo->wallet.getActualBalance();
@@ -505,8 +537,11 @@ void doTransfer(std::string address, uint64_t amount, uint64_t fee,
     p.mixIn = mixin;
     p.extra = extra;
     p.changeDestination = walletInfo->walletAddress;
+    /* CT->CN unshield (tx v3): payout destinations become transparent
+       KeyOutputs with cleartext amounts while any change stays confidential. */
+    p.unshield = unshield;
 
-    if (!confirmTransaction(p, walletInfo, nodeFee))
+    if (!confirmTransaction(p, walletInfo, nodeFee, unshield))
     {
         std::cout << WarningMsg("Cancelling transaction.") << std::endl;
         return;
