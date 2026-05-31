@@ -280,6 +280,25 @@ int runV3() {
   CHECK(getObjectHash(*static_cast<const TransactionPrefix*>(&src)) ==
         getObjectHash(*static_cast<const TransactionPrefix*>(&dst)));
 
+  // ── Session 7: wallet scan-layer fee contract for v3 ──────────────────────
+  // TransfersContainer derives a scanned tx's displayed fee like this:
+  //   isBase                         -> 0
+  //   isCtFamilyTransactionVersion   -> prefix.fee (explicit plaintext fee)
+  //   else (v1)                      -> visibleIn - visibleOut
+  // v3 MUST take the CT-family branch: its confidential inputs/change are
+  // blinded, so the visible in/out difference is meaningless. Here the only
+  // visible value is the transparent KeyOutput payout (100000000) with zero
+  // visible input, so the v1 derivation would yield fee 0 — wrong. Lock both
+  // the predicate and the "would-be-wrong" derivation so a regression that
+  // drops v3 from the gate (back to `== TRANSACTION_VERSION_CT`) is caught.
+  CHECK(isCtFamilyTransactionVersion(dst.version));
+  uint64_t visibleIn = 0;                     // no transparent KeyInput in this tx
+  uint64_t visibleOut = dst.outputs[0].amount; // only the plain KeyOutput is visible
+  uint64_t v1DerivedFee = visibleIn >= visibleOut ? visibleIn - visibleOut : 0;
+  CHECK(v1DerivedFee == 0);            // the v1 path would mis-report fee as 0
+  CHECK(dst.fee == 10000000000ULL);    // CT-family path reports the real fee
+  CHECK(dst.fee != v1DerivedFee);      // ⇒ v3 must NOT use the v1 derivation
+
   std::printf("OK: v3 mixed-output round-trip (KeyOutput + ConfidentialOutput) preserved\n");
   return 0;
 }

@@ -232,13 +232,15 @@ void TransfersContainer::addTransaction(const TransactionBlockInfo& block, const
   // CT spends, whose transparent input total is zero.
   txInfo.isBase = tx.getInputCount() > 0 && tx.getInputType(0) == TransactionTypes::InputType::Generating;
 
-  // Fee: CT (v2) amounts are blinded, so totalAmountIn/Out can't yield the fee;
-  // take the explicit plaintext fee from the prefix. v1 txs derive it from the
+  // Fee: CT-family (v2 CT, v3 unshield) amounts are blinded, so totalAmountIn/Out
+  // can't yield the fee; take the explicit plaintext fee from the prefix. (For v3
+  // the transparent payouts are visible but the confidential inputs/change are not,
+  // so the in-out difference is still meaningless.) v1 txs derive the fee from the
   // transparent in - out (0 for coinbase).
   TransactionPrefix prefix = tx.getTransactionPrefix();
   if (txInfo.isBase) {
     txInfo.fee = 0;
-  } else if (prefix.version == TRANSACTION_VERSION_CT) {
+  } else if (isCtFamilyTransactionVersion(prefix.version)) {
     txInfo.fee = prefix.fee;
   } else {
     txInfo.fee = txInfo.totalAmountIn >= txInfo.totalAmountOut ? txInfo.totalAmountIn - txInfo.totalAmountOut : 0;
