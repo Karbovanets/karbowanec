@@ -522,6 +522,74 @@ static void test_v3_partial_unshield() {
   PASS();
 }
 
+// Multi-plain-output unshield: 1 CT input -> 2 transparent outputs + fee. Both
+// payouts carry zero blinding, so the kernel excess stays r_in and the
+// -(Sum plain_out)*H term must sum BOTH amounts. A single-plain-output vector
+// can't catch a bug that drops or double-counts one term of the sum.
+static void test_v3_multi_plain_unshield() {
+  TEST("v3 unshield: CT input -> 2 plain outputs + fee balances (Sum plain_out)");
+
+  uint64_t v_in = 100, v_p1 = 60, v_p2 = 30, fee = 10;  // 60+30+10 == 100
+
+  Crypto::EllipticCurveScalar r_in;
+  test_random_scalar(r_in);
+  Crypto::EllipticCurvePoint C_in;
+  make_commitment(v_in, r_in, C_in);
+
+  Crypto::EllipticCurvePoint C_out[2];
+  if (!Crypto::transparent_amount_to_commitment(v_p1, C_out[0]) ||
+      !Crypto::transparent_amount_to_commitment(v_p2, C_out[1]))
+    FAIL("transparent_amount_to_commitment failed");
+
+  // Both plain outputs contribute zero blinding → excess == r_in.
+  Crypto::EllipticCurveScalar zero_blinds[2];
+  memset(zero_blinds, 0, sizeof(zero_blinds));
+  Crypto::EllipticCurveScalar excess;
+  Crypto::compute_excess_scalar(&r_in, 1, zero_blinds, 2, excess);
+
+  Crypto::Hash tx_hash; random_hash(tx_hash);
+  Crypto::TransactionKernel kernel;
+  if (!Crypto::sign_transaction_kernel(excess, tx_hash, kernel))
+    FAIL("sign_transaction_kernel failed");
+
+  if (!Crypto::verify_transaction_balance(&C_in, 1, C_out, 2, fee, tx_hash, kernel))
+    FAIL("balanced multi-plain-output unshield rejected");
+  PASS();
+}
+
+// Inflate ONE of several plain payouts after signing: the visible H-side total
+// no longer matches the signed excess, so the kernel must reject. Confirms each
+// plain output is individually amount-bound even when summed with others.
+static void test_v3_multi_plain_one_inflated_rejected() {
+  TEST("v3 unshield: inflating one of two plain outputs rejected");
+
+  uint64_t v_in = 100, v_p1 = 60, v_p2 = 30, fee = 10;  // honest: sums to 100
+
+  Crypto::EllipticCurveScalar r_in;
+  test_random_scalar(r_in);
+  Crypto::EllipticCurvePoint C_in;
+  make_commitment(v_in, r_in, C_in);
+
+  Crypto::EllipticCurveScalar zero_blinds[2];
+  memset(zero_blinds, 0, sizeof(zero_blinds));
+  Crypto::EllipticCurveScalar excess;
+  Crypto::compute_excess_scalar(&r_in, 1, zero_blinds, 2, excess);
+
+  Crypto::Hash tx_hash; random_hash(tx_hash);
+  Crypto::TransactionKernel kernel;
+  Crypto::sign_transaction_kernel(excess, tx_hash, kernel);  // signed for 60+30
+
+  // Verifier is handed the second payout inflated by 1 (visible sum 60+31).
+  Crypto::EllipticCurvePoint C_out[2];
+  if (!Crypto::transparent_amount_to_commitment(v_p1, C_out[0]) ||
+      !Crypto::transparent_amount_to_commitment(v_p2 + 1, C_out[1]))
+    FAIL("transparent_amount_to_commitment failed");
+
+  if (Crypto::verify_transaction_balance(&C_in, 1, C_out, 2, fee, tx_hash, kernel))
+    FAIL("inflated plain output (one of several) was accepted");
+  PASS();
+}
+
 // THE partial-mode attack: keep the plain output and fee honest but inflate the
 // hidden value of the CT change commitment. The leftover -(delta)*H makes the
 // computed excess not a pure multiple of G, so the kernel signature can't verify.
@@ -878,6 +946,8 @@ int main() {
   printf("\n[v3 unshield: plain-output kernel term]\n");
   test_v3_pure_unshield();
   test_v3_partial_unshield();
+  test_v3_multi_plain_unshield();
+  test_v3_multi_plain_one_inflated_rejected();
   test_v3_inflate_change_rejected();
   test_v3_plain_wrong_side_rejected();
   test_v3_plain_amount_tamper_rejected();
