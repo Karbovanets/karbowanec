@@ -2211,9 +2211,9 @@ void WalletGreen::commitTransaction(size_t transactionId) {
     auto relayTransactionCompleted = std::promise<std::error_code>();
     auto relayTransactionWaitFuture = relayTransactionCompleted.get_future();
 
-    m_node.relayTransaction(m_uncommitedTransactions[transactionId], [&ec, &relayTransactionCompleted, this](std::error_code error) {
+    m_node.relayTransaction(m_uncommitedTransactions[transactionId], [&relayTransactionCompleted, this](std::error_code error) {
       auto detachedPromise = std::move(relayTransactionCompleted);
-      detachedPromise.set_value(ec);
+      detachedPromise.set_value(error);
       });
     ec = relayTransactionWaitFuture.get();
   }
@@ -2731,9 +2731,9 @@ void WalletGreen::sendTransaction(const CryptoNote::Transaction& cryptoNoteTrans
     auto relayTransactionCompleted = std::promise<std::error_code>();
     auto relayTransactionWaitFuture = relayTransactionCompleted.get_future();
 
-    m_node.relayTransaction(cryptoNoteTransaction, [&ec, &relayTransactionCompleted, this](std::error_code error) {
+    m_node.relayTransaction(cryptoNoteTransaction, [&relayTransactionCompleted, this](std::error_code error) {
       auto detachedPromise = std::move(relayTransactionCompleted);
-    detachedPromise.set_value(ec);
+    detachedPromise.set_value(error);
     });
     ec = relayTransactionWaitFuture.get();
   }
