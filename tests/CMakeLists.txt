@@ -56,7 +56,7 @@ target_link_libraries(KVMixedV2Roundtrip CryptoNoteCore Serialization Crypto Com
 if(MSVC)
   target_link_libraries(KVMixedV2Roundtrip legacy_stdio_definitions.lib)
 endif()
-# Session 9: atomic-swap derivation oracle (no consensus dependency).
+# Atomic-swap derivation oracle (no consensus dependency).
 add_executable(SwapDerivation test_swap_derivation.cpp)
 target_link_libraries(SwapDerivation Crypto Common ${Boost_LIBRARIES})
 if(MSVC)

@@ -280,7 +280,7 @@ int runV3() {
   CHECK(getObjectHash(*static_cast<const TransactionPrefix*>(&src)) ==
         getObjectHash(*static_cast<const TransactionPrefix*>(&dst)));
 
-  // ── Session 7: wallet scan-layer fee contract for v3 ──────────────────────
+  // ── wallet scan-layer fee contract for v3 ─────────────────────────────────
   // TransfersContainer derives a scanned tx's displayed fee like this:
   //   isBase                         -> 0
   //   isCtFamilyTransactionVersion   -> prefix.fee (explicit plaintext fee)
@@ -389,7 +389,7 @@ int run() {
 
 }  // namespace
 
-// ── Session 5: CT pool liability accounting (computeCtPoolDelta) ─────────────
+// ── CT pool liability accounting (computeCtPoolDelta) ────────────────────────
 //
 // confidential_supply is a per-block snapshot: pushBlock applies each tx's
 // (inflow - outflow) on top of the previous block's stored value, and the

@@ -1,4 +1,4 @@
-// Session 9 — Atomic-swap derivation test vector (independent oracle).
+// Atomic-swap derivation test vector (independent oracle).
 //
 // NOT a consensus dependency. Proves the Karbo side of an XMR-style atomic
 // swap needs ZERO new signature primitives: a funding output locked to an
@@ -245,7 +245,7 @@ void test_swap_rogue_key_caught_by_commitment() {
 }  // namespace
 
 int main() {
-  std::printf("Atomic-Swap Derivation Test Vector (Session 9)\n");
+  std::printf("Atomic-Swap Derivation Test Vector\n");
   std::printf("==============================================\n\n");
 
   test_swap_derivation_roundtrip();

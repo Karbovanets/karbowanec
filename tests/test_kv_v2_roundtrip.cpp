@@ -108,8 +108,8 @@ TransactionPrefix buildPureKeyInputV2Prefix() {
 }
 
 // v3 CT->CN unshield shares the v2 CT wire format (explicit fee, same prefix
-// layout). Until Session 2 relaxes outputs, a v3 prefix is structurally a v2
-// CT prefix with version byte 3 — it must round-trip identically.
+// layout). A v3 prefix is structurally a v2 CT prefix with version byte 3 —
+// it must round-trip identically.
 TransactionPrefix buildUnshieldV3Prefix() {
   TransactionPrefix p = buildV2PrefixCommon();
   p.version = TRANSACTION_VERSION_UNSHIELD;
@@ -167,7 +167,7 @@ int tryRoundtrip(const char* label, const TransactionPrefix& src) {
   return 0;
 }
 
-// ── v3 output-shape checks (Session 2: check_outs_valid relaxation) ──────────
+// ── v3 output-shape checks (check_outs_valid relaxation) ─────────────────────
 TransactionOutput makeConfOut() {
   ConfidentialOutput cout;
   cout.targetKey = makePod<Crypto::PublicKey>(0x60);
