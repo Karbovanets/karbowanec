@@ -851,13 +851,14 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
           body += "        <li>f_U: <span class=\"wrap\">" + Common::podToHex(signature.f_U) + "</span></li>\n";
           body += "      </ul>\n";
         } else if (isKeyInputSig(sigs[i])) {
-          // Legacy ring signature: v1 transparent input, or v2 KeyInput
-          // shielding into the CT pool.
-          const bool isV2KeyInput = (transactionsDetails.version == TRANSACTION_VERSION_CT);
+          // Legacy ring signature: v1 transparent input, or a CT-family
+          // (v2 CT / v3 unshield) KeyInput shielding transparent value into
+          // the CT pool.
+          const bool isCtFamilyKeyInput = isCtFamilyTransactionVersion(transactionsDetails.version);
           body += "      <summary>Input " + std::to_string(i) +
                   " &mdash; " +
-                  (isV2KeyInput ? "transparent shielding (legacy ring signature)"
-                                : "legacy ring signature") +
+                  (isCtFamilyKeyInput ? "transparent shielding (legacy ring signature)"
+                                      : "legacy ring signature") +
                   "</summary>\n";
           body += "      <ol>\n";
           for (const auto& s1 : keyInputSig(sigs[i])) {
@@ -876,7 +877,9 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
       body += "</ol>\n";
     }
 
-    if (transactionsDetails.version == TRANSACTION_VERSION_CT) {
+    // CT-family txs (v2 CT, v3 unshield) carry the balance kernel and per-
+    // confidential-output GK proofs; render both for either version.
+    if (isCtFamilyTransactionVersion(transactionsDetails.version)) {
       body += "<h3>CT kernel</h3>\n";
       body += "<ul>\n";
       body += "  <li>Excess commitment: <span class=\"wrap\">" + Common::podToHex(transactionsDetails.kernel.excessCommitment) + "</span></li>\n";
