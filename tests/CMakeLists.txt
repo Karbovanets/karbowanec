@@ -64,7 +64,7 @@ if(MSVC)
 endif()
 # v3 chain-integration harness: real Core + real PoW, mined to CT activation.
 add_executable(V3ChainIntegration test_v3_chain_integration.cpp)
-target_link_libraries(V3ChainIntegration TestGenerator CryptoNoteProtocol CryptoNoteCore Serialization System Logging Common Crypto BlockchainExplorer Checkpoints ${Boost_LIBRARIES})
+target_link_libraries(V3ChainIntegration TestGenerator Wallet Transfers CryptoNoteProtocol CryptoNoteCore Serialization System Logging Common Crypto BlockchainExplorer Checkpoints ${Boost_LIBRARIES})
 if(MSVC)
   target_link_libraries(V3ChainIntegration legacy_stdio_definitions.lib)
 endif()
