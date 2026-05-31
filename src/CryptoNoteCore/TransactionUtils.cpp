@@ -128,7 +128,6 @@ bool findOutputsToAccount(const CryptoNote::TransactionPrefix& transaction, cons
   Crypto::PublicKey txPubKey = getTransactionPublicKeyFromExtra(transaction.extra);
 
   amount = 0;
-  size_t keyIndex = 0;
   uint32_t outputIndex = 0;
 
   Crypto::KeyDerivation derivation;
@@ -136,11 +135,10 @@ bool findOutputsToAccount(const CryptoNote::TransactionPrefix& transaction, cons
 
   for (const TransactionOutput& o : transaction.outputs) {
     if (o.target.type() == typeid(KeyOutput)) {
-      if (is_out_to_acc(keys, boost::get<KeyOutput>(o.target), derivation, keyIndex)) {
+      if (is_out_to_acc(keys, boost::get<KeyOutput>(o.target), derivation, outputIndex)) {
         out.push_back(outputIndex);
         amount += o.amount;
       }
-      ++keyIndex;
     } else if (o.target.type() == typeid(ConfidentialOutput)) {
       // CT outputs use the same stealth-address scheme as transparent KeyOutput
       // (targetKey = Hs(8aR||idx)*G + B). Holders of the view secret key can
@@ -148,21 +146,20 @@ bool findOutputsToAccount(const CryptoNote::TransactionPrefix& transaction, cons
       // ECDH unmask + commitment check. This lets node operators with their view-secret
       // configured (e.g. masternode-fee enforcement) check CT-paid fees correctly.
       const ConfidentialOutput& ctOut = boost::get<ConfidentialOutput>(o.target);
-      if (isOutToKey(addr.spendPublicKey, ctOut.targetKey, derivation, keyIndex)) {
+      if (isOutToKey(addr.spendPublicKey, ctOut.targetKey, derivation, outputIndex)) {
         Crypto::MaskedAmount masked;
         std::memcpy(masked.data, ctOut.maskedAmount.data(), sizeof(masked.data));
         const Crypto::PublicKey& commitmentPK =
             reinterpret_cast<const Crypto::PublicKey&>(ctOut.commitment);
         uint64_t recoveredAmount = 0;
         Crypto::EllipticCurveScalar blindingFactor;
-        if (Crypto::decrypt_and_verify_output(viewSecretKey, txPubKey, keyIndex,
+        if (Crypto::decrypt_and_verify_output(viewSecretKey, txPubKey, outputIndex,
                                                masked, commitmentPK,
                                                recoveredAmount, blindingFactor)) {
           out.push_back(outputIndex);
           amount += recoveredAmount;
         }
       }
-      ++keyIndex;
     }
     ++outputIndex;
   }

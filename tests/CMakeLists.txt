@@ -133,7 +133,7 @@ if(NOT MSVC)
   set_property(TARGET gtest gtest_main IntegrationTestLibrary IntegrationTests TestGenerator UnitTests SystemTests HashTargetTests TransfersTests APPEND_STRING PROPERTY COMPILE_FLAGS " -Wno-undef -Wno-sign-compare")
 endif()
 
-add_custom_target(tests DEPENDS CoreTests IntegrationTests NodeRpcProxyTests PerformanceTests SystemTests TransfersTests UnitTests LMDBReorgTests DifficultyTests HashTargetTests HashTests)
+add_custom_target(tests DEPENDS CoreTests IntegrationTests NodeRpcProxyTests PerformanceTests SystemTests TransfersTests UnitTests LMDBReorgTests DifficultyTests HashTargetTests HashTests GKProofTests TriptychTests TxBalanceTests CTIntegrationTests MixedV2Roundtrip KVMixedV2Roundtrip SwapDerivation V3ChainIntegration)
 
 set_property(TARGET
   tests
@@ -155,6 +155,10 @@ set_property(TARGET
   TriptychTests
   TxBalanceTests
   CTIntegrationTests
+  MixedV2Roundtrip
+  KVMixedV2Roundtrip
+  SwapDerivation
+  V3ChainIntegration
 PROPERTY FOLDER "tests")
 
 add_dependencies(IntegrationTestLibrary version)
@@ -190,4 +194,8 @@ add_test(TriptychTests triptych_tests)
 add_test(TxBalanceTests tx_balance_tests)
 add_test(CTIntegrationTests ct_integration_tests)
 add_test(LMDBReorgTests lmdb_reorg_tests)
+add_test(MixedV2Roundtrip MixedV2Roundtrip)
+add_test(KVMixedV2Roundtrip KVMixedV2Roundtrip)
+add_test(SwapDerivation SwapDerivation)
+add_test(V3ChainIntegration V3ChainIntegration)
 

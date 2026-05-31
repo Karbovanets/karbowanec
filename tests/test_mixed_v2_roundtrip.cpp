@@ -18,8 +18,11 @@
 
 #include "CryptoNote.h"
 #include "CryptoNoteConfig.h"
+#include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "CryptoNoteCore/CryptoNoteSerialization.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
+#include "CryptoNoteCore/TransactionUtils.h"
+#include "crypto/crypto.h"
 
 using namespace CryptoNote;
 
@@ -303,6 +306,65 @@ int runV3() {
   return 0;
 }
 
+int runV3AbsoluteOutputIndexScan() {
+  Transaction tx;
+  tx.version = TRANSACTION_VERSION_UNSHIELD;
+  tx.unlockTime = 0;
+  tx.fee = 10000000000ULL;
+
+  AccountPublicAddress receiver;
+  Crypto::SecretKey viewSecret;
+  Crypto::SecretKey spendSecret;
+  Crypto::generate_keys(receiver.viewPublicKey, viewSecret);
+  Crypto::generate_keys(receiver.spendPublicKey, spendSecret);
+
+  Crypto::PublicKey txPubKey;
+  Crypto::SecretKey txSecretKey;
+  Crypto::generate_keys(txPubKey, txSecretKey);
+  tx.extra.push_back(0x01);  // TX_EXTRA_TAG_PUBKEY
+  const uint8_t* pk = reinterpret_cast<const uint8_t*>(&txPubKey);
+  tx.extra.insert(tx.extra.end(), pk, pk + 32);
+
+  ConfidentialOutput first;
+  first.targetKey = makePod<Crypto::PublicKey>(0x62);
+  first.commitment = makePod<Crypto::EllipticCurvePoint>(0x72);
+  std::memset(first.maskedAmount.data(), 0x82, 8);
+  TransactionOutput confOut;
+  confOut.amount = 0;
+  confOut.target = first;
+  tx.outputs.push_back(confOut);
+
+  Crypto::KeyDerivation sharedSecret;
+  CHECK(Crypto::generate_key_derivation(receiver.viewPublicKey, txSecretKey, sharedSecret));
+  KeyOutput payout;
+  CHECK(Crypto::derive_public_key(sharedSecret, 1, receiver.spendPublicKey, payout.key));
+  TransactionOutput plainOut;
+  plainOut.amount = 123456789ULL;
+  plainOut.target = payout;
+  tx.outputs.push_back(plainOut);
+
+  std::vector<uint32_t> outs;
+  uint64_t amount = 0;
+  CHECK(findOutputsToAccount(tx, receiver, viewSecret, outs, amount));
+  CHECK(outs.size() == 1);
+  CHECK(outs[0] == 1);
+  CHECK(amount == plainOut.amount);
+
+  AccountKeys accountKeys;
+  accountKeys.address = receiver;
+  accountKeys.viewSecretKey = viewSecret;
+  accountKeys.spendSecretKey = spendSecret;
+  std::vector<size_t> legacyOuts;
+  uint64_t legacyAmount = 0;
+  CHECK(lookup_acc_outs(accountKeys, tx, txPubKey, legacyOuts, legacyAmount));
+  CHECK(legacyOuts.size() == 1);
+  CHECK(legacyOuts[0] == 1);
+  CHECK(legacyAmount == plainOut.amount);
+
+  std::printf("OK: v3 receive scan uses absolute output index for transparent payouts after CT outputs\n");
+  return 0;
+}
+
 int run() {
   Transaction src = buildMixedV2();
 
@@ -493,6 +555,7 @@ int runV3PoolDelta() {
 int main() {
   int rc = run();
   rc |= runV3();
+  rc |= runV3AbsoluteOutputIndexScan();
   rc |= runV3PoolDelta();
   return rc;
 }

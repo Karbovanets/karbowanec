@@ -499,10 +499,16 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
       return false;
     }
 
-    // ctProofs slot count: tightly coupled with the CT verifier and
-    // Triptych proof-shape gate below, so kept here next to them. The CT
-    // crypto module relies on this count downstream.
-    if (tx.ctProofs.size() != tx.outputs.size()) {
+    // GK proofs cover confidential outputs only. v2 remains all-confidential
+    // by check_outs_valid(), so this still equals outputs.size() there; v3 may
+    // include transparent KeyOutputs that intentionally carry no GK proof.
+    size_t confidentialOutputCount = 0;
+    for (const auto& out : tx.outputs) {
+      if (out.target.type() == typeid(ConfidentialOutput)) {
+        ++confidentialOutputCount;
+      }
+    }
+    if (tx.ctProofs.size() != confidentialOutputCount) {
       logger(ERROR) << "CT tx ctProofs count mismatch, rejected for tx id= " << Common::podToHex(txHash);
       return false;
     }

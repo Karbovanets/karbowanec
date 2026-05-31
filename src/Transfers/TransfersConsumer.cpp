@@ -61,13 +61,13 @@ private:
 void checkOutputKey(
   const KeyDerivation& derivation,
   const PublicKey& key,
-  size_t keyIndex,
+  size_t outputDerivationIndex,
   size_t outputIndex,
   const std::unordered_set<PublicKey>& spendKeys,
   std::unordered_map<PublicKey, std::vector<uint32_t>>& outputs) {
 
   PublicKey spendKey;
-  underive_public_key(derivation, keyIndex, key, spendKey);
+  underive_public_key(derivation, outputDerivationIndex, key, spendKey);
 
   if (spendKeys.find(spendKey) != spendKeys.end()) {
     outputs[spendKey].push_back(static_cast<uint32_t>(outputIndex));
@@ -88,7 +88,6 @@ void findMyOutputs(
     return;
   }
 
-  size_t keyIndex = 0;
   size_t outputCount = tx.getOutputCount();
 
   for (size_t idx = 0; idx < outputCount; ++idx) {
@@ -100,8 +99,10 @@ void findMyOutputs(
       uint64_t amount;
       KeyOutput out;
       tx.getOutput(idx, out, amount);
-      checkOutputKey(derivation, out.key, keyIndex, idx, spendKeys, outputs);
-      ++keyIndex;
+      // v1 transactions contain only KeyOutputs, so idx matches the old
+      // key-only counter. v3 mixes KeyOutput and ConfidentialOutput; the
+      // builder derives both shapes with the absolute output index.
+      checkOutputKey(derivation, out.key, idx, idx, spendKeys, outputs);
 
     } else if (outType == TransactionTypes::OutputType::Confidential) {
       // CT output: try ECDH recovery to check if it belongs to us.

@@ -48,6 +48,7 @@
 #include "Common/StringTools.h"
 #include "CryptoNoteCore/Account.h"
 #include "CryptoNoteCore/Currency.h"
+#include "CryptoNoteConfig.h"
 #include "CryptoNoteCore/CryptoNoteBasicImpl.h"
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "CryptoNoteCore/CryptoNoteSerialization.h"
@@ -2762,7 +2763,9 @@ size_t WalletGreen::validateSaveAndSendTransaction(const ITransactionReader& tra
     throw std::system_error(make_error_code(error::INTERNAL_WALLET_ERROR), "Failed to deserialize created transaction");
   }
 
-  uint64_t fee = transaction.getInputTotalAmount() - transaction.getOutputTotalAmount();
+  uint64_t fee = isCtFamilyTransactionVersion(cryptoNoteTransaction.version)
+    ? cryptoNoteTransaction.fee
+    : transaction.getInputTotalAmount() - transaction.getOutputTotalAmount();
   Crypto::SecretKey txSecretKey;
   transaction.getTransactionSecretKey(txSecretKey);
   size_t transactionId = insertOutgoingTransactionAndPushEvent(transaction.getTransactionHash(), fee, transaction.getExtra(), transaction.getUnlockTime(), txSecretKey);

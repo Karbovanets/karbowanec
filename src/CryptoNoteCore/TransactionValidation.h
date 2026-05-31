@@ -58,7 +58,7 @@ class Currency;
 //   * Curve membership for individual keys (ct_public_key_valid,
 //     point_valid_for_pedersen) — done by checkConfidentialTransaction
 //   * Triptych proof shape vs. ring size — done in check_tx_semantic
-//   * ctProofs.size() == outputs.size() — done in check_tx_semantic
+//   * ctProofs.size() == confidential-output count — done in check_tx_semantic
 //   * Chain-state lookups (ring resolution, output presence, double-spend)
 //   * Mempool policy (CT_MAX_INPUTS, CT_MAX_OUTPUTS, fee thresholds,
 //     account-registration well-formedness)
