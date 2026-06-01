@@ -170,6 +170,43 @@ bool isSameOutput(const TransactionOutputInformation& lhs, const TransactionOutp
          lhs.outputInTransaction == rhs.outputInTransaction;
 }
 
+uint64_t randomOutsAmountFor(const TransactionOutputInformation& output) {
+  return output.type == TransactionTypes::OutputType::Confidential
+    ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+    : output.amount;
+}
+
+void alignRandomOutsByAmounts(
+    const std::vector<uint64_t>& amounts,
+    std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& outs) {
+  using outs_for_amount = CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount;
+
+  std::vector<outs_for_amount> aligned;
+  aligned.reserve(amounts.size());
+  std::vector<bool> used(outs.size(), false);
+
+  for (uint64_t amount : amounts) {
+    size_t match = outs.size();
+    for (size_t i = 0; i < outs.size(); ++i) {
+      if (!used[i] && outs[i].amount == amount) {
+        match = i;
+        break;
+      }
+    }
+
+    if (match != outs.size()) {
+      used[match] = true;
+      aligned.push_back(std::move(outs[match]));
+    } else {
+      outs_for_amount empty;
+      empty.amount = amount;
+      aligned.push_back(std::move(empty));
+    }
+  }
+
+  outs = std::move(aligned);
+}
+
 // Upper bound on opportunistic mixable-dust inputs appended to a single
 // mixin>0 send. Each carries a full ring payload, so keep this modest to
 // avoid pushing a routine send past the transaction-size limit.
@@ -2825,10 +2862,9 @@ void WalletGreen::requestMixinOuts(
 
   std::vector<uint64_t> amounts;
   for (const auto& out: selectedTransfers) {
-    amounts.push_back(out.out.type == TransactionTypes::OutputType::Confidential
-      ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
-      : out.out.amount);
+    amounts.push_back(randomOutsAmountFor(out.out));
   }
+  const std::vector<uint64_t> requestedAmounts = amounts;
 
   const uint64_t maxMixin = inputMixins.empty() ? 0 : *std::max_element(inputMixins.begin(), inputMixins.end());
   if (maxMixin == 0) {
@@ -2862,6 +2898,8 @@ void WalletGreen::requestMixinOuts(
     m_logger(ERROR, BRIGHT_RED) << "Failed to get random outputs: " << mixinError << ", " << mixinError.message();
     throw std::system_error(mixinError);
   }
+
+  alignRandomOutsByAmounts(requestedAmounts, mixinResult);
 
   // NB: the strict per-input decoy check (checkIfEnoughMixins) is now performed
   // by the caller, after adaptTransparentRings has shrunk/dropped any optional swept
@@ -2981,6 +3019,8 @@ void WalletGreen::requestCtMixingDecoys(
     mixingResult.clear();
     return;
   }
+
+  alignRandomOutsByAmounts(filteredAmounts, rawOuts);
 
   // Expand the filtered response back into a vector aligned with
   // selectedTransfers; opted-out slots stay default-constructed (empty outs).

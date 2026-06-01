@@ -107,6 +107,12 @@ bool isSameOutput(const TransactionOutputInformation& lhs, const TransactionOutp
          lhs.outputInTransaction == rhs.outputInTransaction;
 }
 
+uint64_t randomOutsAmountFor(const TransactionOutputInformation& output) {
+  return output.type == TransactionTypes::OutputType::Confidential
+    ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+    : output.amount;
+}
+
 bool isInOutputList(const TransactionOutputInformation& out,
                     const std::list<TransactionOutputInformation>& list) {
   return std::any_of(list.begin(), list.end(),
@@ -135,6 +141,45 @@ void filterMixingAmounts(const std::vector<uint64_t>& mixingBuckets,
       originalIndex.push_back(i);
     }
   }
+}
+
+void collectRandomOutAmounts(const std::list<TransactionOutputInformation>& selectedTransfers,
+                             std::vector<uint64_t>& amounts) {
+  amounts.reserve(selectedTransfers.size());
+  for (const auto& transfer : selectedTransfers) {
+    amounts.push_back(randomOutsAmountFor(transfer));
+  }
+}
+
+void alignRandomOutsByAmounts(
+    const std::vector<uint64_t>& amounts,
+    std::vector<CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount>& outs) {
+  using outs_for_amount = CryptoNote::COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount;
+
+  std::vector<outs_for_amount> aligned;
+  aligned.reserve(amounts.size());
+  std::vector<bool> used(outs.size(), false);
+
+  for (uint64_t amount : amounts) {
+    size_t match = outs.size();
+    for (size_t i = 0; i < outs.size(); ++i) {
+      if (!used[i] && outs[i].amount == amount) {
+        match = i;
+        break;
+      }
+    }
+
+    if (match != outs.size()) {
+      used[match] = true;
+      aligned.push_back(std::move(outs[match]));
+    } else {
+      outs_for_amount empty;
+      empty.amount = amount;
+      aligned.push_back(std::move(empty));
+    }
+  }
+
+  outs = std::move(aligned);
 }
 
 void expandMixingOuts(
@@ -508,12 +553,7 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
   if (hasMixinInputs(context->inputMixins)) {
     uint64_t outsCount = maxInputMixin(context->inputMixins) + 1; // add one to make possible (if need) to skip real output key
     std::vector<uint64_t> amounts;
-
-    for (const auto& td : context->selectedTransfers) {
-      amounts.push_back(td.type == TransactionTypes::OutputType::Confidential
-        ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
-        : td.amount);
-    }
+    collectRandomOutAmounts(context->selectedTransfers, amounts);
 
     auto queryAmountsCompleted = std::promise<std::error_code>();
     auto queryAmountsWaitFuture = queryAmountsCompleted.get_future();
@@ -527,6 +567,7 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
     });
 
     queryAmountsWaitFuture.get();
+    alignRandomOutsByAmounts(amounts, context->outs);
 
     // Shrink transparent input rings to the decoys their buckets returned (and
     // drop optional swept dust that can't reach CT_MIN_RING_SIZE) before the
@@ -557,6 +598,7 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
       if (mixingEc) {
         context->mixingOuts.clear(); // best-effort: silently drop on error
       } else {
+        alignRandomOutsByAmounts(filteredAmounts, rawOuts);
         expandMixingOuts(rawOuts, originalIndex,
                          context->mixingBuckets.size(), context->mixingOuts);
       }
@@ -609,12 +651,7 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
 std::shared_ptr<WalletRequest> WalletTransactionSender::makeGetRandomOutsRequest(std::shared_ptr<SendTransactionContext> context) {
   uint64_t outsCount = maxInputMixin(context->inputMixins) + 1;// add one to make possible (if need) to skip real output key
   std::vector<uint64_t> amounts;
-
-  for (const auto& td : context->selectedTransfers) {
-    amounts.push_back(td.type == TransactionTypes::OutputType::Confidential
-      ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
-      : td.amount);
-  }
+  collectRandomOutAmounts(context->selectedTransfers, amounts);
 
   return std::make_shared<WalletGetRandomOutsByAmountsRequest>(amounts, outsCount, context, std::bind(&WalletTransactionSender::sendTransactionRandomOutsByAmount,
       this, context, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
@@ -631,6 +668,10 @@ void WalletTransactionSender::sendTransactionRandomOutsByAmount(std::shared_ptr<
     events.push_back(makeCompleteEvent(m_transactionsCache, context->transactionId, ec));
     return;
   }
+
+  std::vector<uint64_t> amounts;
+  collectRandomOutAmounts(context->selectedTransfers, amounts);
+  alignRandomOutsByAmounts(amounts, context->outs);
 
   // Shrink transparent input rings to the decoys their buckets returned (and
   // drop optional swept dust that can't reach CT_MIN_RING_SIZE) before the
@@ -677,7 +718,11 @@ void WalletTransactionSender::sendTransactionMixingOutsByAmount(std::shared_ptr<
   if (ec) {
     context->mixingOuts.clear();
   } else {
-    expandMixingOuts(context->mixingOutsRaw, context->mixingOriginalIndex,
+    std::vector<uint64_t> filteredAmounts;
+    std::vector<size_t> originalIndex;
+    filterMixingAmounts(context->mixingBuckets, filteredAmounts, originalIndex);
+    alignRandomOutsByAmounts(filteredAmounts, context->mixingOutsRaw);
+    expandMixingOuts(context->mixingOutsRaw, originalIndex,
                      context->mixingBuckets.size(), context->mixingOuts);
   }
   context->mixingOutsRaw.clear();
