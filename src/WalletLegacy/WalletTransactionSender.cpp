@@ -506,7 +506,7 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::makeSendRequest(Transact
 
 std::string WalletTransactionSender::makeRawTransaction(TransactionId& transactionId, std::deque<std::shared_ptr<WalletLegacyEvent>>& events,
   const std::vector<WalletLegacyTransfer>& transfers, const std::list<CryptoNote::TransactionOutputInformation>& selectedOuts,
-  uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp)
+  uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp, bool unshield)
 {
 
   std::string raw_tx;
@@ -519,7 +519,13 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
   const bool useCT = !m_forceLegacy &&
     m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
 
+  if (unshield && !useCT) {
+    throw std::system_error(make_error_code(error::WRONG_PARAMETERS),
+      "Unshield requires confidential transactions to be active (post-fork, non --legacy-tx)");
+  }
+
   std::shared_ptr<SendTransactionContext> context = std::make_shared<SendTransactionContext>();
+  context->unshield = unshield;
 
   if (selectedOuts.size() > 0) {
     for (auto& out : selectedOuts) {
@@ -610,25 +616,8 @@ std::string WalletTransactionSender::makeRawTransaction(TransactionId& transacti
   {
     WalletLegacyTransaction& transaction = m_transactionsCache.getTransaction(context->transactionId);
 
-    std::vector<TxBuildInput> inputs;
-    prepareInputs(context->selectedTransfers, context->outs, inputs, context->inputMixins,
-                  context->mixingBuckets, context->mixingOuts);
-
-    TxBuildOutput changeDts;
-    changeDts.amount = 0;
-    uint64_t totalAmount = -transaction.totalAmount;
-    createChangeDestinations(m_keys.address, totalAmount, context->foundMoney, changeDts);
-
-    std::vector<TxBuildOutput> splittedDests;
-    splitDestinations(transaction.firstTransferId, transaction.transferCount, changeDts, context->dustPolicy, splittedDests);
-
-    auto itx = buildTransaction(inputs, splittedDests, m_keys.viewSecretKey,
-        transaction.extra, transaction.unlockTime, m_upperTransactionSizeLimit, context->tx_key);
-    Transaction tx;
-    if (!fromBinaryArray(tx, itx->getTransactionData()))
-      throw std::system_error(make_error_code(error::INTERNAL_WALLET_ERROR));
-
-    getObjectHash(tx, transaction.hash);
+    uint64_t totalAmount = 0;
+    Transaction tx = buildTransactionFromContext(context, transaction, totalAmount);
 
     m_transactionsCache.updateTransaction(context->transactionId, tx, totalAmount, context->selectedTransfers, context->tx_key);
 
@@ -733,6 +722,155 @@ void WalletTransactionSender::sendTransactionMixingOutsByAmount(std::shared_ptr<
     nextRequest = req;
 }
 
+Transaction WalletTransactionSender::buildTransactionFromContext(std::shared_ptr<SendTransactionContext> context, WalletLegacyTransaction& transaction, uint64_t& totalAmount) {
+  std::vector<TxBuildInput> inputs;
+  prepareInputs(context->selectedTransfers, context->outs, inputs, context->inputMixins,
+                context->mixingBuckets, context->mixingOuts);
+
+  totalAmount = -transaction.totalAmount;
+  uint64_t changeAmount = context->foundMoney > totalAmount ? context->foundMoney - totalAmount : 0;
+
+  const bool useCT = !m_forceLegacy &&
+    m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
+
+  const bool unshield = context->unshield;
+
+  Transaction tx;
+  if (useCT) {
+    // CT path: canonical denomination decomposition + confidential transaction.
+    // Sub-floor change residue is absorbed into fee so no new CT dust is ever created.
+
+    // Reject non-canonical destination amounts up-front. Skipped for unshield:
+    // its payout destinations become transparent KeyOutputs, which follow v1
+    // plain rules (any amount > 0, no canonical-denomination requirement). The
+    // confidential CHANGE is still canonicalised below.
+    for (TransferId idx = transaction.firstTransferId;
+         idx < transaction.firstTransferId + transaction.transferCount; ++idx) {
+      const WalletLegacyTransfer& de = m_transactionsCache.getTransfer(idx);
+      const uint64_t amt = static_cast<uint64_t>(de.amount);
+      if (unshield) {
+        if (amt == 0) {
+          throw std::system_error(make_error_code(error::WRONG_AMOUNT),
+            "Unshield destination amount must be non-zero");
+        }
+      } else if (amt == 0 || amt % CryptoNote::MIN_CT_DENOMINATION != 0) {
+        throw std::system_error(make_error_code(error::WRONG_AMOUNT),
+          "Confidential transactions require amounts to be a multiple of 0.01 KRB");
+      }
+    }
+
+    // Split change into canonical + sub-floor residue; fold residue into the fee.
+    uint64_t changeCanonical = (changeAmount / CryptoNote::MIN_CT_DENOMINATION)
+                              * CryptoNote::MIN_CT_DENOMINATION;
+    uint64_t dustResidue = changeAmount - changeCanonical;
+    uint64_t fee = transaction.fee + dustResidue;
+
+    // Build each destination output. For unshield each payout is a single
+    // transparent KeyOutput carrying the cleartext amount (NOT decomposed into
+    // canonical CT denominations). For a normal CT send each payout is
+    // decomposed and stays confidential.
+    std::vector<CTBuildOutput> ctOutputs;
+    for (TransferId idx = transaction.firstTransferId;
+         idx < transaction.firstTransferId + transaction.transferCount; ++idx) {
+      WalletLegacyTransfer& de = m_transactionsCache.getTransfer(idx);
+      AccountPublicAddress addr;
+      if (!m_currency.parseAccountAddressString(de.address, addr))
+        throw std::system_error(make_error_code(error::BAD_ADDRESS));
+      if (unshield) {
+        ctOutputs.push_back(CTBuildOutput{addr, static_cast<uint64_t>(de.amount), /*isTransparent=*/true});
+      } else {
+        auto denoms = decomposeAmount(static_cast<uint64_t>(de.amount));
+        for (uint64_t d : denoms) {
+          ctOutputs.push_back(CTBuildOutput{addr, d});
+        }
+      }
+    }
+
+    // Canonical change output (residue is in fee, not here).
+    if (changeCanonical > 0) {
+      auto changeDenoms = decomposeAmount(changeCanonical);
+      for (uint64_t d : changeDenoms) {
+        ctOutputs.push_back(CTBuildOutput{m_keys.address, d});
+      }
+    }
+
+    // Convert TxBuildInput -> CTBuildInput. Each ring member is self-describing
+    // via its own (amount, outputIndex), so the same code path handles mixed
+    // transparent/confidential rings; relies on prepareInputs() populating
+    // GlobalOutput.amount per member.
+    std::vector<CTBuildInput> ctInputs;
+    for (auto& inp : inputs) {
+      CTBuildInput cti;
+      const auto& ki = inp.keyInfo;
+      const size_t ringSize = ki.outputs.size();
+      cti.ringMembers.reserve(ringSize);
+
+      for (size_t k = 0; k < ringSize; ++k) {
+        const auto& gout = ki.outputs[k];
+        const uint64_t memberAmount = gout.isConfidential
+          ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
+          : gout.amount;
+        if (memberAmount == 0) {
+          throw std::runtime_error("CT ring member " + std::to_string(k)
+            + " has zero amount bucket in input " + std::to_string(ctInputs.size()));
+        }
+        Crypto::EllipticCurvePoint ringCommit{};
+        if (gout.isConfidential) {
+          ringCommit = gout.commitment;
+        } else {
+          if (!Crypto::transparent_amount_to_commitment(memberAmount, ringCommit)) {
+            throw std::runtime_error("Failed to compute CT ring commitment for input "
+              + std::to_string(ctInputs.size()));
+          }
+        }
+        cti.ringMembers.push_back(CTBuildRingMember{
+          memberAmount, gout.outputIndex, gout.targetKey, ringCommit
+        });
+      }
+
+      cti.realIndex = ki.realOutput.transactionIndex;
+      if (cti.realIndex >= ringSize) {
+        throw std::system_error(make_error_code(error::INTERNAL_WALLET_ERROR));
+      }
+      KeyPair ephKeys;
+      Crypto::KeyImage dummy_ki;
+      CryptoNote::generate_key_image_helper(inp.senderKeys,
+          ki.realOutput.transactionPublicKey,
+          ki.realOutput.outputInTransaction,
+          ephKeys, dummy_ki);
+      cti.spendPrivkey = ephKeys.secretKey;
+      cti.realBlinding = ki.realOutputBlinding;
+      cti.amount = ki.realOutputAmount;
+      // Route transparent dust (real KeyOutput) as a v2 KeyInput so the
+      // shielded value enters the CT pool visibly. ConfidentialOutput inputs
+      // stay confidential; Triptych is only useful when the real amount is hidden.
+      cti.isTransparent = !ki.realOutputIsConfidential;
+      ctInputs.push_back(std::move(cti));
+    }
+
+    tx = buildConfidentialTransaction(ctInputs, ctOutputs, m_keys.viewSecretKey,
+                                       fee, transaction.extra, context->tx_key);
+  } else {
+    // Pre-fork: transparent transaction path (original)
+    TxBuildOutput changeDts;
+    changeDts.amount = 0;
+    createChangeDestinations(m_keys.address, totalAmount, context->foundMoney, changeDts);
+
+    std::vector<TxBuildOutput> splittedDests;
+    splitDestinations(transaction.firstTransferId, transaction.transferCount, changeDts, context->dustPolicy, splittedDests);
+
+    auto itx = buildTransaction(inputs, splittedDests, m_keys.viewSecretKey,
+        transaction.extra, transaction.unlockTime, m_upperTransactionSizeLimit, context->tx_key);
+    if (!fromBinaryArray(tx, itx->getTransactionData()))
+      throw std::system_error(make_error_code(error::INTERNAL_WALLET_ERROR));
+  }
+
+  getObjectHash(tx, transaction.hash);
+  transaction.secretKey = context->tx_key;
+
+  return tx;
+}
+
 std::shared_ptr<WalletRequest> WalletTransactionSender::doSendTransaction(std::shared_ptr<SendTransactionContext> context, std::deque<std::shared_ptr<WalletLegacyEvent>>& events) {
   if (m_isStoping) {
     events.push_back(makeCompleteEvent(m_transactionsCache, context->transactionId, make_error_code(error::TX_CANCELLED)));
@@ -743,153 +881,8 @@ std::shared_ptr<WalletRequest> WalletTransactionSender::doSendTransaction(std::s
   {
     WalletLegacyTransaction& transaction = m_transactionsCache.getTransaction(context->transactionId);
 
-    std::vector<TxBuildInput> inputs;
-    prepareInputs(context->selectedTransfers, context->outs, inputs, context->inputMixins,
-                  context->mixingBuckets, context->mixingOuts);
-
-    uint64_t totalAmount = -transaction.totalAmount;
-    uint64_t changeAmount = context->foundMoney > totalAmount ? context->foundMoney - totalAmount : 0;
-
-    const bool useCT = !m_forceLegacy &&
-    m_currency.currentTransactionVersion(m_node.getLastLocalBlockHeight()) == CryptoNote::TRANSACTION_VERSION_CT;
-
-    const bool unshield = context->unshield;
-
-    Transaction tx;
-    if (useCT) {
-      // CT path: canonical denomination decomposition + confidential transaction.
-      // Sub-floor change residue is absorbed into fee so no new CT dust is ever created.
-
-      // Reject non-canonical destination amounts up-front. Skipped for unshield:
-      // its payout destinations become transparent KeyOutputs, which follow v1
-      // plain rules (any amount > 0, no canonical-denomination requirement). The
-      // confidential CHANGE is still canonicalised below.
-      for (TransferId idx = transaction.firstTransferId;
-           idx < transaction.firstTransferId + transaction.transferCount; ++idx) {
-        const WalletLegacyTransfer& de = m_transactionsCache.getTransfer(idx);
-        const uint64_t amt = static_cast<uint64_t>(de.amount);
-        if (unshield) {
-          if (amt == 0) {
-            throw std::system_error(make_error_code(error::WRONG_AMOUNT),
-              "Unshield destination amount must be non-zero");
-          }
-        } else if (amt == 0 || amt % CryptoNote::MIN_CT_DENOMINATION != 0) {
-          throw std::system_error(make_error_code(error::WRONG_AMOUNT),
-            "Confidential transactions require amounts to be a multiple of 0.01 KRB");
-        }
-      }
-
-      // Split change into canonical + sub-floor residue; fold residue into the fee.
-      uint64_t changeCanonical = (changeAmount / CryptoNote::MIN_CT_DENOMINATION)
-                                * CryptoNote::MIN_CT_DENOMINATION;
-      uint64_t dustResidue = changeAmount - changeCanonical;
-      uint64_t fee = transaction.fee + dustResidue;
-
-      // Build each destination output. For unshield each payout is a single
-      // transparent KeyOutput carrying the cleartext amount (NOT decomposed into
-      // canonical CT denominations). For a normal CT send each payout is
-      // decomposed and stays confidential.
-      std::vector<CTBuildOutput> ctOutputs;
-      for (TransferId idx = transaction.firstTransferId;
-           idx < transaction.firstTransferId + transaction.transferCount; ++idx) {
-        WalletLegacyTransfer& de = m_transactionsCache.getTransfer(idx);
-        AccountPublicAddress addr;
-        if (!m_currency.parseAccountAddressString(de.address, addr))
-          throw std::system_error(make_error_code(error::BAD_ADDRESS));
-        if (unshield) {
-          ctOutputs.push_back(CTBuildOutput{addr, static_cast<uint64_t>(de.amount), /*isTransparent=*/true});
-        } else {
-          auto denoms = decomposeAmount(static_cast<uint64_t>(de.amount));
-          for (uint64_t d : denoms) {
-            ctOutputs.push_back(CTBuildOutput{addr, d});
-          }
-        }
-      }
-
-      // Canonical change output (residue is in fee, not here).
-      if (changeCanonical > 0) {
-        auto changeDenoms = decomposeAmount(changeCanonical);
-        for (uint64_t d : changeDenoms) {
-          ctOutputs.push_back(CTBuildOutput{m_keys.address, d});
-        }
-      }
-
-      // Convert TxBuildInput → CTBuildInput. Each ring member is self-describing
-      // via its own (amount, outputIndex), so the same code path handles mixed
-      // transparent/confidential rings — relies on prepareInputs() populating
-      // GlobalOutput.amount per member.
-      std::vector<CTBuildInput> ctInputs;
-      for (auto& inp : inputs) {
-        CTBuildInput cti;
-        const auto& ki = inp.keyInfo;
-        const size_t ringSize = ki.outputs.size();
-        cti.ringMembers.reserve(ringSize);
-
-        for (size_t k = 0; k < ringSize; ++k) {
-          const auto& gout = ki.outputs[k];
-          const uint64_t memberAmount = gout.isConfidential
-            ? CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT
-            : gout.amount;
-          if (memberAmount == 0) {
-            throw std::runtime_error("CT ring member " + std::to_string(k)
-              + " has zero amount bucket in input " + std::to_string(ctInputs.size()));
-          }
-          Crypto::EllipticCurvePoint ringCommit{};
-          if (gout.isConfidential) {
-            ringCommit = gout.commitment;
-          } else {
-            if (!Crypto::transparent_amount_to_commitment(memberAmount, ringCommit)) {
-              throw std::runtime_error("Failed to compute CT ring commitment for input "
-                + std::to_string(ctInputs.size()));
-            }
-          }
-          cti.ringMembers.push_back(CTBuildRingMember{
-            memberAmount, gout.outputIndex, gout.targetKey, ringCommit
-          });
-        }
-
-        cti.realIndex = ki.realOutput.transactionIndex;
-        if (cti.realIndex >= ringSize) {
-          throw std::system_error(make_error_code(error::INTERNAL_WALLET_ERROR));
-        }
-        // Derive ephemeral spend key
-        KeyPair ephKeys;
-        Crypto::KeyImage dummy_ki;
-        CryptoNote::generate_key_image_helper(inp.senderKeys,
-            ki.realOutput.transactionPublicKey,
-            ki.realOutput.outputInTransaction,
-            ephKeys, dummy_ki);
-        cti.spendPrivkey = ephKeys.secretKey;
-        cti.realBlinding = ki.realOutputBlinding;
-        cti.amount = ki.realOutputAmount;
-        // Route transparent dust (real KeyOutput) as a v2 KeyInput so the
-        // shielded value enters the CT pool visibly. ConfidentialOutput
-        // inputs stay confidential — Triptych is only useful when the real
-        // amount is genuinely hidden.
-        cti.isTransparent = !ki.realOutputIsConfidential;
-        ctInputs.push_back(std::move(cti));
-      }
-
-      tx = buildConfidentialTransaction(ctInputs, ctOutputs, m_keys.viewSecretKey,
-                                         fee, transaction.extra, context->tx_key);
-    } else {
-      // Pre-fork: transparent transaction path (original)
-      TxBuildOutput changeDts;
-      changeDts.amount = 0;
-      createChangeDestinations(m_keys.address, totalAmount, context->foundMoney, changeDts);
-
-      std::vector<TxBuildOutput> splittedDests;
-      splitDestinations(transaction.firstTransferId, transaction.transferCount, changeDts, context->dustPolicy, splittedDests);
-
-      auto itx = buildTransaction(inputs, splittedDests, m_keys.viewSecretKey,
-          transaction.extra, transaction.unlockTime, m_upperTransactionSizeLimit, context->tx_key);
-      if (!fromBinaryArray(tx, itx->getTransactionData()))
-        throw std::system_error(make_error_code(error::INTERNAL_WALLET_ERROR));
-    }
-
-    getObjectHash(tx, transaction.hash);
-    transaction.secretKey = context->tx_key;
-
+    uint64_t totalAmount = 0;
+    Transaction tx = buildTransactionFromContext(context, transaction, totalAmount);
     m_transactionsCache.updateTransaction(context->transactionId, tx, totalAmount, context->selectedTransfers, context->tx_key);
 
     notifyBalanceChanged(events);
