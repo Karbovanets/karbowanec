@@ -875,8 +875,13 @@ TEST_F(WalletApi, transferMixin) {
 TEST_F(WalletApi, transferTooBigMixin) {
   generateAndUnlockMoney();
 
-  node.setMaxMixinCount(10);
-  ASSERT_ANY_THROW(sendMoney(RANDOM_ADDRESS, SENT, FEE, 15));
+  // Under CT the ring size is capped at CT_MAX_RING_SIZE (Triptych supports
+  // ring shapes 4/8/16). A request for a larger ring — i.e. mixin >=
+  // CT_MAX_RING_SIZE — must be rejected up front. (Pre-CT this test simulated a
+  // node short on decoys; under CT a transparent/coinbase ring simply degrades,
+  // so the meaningful "too big" case is the consensus ring-size cap.)
+  node.setLastLocalBlockHeight(CryptoNote::parameters::CT_FORK_HEIGHT);
+  ASSERT_ANY_THROW(sendMoney(RANDOM_ADDRESS, SENT, FEE, CryptoNote::parameters::CT_MAX_RING_SIZE));
 }
 
 TEST_F(WalletApi, transferNegativeAmount) {
@@ -1382,7 +1387,11 @@ void WalletApi::testIWalletDataCompatibility(bool details, const std::string& ca
       EXPECT_EQ(extraString, tx.extra);
       EXPECT_EQ(txBalance, tx.totalAmount);
 
-      if (inTx.totalAmountIn) {
+      // Fee is derived as visible (in - out). The visible totals need not
+      // satisfy in >= out — coinbase has no transparent inputs, and a CT-family
+      // tx hides its amounts (in/out can be 0 or mismatched) — so the wallet
+      // guards the subtraction and reports 0 rather than an underflowed value.
+      if (inTx.totalAmountIn > inTx.totalAmountOut) {
         EXPECT_EQ(inTx.totalAmountIn - inTx.totalAmountOut, tx.fee);
       } else {
         EXPECT_EQ(0, tx.fee);
@@ -2410,8 +2419,10 @@ TEST_F(WalletApi_makeTransaction, throwsIfWalletHasNotEnoughMoney) {
 
 TEST_F(WalletApi_makeTransaction, throwsIfMixInIsTooBig) {
   generateAndUnlockMoney();
-  uint64_t mixin = 10;
-  node.setMaxMixinCount(mixin - 1);
+  // Under CT the ring is capped at CT_MAX_RING_SIZE; a request for a larger ring
+  // (mixin >= CT_MAX_RING_SIZE) is rejected with MIXIN_COUNT_TOO_BIG.
+  node.setLastLocalBlockHeight(CryptoNote::parameters::CT_FORK_HEIGHT);
+  uint64_t mixin = CryptoNote::parameters::CT_MAX_RING_SIZE;
   int error = makeAliceTransactionAndReturnErrorCode({alice.getAddress(0)}, { CryptoNote::WalletOrder{ RANDOM_ADDRESS, SENT } }, FEE, mixin);
   ASSERT_EQ(static_cast<int>(error::WalletErrorCodes::MIXIN_COUNT_TOO_BIG), error);
 }
