@@ -1445,6 +1445,7 @@ struct block_stats_entry {
   uint64_t difficulty;
   uint64_t reward;
   uint64_t timestamp;
+  uint64_t confidential_supply;
 
   void serialize(ISerializer &s) {
     KV_MEMBER(height)
@@ -1454,29 +1455,8 @@ struct block_stats_entry {
     KV_MEMBER(difficulty)
     KV_MEMBER(reward)
     KV_MEMBER(timestamp)
+    KV_MEMBER(confidential_supply)
   }
-};
-
-struct COMMAND_RPC_GET_STATS_BY_HEIGHTS {
-  struct request {
-    std::vector<uint32_t> heights;
-
-    void serialize(ISerializer& s) {
-      KV_MEMBER(heights);
-    }
-  };
-
-  struct response {
-    std::vector<block_stats_entry> stats;
-    double duration;
-    std::string status;
-
-    void serialize(ISerializer& s) {
-      KV_MEMBER(stats);
-      KV_MEMBER(duration);
-      KV_MEMBER(status);
-    }
-  };
 };
 
 struct COMMAND_RPC_GET_STATS_BY_HEIGHTS_RANGE {
