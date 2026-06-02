@@ -20,8 +20,10 @@
 #include "RpcServer.h"
 #include "version.h"
 
+#include <algorithm>
 #include <ctime>
 #include <list>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -73,6 +75,52 @@ bool hasConfidentialOutput(const TransactionDetails& tx) {
   return std::any_of(tx.outputs.begin(), tx.outputs.end(), [](const transactionOutputDetails2& out) {
     return out.output.target.type() == typeid(ConfidentialOutput);
   });
+}
+
+bool hasConfidentialOutput(const Transaction& tx) {
+  return std::any_of(tx.outputs.begin(), tx.outputs.end(), [](const TransactionOutput& out) {
+    return out.target.type() == typeid(ConfidentialOutput);
+  });
+}
+
+std::string formatTransactionOutputSummary(const Currency& currency, const Transaction& tx) {
+  const uint64_t publicAmount = getOutputAmount(tx);
+  if (!hasConfidentialOutput(tx)) {
+    return currency.formatAmount(publicAmount);
+  }
+  if (publicAmount == 0) {
+    return "hidden";
+  }
+  return currency.formatAmount(publicAmount) + " (public part)";
+}
+
+std::string transactionVersionLabel(uint8_t version) {
+  if (version == TRANSACTION_VERSION_CT) {
+    return "confidential";
+  }
+  if (version == TRANSACTION_VERSION_UNSHIELD) {
+    return "unshield / mixed outputs";
+  }
+  return "transparent";
+}
+
+std::string ctProofOutputLabel(const TransactionDetails& tx, size_t proofIndex) {
+  size_t confidentialIndex = 0;
+  for (size_t outputIndex = 0; outputIndex < tx.outputs.size(); ++outputIndex) {
+    if (tx.outputs[outputIndex].output.target.type() != typeid(ConfidentialOutput)) {
+      continue;
+    }
+    if (confidentialIndex == proofIndex) {
+      std::string label = "Output " + std::to_string(outputIndex);
+      if (outputIndex != proofIndex) {
+        label += " (confidential #" + std::to_string(proofIndex) + ")";
+      }
+      return label;
+    }
+    ++confidentialIndex;
+  }
+
+  return "Confidential output #" + std::to_string(proofIndex);
 }
 
 std::string maskedAmountToHex(const std::array<uint8_t, 8>& amount) {
@@ -243,7 +291,7 @@ bool BuiltinExplorer::on_get_explorer(const COMMAND_EXPLORER::request& req, COMM
         body += txHashStr;
         body += "</a>";
         body += "</td>\n    <td>";
-        body += m_core.currency().formatAmount(getOutputAmount(txd.tx));
+        body += formatTransactionOutputSummary(m_core.currency(), txd.tx);
         body += "</td>\n    <td>";
         body += m_core.currency().formatAmount(txd.fee);
         body += "</td>\n    <td>";
@@ -602,7 +650,8 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
     body += "    Unlock time: " + std::to_string(transactionsDetails.unlockTime) + "\n";
     body += "  </li>\n";
     body += "  <li>\n";
-    body += "    Version: " + std::to_string(transactionsDetails.version) + "\n";
+    body += "    Version: " + std::to_string(transactionsDetails.version)
+         + " (" + transactionVersionLabel(transactionsDetails.version) + ")\n";
     body += "  </li>\n";
     body += "  <li>\n";
     if (transactionsDetails.minMixin == transactionsDetails.mixin) {
@@ -851,13 +900,14 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
           body += "        <li>f_U: <span class=\"wrap\">" + Common::podToHex(signature.f_U) + "</span></li>\n";
           body += "      </ul>\n";
         } else if (isKeyInputSig(sigs[i])) {
-          // Legacy ring signature: v1 transparent input, or a CT-family
-          // (v2 CT / v3 unshield) KeyInput shielding transparent value into
-          // the CT pool.
+          // Legacy ring signature: v1 transparent input, v2 KeyInput shielding
+          // transparent value into the CT pool, or v3 transparent KeyInput.
           const bool isCtFamilyKeyInput = isCtFamilyTransactionVersion(transactionsDetails.version);
+          const bool isUnshieldKeyInput = transactionsDetails.version == TRANSACTION_VERSION_UNSHIELD;
           body += "      <summary>Input " + std::to_string(i) +
                   " &mdash; " +
-                  (isCtFamilyKeyInput ? "transparent shielding (legacy ring signature)"
+                  (isUnshieldKeyInput ? "transparent KeyInput (legacy ring signature)"
+                   : isCtFamilyKeyInput ? "transparent shielding (legacy ring signature)"
                                       : "legacy ring signature") +
                   "</summary>\n";
           body += "      <ol>\n";
@@ -894,7 +944,7 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
           const auto& proof = transactionsDetails.ctProofs[i];
           body += "  <li>\n";
           body += "    <details>\n";
-          body += "      <summary>Output " + std::to_string(i) + " GK denomination proof</summary>\n";
+          body += "      <summary>" + ctProofOutputLabel(transactionsDetails, i) + " GK denomination proof</summary>\n";
           body += "      <ul>\n";
           appendPodArray(body, "I", proof.I);
           appendPodArray(body, "A", proof.A);

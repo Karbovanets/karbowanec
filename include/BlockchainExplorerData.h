@@ -146,8 +146,10 @@ struct TransactionDetails {
   std::vector<transactionInputDetails2> inputs;
   std::vector<transactionOutputDetails2> outputs;
 
-  // CT (v2) proof body. Empty / value-initialized for non-CT transactions.
-  std::vector<CTOutputProof>    ctProofs;     // per-output GK denomination membership
+  // CT-family proof body. Empty / value-initialized for non-CT transactions.
+  // In v3 unshield, ctProofs[i] corresponds to the i-th confidential output,
+  // not necessarily outputs[i] because transparent payout outputs have no GK proof.
+  std::vector<CTOutputProof>    ctProofs;     // per-confidential-output GK denomination membership
   TransactionKernel             kernel;       // balance-equation excess + Schnorr
 };
 

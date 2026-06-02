@@ -237,9 +237,11 @@ void serialize(TransactionDetails& transaction, ISerializer& serializer) {
     serializer.endArray();
   }
 
-  // CT (v2) output proof body — GK denomination proofs, balance kernel.
-  // (Per-input Triptych proofs ride along in the signatures variant above.)
-  if (transaction.version == TRANSACTION_VERSION_CT) {
+  // CT-family output proof body: GK denomination proofs and balance kernel.
+  // v3 unshield has one GK proof per confidential output; transparent payout
+  // outputs deliberately have no matching proof. Per-input Triptych proofs
+  // ride along in the signatures variant above.
+  if (isCtFamilyTransactionVersion(transaction.version)) {
     serializer(transaction.ctProofs, "ctProofs");
     serializer(transaction.kernel, "kernel");
   }

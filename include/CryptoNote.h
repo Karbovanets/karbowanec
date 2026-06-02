@@ -189,9 +189,9 @@ struct Transaction : public TransactionPrefix {
   // Per-input authorization, parallel to inputs.
   std::vector<InputSignatures> signatures;
 
-  // v2 (CT): output / kernel proof body — separate from prefix so
+  // CT-family (v2/v3): output / kernel proof body — separate from prefix so
   // getTransactionPrefixHash() excludes them.
-  std::vector<CTOutputProof> ctProofs;   // per-output GK denomination proofs
+  std::vector<CTOutputProof> ctProofs;   // per-confidential-output GK denomination proofs
   TransactionKernel          kernel;     // balance proof + Schnorr signature
 };
 

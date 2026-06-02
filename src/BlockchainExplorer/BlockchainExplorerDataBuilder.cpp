@@ -397,12 +397,13 @@ bool BlockchainExplorerDataBuilder::fillTransactionDetails(const Transaction& tr
     transactionDetails.outputs.push_back(std::move(txOutDetails));
   }
 
-  // CT v4 proof body — copy through for full inspection (web wallets use raw-tx
+  // CT-family proof body: copy through for full inspection (web wallets use raw-tx
   // RPC, so this is for explorers / debugging / human inspection). The per-
   // input Triptych proofs are carried inside transactionDetails.signatures via
   // the InputSignatures variant; here we forward only the output proofs and
-  // balance kernel.
-  if (transaction.version == TRANSACTION_VERSION_CT) {
+  // balance kernel. v3 unshield has one GK proof per confidential output;
+  // transparent payout outputs deliberately have no matching proof.
+  if (isCtFamilyTransactionVersion(transaction.version)) {
     transactionDetails.ctProofs     = transaction.ctProofs;
     transactionDetails.kernel       = transaction.kernel;
   }
