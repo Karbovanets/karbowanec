@@ -4477,6 +4477,83 @@ bool Blockchain::getblockEntry(size_t i, uint64_t& block_cumulative_size,
   return true;
 }
 
+static BlockStatsEntry makeBlockStatsEntry(const Currency& currency, uint32_t height,
+                                           const DbBlockMeta& meta, const DbBlockMeta* prevMeta) {
+  BlockStatsEntry entry{};
+  entry.height = height;
+  entry.blockSize = meta.blockCumulativeSize;
+  entry.emittedSupply = meta.alreadyGeneratedCoins;
+  entry.timestamp = meta.timestamp;
+  entry.transactionsCount = meta.txCount > 0 ? meta.txCount - 1 : 0;
+
+  if (height == 0 || prevMeta == nullptr) {
+    entry.difficulty = meta.cumulativeDifficulty;
+    entry.reward = meta.alreadyGeneratedCoins;
+  } else {
+    entry.difficulty = meta.cumulativeDifficulty - prevMeta->cumulativeDifficulty;
+    entry.reward = meta.alreadyGeneratedCoins - prevMeta->alreadyGeneratedCoins;
+  }
+
+  // Per-block snapshot of value held in confidential outputs. It is only
+  // meaningful once CT activates (block major v6); before that it is 0 on
+  // every block, so consumers can chart it starting from the v6 fork.
+  entry.confidentialSupply = currency.isConfidentialTransactionsActivated(height)
+    ? meta.confidentialSupply : 0;
+
+  return entry;
+}
+
+bool Blockchain::getBlockStats(const std::vector<uint32_t>& heights, std::vector<BlockStatsEntry>& stats) {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+
+  stats.clear();
+  if (heights.empty()) return true;
+
+  const uint32_t chainHeight = m_db.getChainHeight();
+  std::vector<uint32_t> metaHeights;
+  metaHeights.reserve(heights.size() * 2);
+
+  for (uint32_t height : heights) {
+    if (height >= chainHeight) {
+      logger(ERROR, BRIGHT_RED) << "wrong block height " << height
+        << " at Blockchain::getBlockStats(), blockchain height = " << chainHeight;
+      return false;
+    }
+
+    metaHeights.push_back(height);
+    if (height > 0) {
+      metaHeights.push_back(height - 1);
+    }
+  }
+
+  std::sort(metaHeights.begin(), metaHeights.end());
+  metaHeights.erase(std::unique(metaHeights.begin(), metaHeights.end()), metaHeights.end());
+
+  std::vector<DbBlockMeta> metas;
+  if (!m_db.getBlockMetaForHeights(metaHeights, metas) || metas.size() != metaHeights.size()) {
+    logger(ERROR, BRIGHT_RED) << "failed to read sparse block meta set at Blockchain::getBlockStats()";
+    return false;
+  }
+
+  std::unordered_map<uint32_t, DbBlockMeta> metaByHeight;
+  metaByHeight.reserve(metas.size());
+  for (size_t i = 0; i < metas.size(); ++i) {
+    metaByHeight.emplace(metaHeights[i], metas[i]);
+  }
+
+  stats.reserve(heights.size());
+  for (uint32_t height : heights) {
+    const DbBlockMeta& meta = metaByHeight.at(height);
+    const DbBlockMeta* prevMeta = nullptr;
+    if (height > 0) {
+      prevMeta = &metaByHeight.at(height - 1);
+    }
+    stats.push_back(makeBlockStatsEntry(m_currency, height, meta, prevMeta));
+  }
+
+  return true;
+}
+
 bool Blockchain::getBlockStats(uint32_t startHeight, uint32_t endHeight, std::vector<BlockStatsEntry>& stats) {
   std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
 
@@ -4508,30 +4585,8 @@ bool Blockchain::getBlockStats(uint32_t startHeight, uint32_t endHeight, std::ve
   for (uint32_t height = startHeight; height <= endHeight; ++height) {
     const size_t metaIndex = static_cast<size_t>(height) - fromHeight;
     const DbBlockMeta& meta = metas[metaIndex];
-
-    BlockStatsEntry entry{};
-    entry.height = height;
-    entry.blockSize = meta.blockCumulativeSize;
-    entry.alreadyGeneratedCoins = meta.alreadyGeneratedCoins;
-    entry.timestamp = meta.timestamp;
-    entry.transactionsCount = meta.txCount > 0 ? meta.txCount - 1 : 0;
-
-    if (height == 0) {
-      entry.difficulty = meta.cumulativeDifficulty;
-      entry.reward = meta.alreadyGeneratedCoins;
-    } else {
-      const DbBlockMeta& prevMeta = metas[metaIndex - 1];
-      entry.difficulty = meta.cumulativeDifficulty - prevMeta.cumulativeDifficulty;
-      entry.reward = meta.alreadyGeneratedCoins - prevMeta.alreadyGeneratedCoins;
-    }
-
-    // Per-block snapshot of value held in confidential outputs. It is only
-    // meaningful once CT activates (block major v6); before that it is 0 on
-    // every block, so consumers can chart it starting from the v6 fork.
-    entry.confidentialSupply = m_currency.isConfidentialTransactionsActivated(height)
-      ? meta.confidentialSupply : 0;
-
-    stats.push_back(entry);
+    const DbBlockMeta* prevMeta = height == 0 ? nullptr : &metas[metaIndex - 1];
+    stats.push_back(makeBlockStatsEntry(m_currency, height, meta, prevMeta));
   }
 
   return true;

@@ -17,7 +17,7 @@ namespace CryptoNote {
 
 struct BlockStatsEntry {
   uint32_t height;
-  uint64_t alreadyGeneratedCoins;
+  uint64_t emittedSupply;
   uint64_t transactionsCount;
   uint64_t blockSize;
   difficulty_type difficulty;

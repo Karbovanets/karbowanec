@@ -146,6 +146,7 @@ namespace CryptoNote {
     bool getblockEntry(size_t i, uint64_t& block_cumulative_size, difficulty_type& difficulty,
                        uint64_t& already_generated_coins, uint64_t& reward,
                        uint64_t& transactions_count, uint64_t& timestamp);
+    bool getBlockStats(const std::vector<uint32_t>& heights, std::vector<BlockStatsEntry>& stats);
     bool getBlockStats(uint32_t startHeight, uint32_t endHeight, std::vector<BlockStatsEntry>& stats);
     bool getBlockContainingTransaction(const Crypto::Hash& txId, Crypto::Hash& blockId,
                                         uint32_t& blockHeight);
