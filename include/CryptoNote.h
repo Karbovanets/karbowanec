@@ -120,13 +120,12 @@ struct CTInputSignature {
   std::vector<Crypto::EllipticCurvePoint>  B;        // bitness aux commitments
   std::vector<Crypto::EllipticCurvePoint>  Q_P;      // P-ring polynomial coefficients (G-base)
   std::vector<Crypto::EllipticCurvePoint>  Q_M;      // M-ring polynomial coefficients (G-base)
-  std::vector<Crypto::EllipticCurvePoint>  Q_U;      // U-ring polynomial coefficients (I-base)
+  std::vector<Crypto::EllipticCurvePoint>  Q_J;      // linking-track coefficients ρ_P·U (U-base)
   std::vector<Crypto::EllipticCurveScalar> z;        // bit-commitment responses
   std::vector<Crypto::EllipticCurveScalar> za;       // opening responses for x·I_bits + A
   std::vector<Crypto::EllipticCurveScalar> zb;       // opening responses for (x−z)·I_bits + B
-  Crypto::EllipticCurveScalar              f_P;      // spend witness response
+  Crypto::EllipticCurveScalar              f_P;      // spend witness response (reused to bind key image J = x·U)
   Crypto::EllipticCurveScalar              f_M;      // balance witness response
-  Crypto::EllipticCurveScalar              f_U;      // image witness response
 };
 
 // Per-output GK denomination membership proof.

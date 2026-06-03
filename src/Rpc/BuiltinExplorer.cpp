@@ -891,13 +891,12 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
           dumpPointArray(signature.B,      "B");
           dumpPointArray(signature.Q_P,    "Q_P");
           dumpPointArray(signature.Q_M,    "Q_M");
-          dumpPointArray(signature.Q_U,    "Q_U");
+          dumpPointArray(signature.Q_J,    "Q_J");
           dumpScalarArray(signature.z,  "z");
           dumpScalarArray(signature.za, "za");
           dumpScalarArray(signature.zb, "zb");
           body += "        <li>f_P: <span class=\"wrap\">" + Common::podToHex(signature.f_P) + "</span></li>\n";
           body += "        <li>f_M: <span class=\"wrap\">" + Common::podToHex(signature.f_M) + "</span></li>\n";
-          body += "        <li>f_U: <span class=\"wrap\">" + Common::podToHex(signature.f_U) + "</span></li>\n";
           body += "      </ul>\n";
         } else if (isKeyInputSig(sigs[i])) {
           // Legacy ring signature: v1 transparent input, v2 KeyInput shielding

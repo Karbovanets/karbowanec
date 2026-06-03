@@ -13,9 +13,12 @@
 //     proof (the I_bits/A/B + z/za/zb response structure).
 //   - Sarang Noether, Brandon Goodell, Surae Noether, "Triptych:
 //     logarithmic-sized linkable ring signatures with applications,"
-//     2020. ePrint 2020/018. Source for the linkable-tag construction
-//     and the I-base blinding trick (Q_U[m] = σ_U[m]·I + ψ_U[m]) that
-//     lets the response scalar f_U carry x⁻¹ without ever exposing it.
+//     2020. ePrint 2020/018. Source for the logarithmic linkable-tag idea.
+//     NOTE: we use the published fixed-generator linking tag (J = x·U bound
+//     by reusing the spend response), NOT the per-key Hp(P) + independent
+//     inverse-witness hybrid that an earlier revision used — that hybrid did
+//     not bind the tag to x and allowed forged key images (now fixed; see
+//     docs/CT-ROUTE1-KEYIMAGE-FIX.md).
 //
 // Public statement, per CT input:
 //   Ring (P_k, C_k) for k = 0..N-1 with N = 2^n in {4, 8, 16}.
@@ -26,42 +29,45 @@
 //     P_l   = x * G                                 (spend authorization)
 //     C_l   = C' + z * G                            (commitment balance,
 //                                                    z = r_real - r_pseudo)
-//     I     = x * Hp(P_l)                           (CryptoNote key image)
+//     J     = x * U                                 (fixed-generator key image)
 //
-// The proof reveals nothing about l beyond the ring membership. The key
-// image I is consensus-checked elsewhere against the global spent set; the
-// proof binds I to the unknown index l through the U-ring (U_k = Hp(P_k))
-// using Triptych's blinding-base trick: the U-track's polynomial
-// commitments are blinded with I rather than G, which lets the response
-// scalar carry (1/x) without ever exposing it or 1/x to the verifier.
+// U is a single global NUMS generator (hash-to-point of a domain string,
+// dlog unknown wrt G and H). The proof reveals nothing about l beyond ring
+// membership. J is consensus-checked elsewhere against the global spent set.
 //
-// Algebra (per ring R ∈ {P, M, U} where M_k := C_k - C'):
+// LINKING-TAG BINDING (the load-bearing soundness property): the linking
+// track does NOT use an independent response. It REUSES the spend response
+// f_P (witness x), so the SAME x drives both P_l = x·G and J = x·U. The
+// earlier construction used an independent f_U (witness 1/x) over a per-key
+// U-ring (U_k = Hp(P_k)); that response was never tied to f_P, so a holder
+// could emit any J' = c·Hp(P_l) for chosen c and double-spend. See
+// docs/CT-ROUTE1-KEYIMAGE-FIX.md and tests/forge_ki_poc.cpp.
+//
+// Algebra (rings R ∈ {P, M}, base G, where M_k := C_k - C'):
 //
 //   Σ_k p_k(X) · R_k = R_l · X^n + Σ_{m<n} X^m · ψ_R[m]
 //
 // where p_k is the GK selector polynomial (degree n, leading coefficient
-// 1 iff k = l). The prover commits to ψ_R[m] (for m < n) blinded as:
+// 1 iff k = l) and Σ_k p_k(X) = X^n identically. The prover commits:
 //
 //   Q_P[m] = ρ_P[m] · G + ψ_P[m]      (P-ring, G-base — standard GK)
 //   Q_M[m] = ρ_M[m] · G + ψ_M[m]      (M-ring, G-base — standard GK)
-//   Q_U[m] = σ_U[m] · I + ψ_U[m]      (U-ring, I-base — Triptych trick)
+//   Q_J[m] = ρ_P[m] · U               (linking track — REUSES ρ_P[m], U-base)
 //
 // After Fiat-Shamir challenge x_chal, prover responds:
 //
 //   f_P = x · x_chal^n  −  Σ_m ρ_P[m] · x_chal^m
 //   f_M = z · x_chal^n  −  Σ_m ρ_M[m] · x_chal^m
-//   f_U = x⁻¹ · x_chal^n − Σ_m σ_U[m] · x_chal^m
 //
-// Verifier checks three ring identities:
+// Verifier checks two ring identities plus the linking identity:
 //
 //   Σ_k p_k(x_chal) · P_k = f_P · G + Σ_m x_chal^m · Q_P[m]
 //   Σ_k p_k(x_chal) · M_k = f_M · G + Σ_m x_chal^m · Q_M[m]
-//   Σ_k p_k(x_chal) · U_k = f_U · I + Σ_m x_chal^m · Q_U[m]
+//   x_chal^n · J          = f_P · U + Σ_m x_chal^m · Q_J[m]
 //
-// The third identity holds iff I = x · Hp(P_l), forcing the linking-tag
-// witness x_image and the spend witness x_spend (extracted from f_P) to
-// match at index l. Different witnesses would force ψ_U[n] = U_l to a
-// different point, contradicting the public Hp(P_l) value at that index.
+// The linking identity holds iff J = x·U with the SAME x extracted from the
+// P-ring: substituting f_P, the x_chal^n coefficient forces J = x·U, and
+// Q_J spans only m<n so the prover cannot inject an x_chal^n term to move J.
 //
 // Soundness sketch (informal — full proof mirrors Groth-Kohlweiss with the
 // extra Triptych row): the GK extractor pulls (l, x, z) from any prover
@@ -78,9 +84,9 @@
 //   - every ring pubkey P_k in order
 //   - every ring commitment C_k in order
 //   - C' (pseudo-output commitment)
-//   - I (key image / linking tag)
+//   - J (key image / linking tag, = x·U)
 //   - I_bits[j], A[j], B[j]  for j = 0..n−1   (bit-decomposition commits)
-//   - Q_P[m], Q_M[m], Q_U[m] for m = 0..n−1   (poly-coefficient commits)
+//   - Q_P[m], Q_M[m], Q_J[m] for m = 0..n−1   (poly-coefficient commits)
 //
 // Independence from the GK denomination proof: separate domain separator,
 // separate transcript, separate challenges. The only shared input is the
@@ -133,12 +139,14 @@ namespace Crypto {
 //
 //   ring_size ∈ {4, 8, 16}  (n_bits = log2(ring_size))
 //     I_bits, A, B, z, za, zb : exactly n_bits entries
-//     Q_P, Q_M, Q_U           : exactly n_bits entries
+//     Q_P, Q_M, Q_J           : exactly n_bits entries
 //
-// f_P, f_M, f_U are always present (three response scalars).
+// f_P, f_M are always present (two response scalars). There is no separate
+// image response: the linking track reuses f_P, which is what binds J = x·U
+// to the spend key.
 //
 // No ring-size-1 branch: a Schnorr-only shape at ring size 1 would not
-// bind the same witness x in P = x·G and I = x·Hp(P), so a holder could
+// bind the same witness x in P = x·G and J = x·U, so a holder could
 // emit fresh key images for the same spend. Transparent shielding
 // (coinbase included) goes through v2 KeyInput with a legacy ring
 // signature, so a ConfidentialInput with ring size 1 is never needed.
@@ -148,13 +156,15 @@ struct TriptychSignature {
   std::vector<EllipticCurvePoint>  B;        // bitness aux commitments
   std::vector<EllipticCurvePoint>  Q_P;      // P-ring polynomial coefficients (G-base)
   std::vector<EllipticCurvePoint>  Q_M;      // M-ring polynomial coefficients (G-base)
-  std::vector<EllipticCurvePoint>  Q_U;      // U-ring polynomial coefficients (I-base)
+  std::vector<EllipticCurvePoint>  Q_J;      // linking-track coefficients ρ_P[m]·U (U-base)
   std::vector<EllipticCurveScalar> z;        // bit-commitment responses
   std::vector<EllipticCurveScalar> za;       // opening responses for x·I_bits + A
   std::vector<EllipticCurveScalar> zb;       // opening responses for (x−z)·I_bits + B
-  EllipticCurveScalar              f_P;      // spend witness response
+  EllipticCurveScalar              f_P;      // spend witness response (REUSED to bind the key image)
   EllipticCurveScalar              f_M;      // balance witness response
-  EllipticCurveScalar              f_U;      // image witness response
+  // No independent image response: the linking track reuses f_P. An independent
+  // inverse witness (the old f_U) left the key image unbound — a holder could
+  // forge fresh images for the same output. See docs/CT-ROUTE1-KEYIMAGE-FIX.md.
 };
 
 // Generate a Triptych spend proof for a CT input.
@@ -210,6 +220,17 @@ bool triptych_verify(
 // validation) can reject early without ever entering the proof path
 // on a malformed shape.
 bool triptych_ring_size_supported(size_t ring_size);
+
+// Canonical CT key image / linking tag: J = x · U, where U is the fixed
+// global NUMS generator and x is the spend secret of the output being
+// consumed. Deterministic in x alone (independent of P, ring, tx), so the
+// same output always yields the same J -> double-spend detection via the
+// single global spent-key set. triptych_sign() computes the identical value
+// internally; wallets call this to populate ConfidentialInput.keyImage so the
+// tx prefix hash matches the proof transcript.
+//
+// Returns false if spend_privkey is not a canonical scalar in [1, L).
+bool triptych_key_image(const SecretKey& spend_privkey, KeyImage& key_image);
 
 // Batched verification of `count` Triptych spend proofs that all share a
 // single Fiat-Shamir message (typically the tx prefix hash of one

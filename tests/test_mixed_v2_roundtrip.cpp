@@ -106,7 +106,7 @@ Transaction buildMixedV2() {
   cs.B.resize(2);
   cs.Q_P.resize(2);
   cs.Q_M.resize(2);
-  cs.Q_U.resize(2);
+  cs.Q_J.resize(2);
   cs.z.resize(2);
   cs.za.resize(2);
   cs.zb.resize(2);
@@ -116,14 +116,13 @@ Transaction buildMixedV2() {
     cs.B[j]      = makePod<Crypto::EllipticCurvePoint>(0xA4 + j);
     cs.Q_P[j]    = makePod<Crypto::EllipticCurvePoint>(0xA6 + j);
     cs.Q_M[j]    = makePod<Crypto::EllipticCurvePoint>(0xA8 + j);
-    cs.Q_U[j]    = makePod<Crypto::EllipticCurvePoint>(0xAA + j);
+    cs.Q_J[j]    = makePod<Crypto::EllipticCurvePoint>(0xAA + j);
     cs.z[j]      = makePod<Crypto::EllipticCurveScalar>(0xAC + j);
     cs.za[j]     = makePod<Crypto::EllipticCurveScalar>(0xAE + j);
     cs.zb[j]     = makePod<Crypto::EllipticCurveScalar>(0xB0 + j);
   }
   cs.f_P = makePod<Crypto::EllipticCurveScalar>(0xB2);
   cs.f_M = makePod<Crypto::EllipticCurveScalar>(0xB3);
-  cs.f_U = makePod<Crypto::EllipticCurveScalar>(0xB4);
 
   // CT output proof: dummy values.
   tx.ctProofs.resize(1);
@@ -204,7 +203,7 @@ Transaction buildMixedOutputV3() {
   tx.signatures[0] = CTInputSignature{};
   CTInputSignature& cs = ctInputSig(tx.signatures[0]);
   cs.I_bits.resize(2); cs.A.resize(2); cs.B.resize(2);
-  cs.Q_P.resize(2); cs.Q_M.resize(2); cs.Q_U.resize(2);
+  cs.Q_P.resize(2); cs.Q_M.resize(2); cs.Q_J.resize(2);
   cs.z.resize(2); cs.za.resize(2); cs.zb.resize(2);
   for (size_t j = 0; j < 2; ++j) {
     cs.I_bits[j] = makePod<Crypto::EllipticCurvePoint>(0xA0 + j);
@@ -212,14 +211,13 @@ Transaction buildMixedOutputV3() {
     cs.B[j]      = makePod<Crypto::EllipticCurvePoint>(0xA4 + j);
     cs.Q_P[j]    = makePod<Crypto::EllipticCurvePoint>(0xA6 + j);
     cs.Q_M[j]    = makePod<Crypto::EllipticCurvePoint>(0xA8 + j);
-    cs.Q_U[j]    = makePod<Crypto::EllipticCurvePoint>(0xAA + j);
+    cs.Q_J[j]    = makePod<Crypto::EllipticCurvePoint>(0xAA + j);
     cs.z[j]      = makePod<Crypto::EllipticCurveScalar>(0xAC + j);
     cs.za[j]     = makePod<Crypto::EllipticCurveScalar>(0xAE + j);
     cs.zb[j]     = makePod<Crypto::EllipticCurveScalar>(0xB0 + j);
   }
   cs.f_P = makePod<Crypto::EllipticCurveScalar>(0xB2);
   cs.f_M = makePod<Crypto::EllipticCurveScalar>(0xB3);
-  cs.f_U = makePod<Crypto::EllipticCurveScalar>(0xB4);
 
   // One CT output proof, for the single ConfidentialOutput.
   tx.ctProofs.resize(1);

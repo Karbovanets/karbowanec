@@ -213,46 +213,55 @@ funding).
 
 ### Key-image invariant across shield boundaries (double-spend safety)
 
+> **Route 1 update (key-image binding fix).** The CT key image is now a
+> **fixed-generator** tag `J = x·U` (single global NUMS `U`), not the per-key
+> `x·Hp(P)`. The earlier Triptych construction did not bind the linking tag to
+> the spend key (independent `f_U` witness) and allowed forging distinct valid
+> key images for one output — a confidential double-spend. The fix binds the
+> tag by reusing the spend response `f_P`, and makes CT rings
+> **confidential-output-only**. Authoritative spec + proof:
+> `docs/CT-ROUTE1-KEYIMAGE-FIX.md`; regression `tests/forge_ki_poc.cpp`.
+
 Spending the same output **must** produce the same key image regardless of
-which transaction form consumes it. This is what makes shield boundaries
-safe: a holder cannot spend an output once via one form and again via
-another, because the consensus spent-key set would collide.
+which CT transaction form consumes it. This is what makes shield boundaries
+safe: the consensus spent-key set collides on a re-spend.
 
-The invariant rests on four properties, all of which hold in the current
-code and **must be preserved by the CT→CN unshield work**:
+The invariant rests on four properties:
 
-1. **One canonical spend path per output type.** A transparent `KeyOutput`
-   is consumable only by a `KeyInput`; a `ConfidentialOutput` is consumable
-   only by a `ConfidentialInput`. The two never overlap: confidential
-   outputs are registered in the global output index under the sentinel
-   bucket `CT_CONFIDENTIAL_OUTPUT_AMOUNT` (`UINT64_MAX`), transparent
-   outputs under their real amount bucket, and a `KeyInput`'s ring resolves
-   only `KeyOutput` targets in its own (`amount != 0`) bucket. The unshield
-   path must **not** introduce a second way to consume a confidential
-   output (e.g. via a plain `KeyInput`); doing so would risk a second,
-   divergent key image for the same output.
+1. **One canonical spend path *and one image format* per output.** A
+   transparent `KeyOutput` is consumable only by a `KeyInput` (image
+   `x·Hp(P)`); a `ConfidentialOutput` only by a `ConfidentialInput` (image
+   `J = x·U`). The two never overlap: confidential outputs live in the
+   sentinel bucket `CT_CONFIDENTIAL_OUTPUT_AMOUNT` (`UINT64_MAX`), transparent
+   outputs under their real amount bucket, a `KeyInput`'s ring resolves only
+   `KeyOutput` targets, and a `ConfidentialInput`'s ring is **confidential-only**
+   (every member must be in the sentinel bucket — transparent outputs are
+   rejected as CT ring members). So no output is ever spendable by two paths,
+   hence never produces two different image formats. Consequently neither the
+   unshield path nor mixed rings may admit a transparent output as a CT
+   *real* member.
 
-2. **Key-image determinism.** The key image is always
-   `I = x · H_p(P)` over the output's one-time public key `P`, computed by
-   the same `generate_key_image` primitive on every path. It depends only
-   on the output keypair `(P, x)` — never on the transaction version, the
-   output side (shield / unshield / CT-to-CT), the ring composition, or the
-   Pedersen commitment. So a `ConfidentialInput` spending output `P` in a
-   `CT → CT` transaction and a `ConfidentialInput` spending the same `P` in
-   a `CT → CN` unshield emit byte-identical key images.
+2. **Key-image determinism within the CT path.** A CT spend's image is
+   `J = x·U`, depending only on the spend secret `x` — never on the tx version,
+   the output side (CT→CT / CT→CN unshield), the ring, or the commitment. So a
+   `ConfidentialInput` spending `P` in a `CT → CT` tx and a `ConfidentialInput`
+   spending the same `P` in a `CT → CN` unshield emit byte-identical images
+   (both `x·U`). `triptych_key_image()` is the one primitive on every CT path.
 
-3. **The Triptych spend proof binds the same `x`** in both `P = xG` and
-   `I = x·Hp(P)`, so a holder cannot forge an alternative key image for an
-   output they own. (This is why the ring-size-1 "two independent Schnorr
-   proofs" carve-out was removed — it did not bind the two, allowing fresh
-   key images for the same spend.)
+3. **The Triptych proof binds the same `x`** in both `P = x·G` (P-ring) and
+   `J = x·U` (linking track), because the linking track **reuses the spend
+   response `f_P`** rather than an independent inverse witness. The `Xⁿ`
+   coefficient of the linking equation forces `J = x·U`; `Q_J` spans only
+   `m<n`, so the prover cannot move `J` off `x·U`. A holder therefore cannot
+   forge an alternative key image for an output they own.
 
-4. **A single, type-agnostic spent-key set.** Consensus records and checks
-   key images from both `KeyInput` and `ConfidentialInput` in one set keyed
-   on the raw 32 key-image bytes, with no discriminator for input type,
-   amount bucket, or transaction version. A `CT → CN` spend therefore
-   collides with a prior `CT → CT` spend of the same output, and the second
-   to be mined is rejected as a double-spend.
+4. **A single, type-agnostic spent-key set.** Consensus records and checks key
+   images from both `KeyInput` (`x·Hp(P)`) and `ConfidentialInput` (`x·U`) in
+   one set keyed on the raw 32 bytes, with no discriminator. Because each
+   output maps to exactly one spend path/format (property 1), the two formats
+   never need to collide; and a `CT → CN` spend collides with a prior `CT → CT`
+   spend of the *same* confidential output (both `x·U`), so the second to be
+   mined is rejected as a double-spend.
 
 For atomic swaps this yields the desired mutual-exclusion property directly:
 the redeem (`CT → CN`) and refund spends of the same locked confidential

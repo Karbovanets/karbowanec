@@ -278,7 +278,6 @@ static void test_tampered_responses() {
 
   if (!run("f_P", [](Crypto::TriptychSignature& s){ s.f_P.data[0] ^= 1; })) return;
   if (!run("f_M", [](Crypto::TriptychSignature& s){ s.f_M.data[0] ^= 1; })) return;
-  if (!run("f_U", [](Crypto::TriptychSignature& s){ s.f_U.data[0] ^= 1; })) return;
   if (!run("z[0]",  [](Crypto::TriptychSignature& s){ s.z[0].data[0]  ^= 1; })) return;
   if (!run("za[0]", [](Crypto::TriptychSignature& s){ s.za[0].data[0] ^= 1; })) return;
   if (!run("zb[0]", [](Crypto::TriptychSignature& s){ s.zb[0].data[0] ^= 1; })) return;
@@ -317,7 +316,7 @@ static void test_tampered_points() {
   if (!run("B[2]",      [](Crypto::TriptychSignature& s){ s.B[2].data[31]      ^= 0x10; })) return;
   if (!run("Q_P[0]",    [](Crypto::TriptychSignature& s){ s.Q_P[0].data[31]    ^= 0x10; })) return;
   if (!run("Q_M[0]",    [](Crypto::TriptychSignature& s){ s.Q_M[0].data[31]    ^= 0x10; })) return;
-  if (!run("Q_U[0]",    [](Crypto::TriptychSignature& s){ s.Q_U[0].data[31]    ^= 0x10; })) return;
+  if (!run("Q_J[0]",    [](Crypto::TriptychSignature& s){ s.Q_J[0].data[31]    ^= 0x10; })) return;
 
   PASS();
 }

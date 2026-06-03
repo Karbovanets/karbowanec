@@ -140,13 +140,12 @@ namespace boost
     a & x.B;
     a & x.Q_P;
     a & x.Q_M;
-    a & x.Q_U;
+    a & x.Q_J;
     a & x.z;
     a & x.za;
     a & x.zb;
     a & x.f_P;
     a & x.f_M;
-    a & x.f_U;
   }
 
   template <class Archive>

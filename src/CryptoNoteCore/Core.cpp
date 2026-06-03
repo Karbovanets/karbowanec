@@ -557,7 +557,7 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
       if (expected_bits == SIZE_MAX ||
           s.I_bits.size() != expected_bits || s.A.size()   != expected_bits ||
           s.B.size()      != expected_bits || s.Q_P.size() != expected_q    ||
-          s.Q_M.size()    != expected_q    || s.Q_U.size() != expected_q    ||
+          s.Q_M.size()    != expected_q    || s.Q_J.size() != expected_q    ||
           s.z.size()      != expected_bits || s.za.size()  != expected_bits ||
           s.zb.size()     != expected_bits) {
         logger(ERROR) << "CT tx input " << i << " Triptych proof shape mismatch with ring size, rejected for tx id= "

@@ -156,9 +156,12 @@ bool checkTransactionConsensusShape(const Transaction& tx,
         setError(error, "ConfidentialInput ringCommitments size does not match ringMembers");
         return false;
       }
+      // Confidential-only rings (Route 1): every ring member must reference the
+      // sentinel confidential-output bucket. Transparent KeyOutputs are not
+      // admitted as CT ring members (see checkConfidentialTransaction).
       for (const auto& rm : ci.ringMembers) {
-        if (rm.amount == 0) {
-          setError(error, "ConfidentialInput ring member references zero amount bucket");
+        if (rm.amount != CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT) {
+          setError(error, "ConfidentialInput ring member not in the confidential-output bucket");
           return false;
         }
       }

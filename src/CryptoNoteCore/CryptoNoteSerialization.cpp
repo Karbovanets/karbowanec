@@ -523,9 +523,9 @@ void serialize(ConfidentialOutput& output, ISerializer& serializer) {
 void serialize(CTInputSignature& sig, ISerializer& serializer) {
   // Triptych proof body, controlled by a single header byte n:
   //   n ∈ {2, 3, 4}  (ring_size ∈ {4, 8, 16})
-  //     I_bits / A / B / Q_P / Q_M / Q_U / z / za / zb : n entries each
-  //     f_P, f_M, f_U                                  : 3 scalars
-  //     wire: 1 + 6n×32 + (3n+3)×32 bytes
+  //     I_bits / A / B / Q_P / Q_M / Q_J / z / za / zb : n entries each
+  //     f_P, f_M                                       : 2 scalars
+  //     wire: 1 + 6n×32 + (3n+2)×32 bytes
   //
   // n ∈ {0, 1, 0xFF} are reserved as invalid. Empty-slot signaling (for
   // KeyInput slots in a mixed v2 tx) is now done at the Transaction
@@ -556,13 +556,12 @@ void serialize(CTInputSignature& sig, ISerializer& serializer) {
     emitPointArray(sig.B,      "B");
     emitPointArray(sig.Q_P,    "Q_P");
     emitPointArray(sig.Q_M,    "Q_M");
-    emitPointArray(sig.Q_U,    "Q_U");
+    emitPointArray(sig.Q_J,    "Q_J");
     emitScalarArray(sig.z,  "z");
     emitScalarArray(sig.za, "za");
     emitScalarArray(sig.zb, "zb");
     serializePod(sig.f_P, "f_P", serializer);
     serializePod(sig.f_M, "f_M", serializer);
-    serializePod(sig.f_U, "f_U", serializer);
     return;
   }
 
@@ -576,7 +575,7 @@ void serialize(CTInputSignature& sig, ISerializer& serializer) {
       throw std::runtime_error("CTInputSignature: invalid shape on serialize");
     }
     if (sig.A.size()   != bits_len || sig.B.size()   != bits_len ||
-        sig.Q_M.size() != bits_len || sig.Q_U.size() != bits_len ||
+        sig.Q_M.size() != bits_len || sig.Q_J.size() != bits_len ||
         sig.z.size()   != bits_len || sig.za.size()  != bits_len || sig.zb.size() != bits_len) {
       throw std::runtime_error("CTInputSignature: vector length mismatch on serialize");
     }
@@ -592,7 +591,7 @@ void serialize(CTInputSignature& sig, ISerializer& serializer) {
     sig.B.resize(len);
     sig.Q_P.resize(len);
     sig.Q_M.resize(len);
-    sig.Q_U.resize(len);
+    sig.Q_J.resize(len);
     sig.z.resize(len);
     sig.za.resize(len);
     sig.zb.resize(len);
@@ -604,13 +603,12 @@ void serialize(CTInputSignature& sig, ISerializer& serializer) {
   for (size_t i = 0; i < len; ++i) serializePod(sig.B[i],      "", serializer);
   for (size_t i = 0; i < len; ++i) serializePod(sig.Q_P[i],    "", serializer);
   for (size_t i = 0; i < len; ++i) serializePod(sig.Q_M[i],    "", serializer);
-  for (size_t i = 0; i < len; ++i) serializePod(sig.Q_U[i],    "", serializer);
+  for (size_t i = 0; i < len; ++i) serializePod(sig.Q_J[i],    "", serializer);
   for (size_t i = 0; i < len; ++i) serializePod(sig.z[i],      "", serializer);
   for (size_t i = 0; i < len; ++i) serializePod(sig.za[i],     "", serializer);
   for (size_t i = 0; i < len; ++i) serializePod(sig.zb[i],     "", serializer);
   serializePod(sig.f_P, "", serializer);
   serializePod(sig.f_M, "", serializer);
-  serializePod(sig.f_U, "", serializer);
 }
 
 void serialize(CTOutputProof& proof, ISerializer& serializer) {

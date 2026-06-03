@@ -4,10 +4,9 @@
 // the public statement, algebra, and Fiat-Shamir transcript definition.
 //
 // This file deliberately funnels every challenge through one function
-// (compute_challenge) and every transcript serialization through
-// (append_transcript_*); call sites never hash on their own. The same
-// applies to the scalar inversion helper (sc_invert), which is the one
-// place 1/x enters the protocol (in the f_U response).
+// (compute_challenge); call sites never hash on their own. The linking
+// track reuses the spend response f_P (no independent inverse witness),
+// which is what binds the key image J = x·U to the spend key x.
 
 #include "triptych.h"
 #include "crypto.h"
@@ -123,62 +122,28 @@ void point_identity(ge_p3* out) {
   ge_frombytes_vartime(out, identity_bytes);
 }
 
-// Hash-to-curve identical to crypto.cpp's hash_to_ec and to MLSAG's
-// mlsag_hash_to_ec. Keeps the U_k = Hp(P_k) ring consistent with the
-// CryptoNote key image definition (I = x · Hp(P_l)) — otherwise the
-// linking-tag binding in the verifier's U-equation would fail trivially.
-void hash_to_ec(const PublicKey& key, ge_p3& res) {
+// Fixed global NUMS generator U for the linking tag (key image) J = x·U.
+// hash-to-point of a domain string, cofactor-cleared into the prime-order
+// subgroup. dlog wrt G and H is unknown (nothing-up-my-sleeve), which is
+// what makes the binding f_P·U ⇒ J = x·U sound. Same hash-to-curve method
+// as pedersen_get_H()'s compute_H().
+EllipticCurvePoint compute_U() {
+  static const char domain[] = "Karbo-CT-keyimage-generator-v1";
   Hash h;
   ge_p2 point;
   ge_p1p1 point2;
-  cn_fast_hash(std::addressof(key), sizeof(PublicKey), h);
+  EllipticCurvePoint result;
+  cn_fast_hash(domain, sizeof(domain) - 1, h);
   ge_fromfe_frombytes_vartime(&point, reinterpret_cast<const unsigned char*>(&h));
   ge_mul8(&point2, &point);
-  ge_p1p1_to_p3(&res, &point2);
+  ge_p1p1_to_p2(&point, &point2);
+  ge_tobytes(reinterpret_cast<unsigned char*>(&result), &point);
+  return result;
 }
 
-// out = a^(L − 2) mod L, the multiplicative inverse via Fermat's little
-// theorem. Used exactly once per proof to compute 1/x for the f_U
-// response. Square-and-multiply in 256 iterations; not constant-time
-// against the SECRET base, only the exponent (which is public).
-//
-// Security note: the proof leaks no information about x to a passive
-// observer, but the prover's wall-clock could theoretically be measured.
-// Since x is also used in ge_scalarmult elsewhere (key image
-// construction, response f_P), and ref10's ge_scalarmult is variable-
-// time anyway, sc_invert is not the weakest link here. A constant-time
-// inversion would be a worthwhile follow-up if Karbo ever moves to
-// constant-time scalar code overall.
-void sc_invert(unsigned char out[32], const unsigned char in[32]) {
-  // L − 2  where  L = 2^252 + 27742317777372353535851937790883648493
-  static const unsigned char L_minus_2[32] = {
-    0xeb, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
-    0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10
-  };
-
-  unsigned char acc[32];
-  sc_0(acc);
-  acc[0] = 1;  // acc = 1
-
-  unsigned char base[32];
-  std::memcpy(base, in, 32);
-
-  // Iterate exponent bits LSB → MSB; square base each step, multiply into
-  // accumulator whenever the current exponent bit is set.
-  for (int byte_i = 0; byte_i < 32; ++byte_i) {
-    for (int bit_i = 0; bit_i < 8; ++bit_i) {
-      if ((L_minus_2[byte_i] >> bit_i) & 1) {
-        sc_mul(acc, acc, base);
-      }
-      sc_mul(base, base, base);
-    }
-  }
-
-  std::memcpy(out, acc, 32);
-  sodium_memzero(acc, 32);
-  sodium_memzero(base, 32);
+const EllipticCurvePoint& keyimage_generator_U() {
+  static const EllipticCurvePoint U_point = compute_U();
+  return U_point;
 }
 
 } // anonymous namespace
@@ -193,9 +158,8 @@ void sc_invert(unsigned char out[32], const unsigned char in[32]) {
 namespace {
 
 // n_bits = length of I_bits / A / B = log2(ring_size).
-// n_q    = length of Q_P / Q_M / Q_U. Equals n_bits today (ring_size-1
-//          carve-out was removed); kept as a separate parameter so the
-//          serialization width is explicit in every transcript line.
+// n_q    = length of Q_P / Q_M / Q_J. Equals n_bits today; kept as a
+//          separate parameter so the serialization width is explicit.
 void compute_challenge(
   const Hash& message,
   size_t ring_size,
@@ -210,17 +174,17 @@ void compute_challenge(
   const ge_p3* B,
   const ge_p3* Q_P,
   const ge_p3* Q_M,
-  const ge_p3* Q_U,
+  const ge_p3* Q_J,
   EllipticCurveScalar& challenge)
 {
-  static const char domain[] = "Triptych-KarboCT-v1";
+  static const char domain[] = "Triptych-KarboCT-v2";
   const size_t domain_len = sizeof(domain) - 1;
 
   // Buffer layout:
   //   domain || message(32) || ring_size_byte(1) ||
   //   N*32 ring_pubkeys || N*32 ring_commits || 32 pseudo || 32 image ||
   //   n_bits*32 I_bits || n_bits*32 A || n_bits*32 B ||
-  //   n_q*32 Q_P || n_q*32 Q_M || n_q*32 Q_U
+  //   n_q*32 Q_P || n_q*32 Q_M || n_q*32 Q_J
   const size_t buf_size =
       domain_len
       + 32                       // message
@@ -234,7 +198,7 @@ void compute_challenge(
       + 32 * n_bits              // B
       + 32 * n_q                 // Q_P
       + 32 * n_q                 // Q_M
-      + 32 * n_q;                // Q_U
+      + 32 * n_q;                // Q_J
 
   std::vector<unsigned char> buf(buf_size);
   unsigned char* ptr = buf.data();
@@ -266,7 +230,7 @@ void compute_challenge(
   for (size_t j = 0; j < n_bits; ++j) { p3_to_bytes(ptr, &B[j]);      ptr += 32; }
   for (size_t m = 0; m < n_q;    ++m) { p3_to_bytes(ptr, &Q_P[m]);    ptr += 32; }
   for (size_t m = 0; m < n_q;    ++m) { p3_to_bytes(ptr, &Q_M[m]);    ptr += 32; }
-  for (size_t m = 0; m < n_q;    ++m) { p3_to_bytes(ptr, &Q_U[m]);    ptr += 32; }
+  for (size_t m = 0; m < n_q;    ++m) { p3_to_bytes(ptr, &Q_J[m]);    ptr += 32; }
 
   assert(ptr == buf.data() + buf_size);
 
@@ -375,16 +339,15 @@ bool triptych_sign(
 
   const size_t n = log2_ring(ring_size);
 
-  // ── Step 1: compute key image I = x · Hp(P_l) ─────────────────────────
-  ge_p3 hp_real;
-  hash_to_ec(ring_pubkeys[true_index], hp_real);
-  ge_p2 image_p2;
-  ge_scalarmult(&image_p2, reinterpret_cast<const unsigned char*>(&spend_privkey), &hp_real);
-  ge_tobytes(reinterpret_cast<unsigned char*>(&key_image), &image_p2);
-
-  ge_p3 I_p3;
-  if (ge_frombytes_vartime(&I_p3, reinterpret_cast<const unsigned char*>(&key_image)) != 0) return false;
+  // ── Step 1: compute key image J = x · U (fixed generator) ─────────────
+  // Decode U once; reused as the linking-track base in Step 6.
+  ge_p3 U_p3;
+  if (ge_frombytes_vartime(&U_p3,
+      reinterpret_cast<const unsigned char*>(&keyimage_generator_U())) != 0) return false;
   {
+    ge_p2 image_p2;
+    ge_scalarmult(&image_p2, reinterpret_cast<const unsigned char*>(&spend_privkey), &U_p3);
+    ge_tobytes(reinterpret_cast<unsigned char*>(&key_image), &image_p2);
     EllipticCurvePoint ki_as_point;
     std::memcpy(ki_as_point.data, &key_image, 32);
     if (!point_valid_for_pedersen(ki_as_point)) return false;
@@ -397,9 +360,10 @@ bool triptych_sign(
          reinterpret_cast<const unsigned char*>(&pseudo_blinding));
 
   // ── Step 3: prepare ring point caches ─────────────────────────────────
-  // We decode every ring pubkey/commit once, compute U_k = Hp(P_k) and
-  // M_k = C_k − C_pseudo. Reject early on any structurally-bad point so
-  // the proof never silently proves about garbage.
+  // We decode every ring pubkey/commit once and compute M_k = C_k − C_pseudo.
+  // The linking track no longer uses a per-key U_k = Hp(P_k) ring; it uses
+  // the single fixed generator U (decoded above) with the SPEND response.
+  // Reject early on any structurally-bad point.
 
   ge_p3 pseudo_p3;
   if (ge_frombytes_vartime(&pseudo_p3, reinterpret_cast<const unsigned char*>(&pseudo_commit)) != 0)
@@ -409,7 +373,6 @@ bool triptych_sign(
 
   std::vector<ge_p3> P(ring_size);
   std::vector<ge_p3> M(ring_size);
-  std::vector<ge_p3> U(ring_size);
   for (size_t k = 0; k < ring_size; ++k) {
     if (!ct_public_key_valid(ring_pubkeys[k])) return false;
     if (ge_frombytes_vartime(&P[k], reinterpret_cast<const unsigned char*>(&ring_pubkeys[k])) != 0)
@@ -421,8 +384,6 @@ bool triptych_sign(
     ge_p1p1 diff;
     ge_sub(&diff, &C_k_p3, &pseudo_cached);
     ge_p1p1_to_p3(&M[k], &diff);
-
-    hash_to_ec(ring_pubkeys[k], U[k]);
   }
 
   // ── Step 4: bit-decomposition phase (standard GK) ─────────────────────
@@ -432,7 +393,7 @@ bool triptych_sign(
   sig.B.resize(n);
   sig.Q_P.resize(n);
   sig.Q_M.resize(n);
-  sig.Q_U.resize(n);
+  sig.Q_J.resize(n);
   sig.z.resize(n);
   sig.za.resize(n);
   sig.zb.resize(n);
@@ -481,40 +442,39 @@ bool triptych_sign(
   std::vector<std::vector<EllipticCurveScalar>> poly_coeffs;
   compute_poly_coeffs(ring_size, n, bits.data(), a_j.data(), poly_coeffs);
 
-  // ── Step 6: Q polynomials for the three rings ─────────────────────────
-  //   Q_P[m] = ρ_P[m]·G + Σ_k p_{k,m}·P_k
-  //   Q_M[m] = ρ_M[m]·G + Σ_k p_{k,m}·M_k
-  //   Q_U[m] = σ_U[m]·I + Σ_k p_{k,m}·U_k     <— Triptych: blinding base is I
-  std::vector<EllipticCurveScalar> rho_P(n), rho_M(n), sigma_U(n);
-  std::vector<ge_p3> Q_P_p3(n), Q_M_p3(n), Q_U_p3(n);
+  // ── Step 6: Q polynomials ─────────────────────────────────────────────
+  //   Q_P[m] = ρ_P[m]·G + Σ_k p_{k,m}·P_k     (P-ring, standard GK)
+  //   Q_M[m] = ρ_M[m]·G + Σ_k p_{k,m}·M_k     (M-ring, standard GK)
+  //   Q_J[m] = ρ_P[m]·U                        (linking track — REUSES ρ_P[m])
+  // Reusing ρ_P[m] (not a fresh σ) is what binds the key image to the spend
+  // key: the same blinding appears in Q_P (G-base) and Q_J (U-base), and the
+  // SAME f_P response closes both, forcing J = x·U with the P-ring's x.
+  std::vector<EllipticCurveScalar> rho_P(n), rho_M(n);
+  std::vector<ge_p3> Q_P_p3(n), Q_M_p3(n), Q_J_p3(n);
 
   for (size_t m = 0; m < n; ++m) {
     random_scalar(rho_P[m]);
     random_scalar(rho_M[m]);
-    random_scalar(sigma_U[m]);
 
-    // P-ring
-    ge_p3 sum_P, sum_M, sum_U;
+    ge_p3 sum_P, sum_M;
     ge_scalarmult_base(&sum_P, rho_P[m].data);
     ge_scalarmult_base(&sum_M, rho_M[m].data);
-    if (!scalarmult_p3(&sum_U, sigma_U[m].data, &I_p3)) return false;
 
     for (size_t k = 0; k < ring_size; ++k) {
       const unsigned char* coeff = poly_coeffs[k][m].data;
       if (!sc_isnonzero(coeff)) continue;
 
-      ge_p3 t_P, t_M, t_U;
+      ge_p3 t_P, t_M;
       if (!scalarmult_p3(&t_P, coeff, &P[k])) return false;
       if (!scalarmult_p3(&t_M, coeff, &M[k])) return false;
-      if (!scalarmult_p3(&t_U, coeff, &U[k])) return false;
       point_add(&sum_P, &sum_P, &t_P);
       point_add(&sum_M, &sum_M, &t_M);
-      point_add(&sum_U, &sum_U, &t_U);
     }
 
     Q_P_p3[m] = sum_P;
     Q_M_p3[m] = sum_M;
-    Q_U_p3[m] = sum_U;
+    // Linking track: Q_J[m] = ρ_P[m]·U.
+    if (!scalarmult_p3(&Q_J_p3[m], rho_P[m].data, &U_p3)) return false;
   }
 
   // ── Step 7: Fiat-Shamir challenge ─────────────────────────────────────
@@ -523,7 +483,7 @@ bool triptych_sign(
     message, ring_size, /*n_bits=*/n, /*n_q=*/n,
     ring_pubkeys, ring_commits, pseudo_commit, key_image,
     I_bits_p3.data(), A_p3.data(), B_p3.data(),
-    Q_P_p3.data(), Q_M_p3.data(), Q_U_p3.data(),
+    Q_P_p3.data(), Q_M_p3.data(), Q_J_p3.data(),
     x_chal);
 
   // ── Step 8: bit-commitment responses (z_j, za_j, zb_j) ────────────────
@@ -548,10 +508,9 @@ bool triptych_sign(
     sc_add(sig.zb[j].data, term, t_j[j].data);
   }
 
-  // ── Step 9: f_P, f_M, f_U responses ───────────────────────────────────
-  //   f_P = x · x_chal^n  − Σ_m ρ_P[m] · x_chal^m
+  // ── Step 9: f_P, f_M responses (no independent image response) ────────
+  //   f_P = x · x_chal^n  − Σ_m ρ_P[m] · x_chal^m   (also closes the linking eq)
   //   f_M = z · x_chal^n  − Σ_m ρ_M[m] · x_chal^m
-  //   f_U = (1/x) · x_chal^n − Σ_m σ_U[m] · x_chal^m
   unsigned char x_pow[5][32];                   // up to X^4 for ring=16
   std::memset(x_pow[0], 0, 32);
   x_pow[0][0] = 1;
@@ -560,12 +519,8 @@ bool triptych_sign(
     sc_mul(x_pow[i], x_pow[i - 1], x_chal.data);
   }
 
-  unsigned char x_inv[32];
-  sc_invert(x_inv, reinterpret_cast<const unsigned char*>(&spend_privkey));
-
   sc_mul(sig.f_P.data, reinterpret_cast<const unsigned char*>(&spend_privkey), x_pow[n]);
   sc_mul(sig.f_M.data, z_witness.data,                                        x_pow[n]);
-  sc_mul(sig.f_U.data, x_inv,                                                 x_pow[n]);
 
   for (size_t m = 0; m < n; ++m) {
     unsigned char term[32];
@@ -573,8 +528,6 @@ bool triptych_sign(
     sc_sub(sig.f_P.data, sig.f_P.data, term);
     sc_mul(term, rho_M[m].data, x_pow[m]);
     sc_sub(sig.f_M.data, sig.f_M.data, term);
-    sc_mul(term, sigma_U[m].data, x_pow[m]);
-    sc_sub(sig.f_U.data, sig.f_U.data, term);
   }
 
   // ── Step 10: serialize the proof's points into the on-wire struct ─────
@@ -584,11 +537,10 @@ bool triptych_sign(
     p3_to_bytes(reinterpret_cast<unsigned char*>(&sig.B[j]),      &B_p3[j]);
     p3_to_bytes(reinterpret_cast<unsigned char*>(&sig.Q_P[j]),    &Q_P_p3[j]);
     p3_to_bytes(reinterpret_cast<unsigned char*>(&sig.Q_M[j]),    &Q_M_p3[j]);
-    p3_to_bytes(reinterpret_cast<unsigned char*>(&sig.Q_U[j]),    &Q_U_p3[j]);
+    p3_to_bytes(reinterpret_cast<unsigned char*>(&sig.Q_J[j]),    &Q_J_p3[j]);
   }
 
   // ── Cleanup: scrub witness-derived state ──────────────────────────────
-  sodium_memzero(x_inv, sizeof(x_inv));
   sodium_memzero(&z_witness, sizeof(z_witness));
   for (auto& s : r_j)     sodium_memzero(&s, sizeof(s));
   for (auto& s : a_j)     sodium_memzero(&s, sizeof(s));
@@ -596,8 +548,20 @@ bool triptych_sign(
   for (auto& s : t_j)     sodium_memzero(&s, sizeof(s));
   for (auto& s : rho_P)   sodium_memzero(&s, sizeof(s));
   for (auto& s : rho_M)   sodium_memzero(&s, sizeof(s));
-  for (auto& s : sigma_U) sodium_memzero(&s, sizeof(s));
 
+  return true;
+}
+
+// ── Canonical key image: J = x · U ────────────────────────────────────────
+bool triptych_key_image(const SecretKey& spend_privkey, KeyImage& key_image) {
+  if (sc_check(reinterpret_cast<const unsigned char*>(&spend_privkey)) != 0) return false;
+  if (sc_isnonzero(reinterpret_cast<const unsigned char*>(&spend_privkey)) == 0) return false;
+  ge_p3 U_p3;
+  if (ge_frombytes_vartime(&U_p3,
+      reinterpret_cast<const unsigned char*>(&keyimage_generator_U())) != 0) return false;
+  ge_p2 J_p2;
+  ge_scalarmult(&J_p2, reinterpret_cast<const unsigned char*>(&spend_privkey), &U_p3);
+  ge_tobytes(reinterpret_cast<unsigned char*>(&key_image), &J_p2);
   return true;
 }
 
@@ -624,7 +588,7 @@ bool triptych_verify(
   if (sig.B.size()      != n) return false;
   if (sig.Q_P.size()    != n) return false;
   if (sig.Q_M.size()    != n) return false;
-  if (sig.Q_U.size()    != n) return false;
+  if (sig.Q_J.size()    != n) return false;
   if (sig.z.size()      != n) return false;
   if (sig.za.size()     != n) return false;
   if (sig.zb.size()     != n) return false;
@@ -632,29 +596,28 @@ bool triptych_verify(
   // Scalar range checks.
   if (sc_check(sig.f_P.data) != 0) return false;
   if (sc_check(sig.f_M.data) != 0) return false;
-  if (sc_check(sig.f_U.data) != 0) return false;
   for (size_t j = 0; j < n; ++j) {
     if (sc_check(sig.z[j].data)  != 0) return false;
     if (sc_check(sig.za[j].data) != 0) return false;
     if (sc_check(sig.zb[j].data) != 0) return false;
   }
 
-  // Key image subgroup / non-identity check. The proof's U-equation
-  // multiplies by I; an off-subgroup I would let a malicious prover
+  // Key image subgroup / non-identity check. The linking equation has J on
+  // its LHS (x_chal^n · J); an off-subgroup J would let a malicious prover
   // forge the linking-tag binding.
   {
     EllipticCurvePoint ki_as_point;
     std::memcpy(ki_as_point.data, &key_image, 32);
     if (!point_valid_for_pedersen(ki_as_point)) return false;
   }
-  ge_p3 I_p3;
-  if (ge_frombytes_vartime(&I_p3, reinterpret_cast<const unsigned char*>(&key_image)) != 0)
+  ge_p3 J_p3;
+  if (ge_frombytes_vartime(&J_p3, reinterpret_cast<const unsigned char*>(&key_image)) != 0)
     return false;
 
   // Decode all proof points; each must be subgroup-valid (rejects torsion
   // attacks that could otherwise sneak forged components past identity).
   std::vector<ge_p3> I_bits_p3(n), A_p3(n), B_p3(n);
-  std::vector<ge_p3> Q_P_p3(n), Q_M_p3(n), Q_U_p3(n);
+  std::vector<ge_p3> Q_P_p3(n), Q_M_p3(n), Q_J_p3(n);
   for (size_t j = 0; j < n; ++j) {
     if (ge_frombytes_vartime(&I_bits_p3[j], reinterpret_cast<const unsigned char*>(&sig.I_bits[j])) != 0) return false;
     if (ge_frombytes_vartime(&A_p3[j],      reinterpret_cast<const unsigned char*>(&sig.A[j]))      != 0) return false;
@@ -667,14 +630,20 @@ bool triptych_verify(
   for (size_t m = 0; m < n; ++m) {
     if (ge_frombytes_vartime(&Q_P_p3[m], reinterpret_cast<const unsigned char*>(&sig.Q_P[m])) != 0) return false;
     if (ge_frombytes_vartime(&Q_M_p3[m], reinterpret_cast<const unsigned char*>(&sig.Q_M[m])) != 0) return false;
-    if (ge_frombytes_vartime(&Q_U_p3[m], reinterpret_cast<const unsigned char*>(&sig.Q_U[m])) != 0) return false;
+    if (ge_frombytes_vartime(&Q_J_p3[m], reinterpret_cast<const unsigned char*>(&sig.Q_J[m])) != 0) return false;
 
     if (!subgroup_check_p3(Q_P_p3[m])) return false;
     if (!subgroup_check_p3(Q_M_p3[m])) return false;
-    if (!subgroup_check_p3(Q_U_p3[m])) return false;
+    if (!subgroup_check_p3(Q_J_p3[m])) return false;
   }
 
-  // Decode ring inputs; recompute U_k = Hp(P_k) and M_k = C_k − C_pseudo.
+  // Fixed linking-tag generator U (for the J = x·U linking equation).
+  ge_p3 U_p3;
+  if (ge_frombytes_vartime(&U_p3,
+      reinterpret_cast<const unsigned char*>(&keyimage_generator_U())) != 0)
+    return false;
+
+  // Decode ring inputs; recompute M_k = C_k − C_pseudo. No per-key U_k ring.
   ge_p3 pseudo_p3;
   if (ge_frombytes_vartime(&pseudo_p3, reinterpret_cast<const unsigned char*>(&pseudo_commit)) != 0)
     return false;
@@ -684,7 +653,6 @@ bool triptych_verify(
 
   std::vector<ge_p3> P(ring_size);
   std::vector<ge_p3> M(ring_size);
-  std::vector<ge_p3> U(ring_size);
   for (size_t k = 0; k < ring_size; ++k) {
     if (!ct_public_key_valid(ring_pubkeys[k])) return false;
     if (ge_frombytes_vartime(&P[k], reinterpret_cast<const unsigned char*>(&ring_pubkeys[k])) != 0) return false;
@@ -695,8 +663,6 @@ bool triptych_verify(
     ge_p1p1 diff;
     ge_sub(&diff, &C_k_p3, &pseudo_cached);
     ge_p1p1_to_p3(&M[k], &diff);
-
-    hash_to_ec(ring_pubkeys[k], U[k]);
   }
 
   // Recompute the Fiat-Shamir challenge from the same canonical buffer
@@ -708,7 +674,7 @@ bool triptych_verify(
     message, ring_size, /*n_bits=*/n, /*n_q=*/n,
     ring_pubkeys, ring_commits, pseudo_commit, key_image,
     I_bits_p3.data(), A_p3.data(), B_p3.data(),
-    Q_P_p3.data(), Q_M_p3.data(), Q_U_p3.data(),
+    Q_P_p3.data(), Q_M_p3.data(), Q_J_p3.data(),
     x_chal);
 
   ge_p3 H_p3;
@@ -760,24 +726,21 @@ bool triptych_verify(
     std::memcpy(pk[k].data, product, 32);
   }
 
-  // Powers of x_chal up to X^{n-1} for the Q-term aggregation.
-  unsigned char x_pow[4][32];                   // n ≤ 4 ⇒ X^0..X^{n-1}
+  // Powers of x_chal: X^0 .. X^n. X^n is needed by the linking equation;
+  // the Q-term aggregation uses X^0 .. X^{n-1}.
+  unsigned char x_pow[5][32];                   // n ≤ 4 ⇒ X^0..X^4
   std::memset(x_pow[0], 0, 32);
   x_pow[0][0] = 1;
-  if (n >= 2) std::memcpy(x_pow[1], x_chal.data, 32);
-  for (size_t i = 2; i < n; ++i) {
+  if (n >= 1) std::memcpy(x_pow[1], x_chal.data, 32);
+  for (size_t i = 2; i <= n; ++i) {
     sc_mul(x_pow[i], x_pow[i - 1], x_chal.data);
   }
 
-  // Generic ring-identity check used for all three tracks. For ring R,
-  // base_p3 (G for P/M, I for U), and proof.f_R + proof.Q_R[m]:
-  //   Σ_k p_k(x_chal)·R_k  ?=  f_R · base + Σ_m x_chal^m · Q_R[m]
-  auto check_ring = [&](const std::vector<ge_p3>& R,
-                        const std::vector<ge_p3>& Q_R,
-                        const EllipticCurveScalar& f_R,
-                        const ge_p3& base_p3,
-                        bool base_is_G) -> bool {
-    // LHS = Σ_k p_k(x_chal)·R_k
+  // P/M ring-identity check (base G):
+  //   Σ_k p_k(x_chal)·R_k  ?=  f_R·G + Σ_{m<n} x_chal^m · Q_R[m]
+  auto check_ring_G = [&](const std::vector<ge_p3>& R,
+                          const std::vector<ge_p3>& Q_R,
+                          const EllipticCurveScalar& f_R) -> bool {
     ge_p3 lhs;
     point_identity(&lhs);
     for (size_t k = 0; k < ring_size; ++k) {
@@ -786,32 +749,38 @@ bool triptych_verify(
       if (!scalarmult_p3(&term, pk[k].data, &R[k])) return false;
       point_add(&lhs, &lhs, &term);
     }
-
-    // RHS = f_R · base + Σ_m x_chal^m · Q_R[m]
     ge_p3 rhs;
-    if (base_is_G) {
-      ge_scalarmult_base(&rhs, f_R.data);
-    } else {
-      if (!scalarmult_p3(&rhs, f_R.data, &base_p3)) return false;
-    }
+    ge_scalarmult_base(&rhs, f_R.data);
     for (size_t m = 0; m < n; ++m) {
       ge_p3 term;
       if (!scalarmult_p3(&term, x_pow[m], &Q_R[m])) return false;
       point_add(&rhs, &rhs, &term);
     }
-
     return point_equal(lhs, rhs);
   };
 
-  ge_p3 dummy_G;  // base_is_G branches don't read the point
-  point_identity(&dummy_G);
-
   // P-ring: proves P_l = x·G with witness x.
-  if (!check_ring(P, Q_P_p3, sig.f_P, dummy_G, /*base_is_G=*/true))  return false;
-  // M-ring: proves M_l = z·G  ⇔  C_l − C_pseudo commits to zero.
-  if (!check_ring(M, Q_M_p3, sig.f_M, dummy_G, /*base_is_G=*/true))  return false;
-  // U-ring: proves U_l = (1/x)·I  ⇔  I = x · Hp(P_l).
-  if (!check_ring(U, Q_U_p3, sig.f_U, I_p3,    /*base_is_G=*/false)) return false;
+  if (!check_ring_G(P, Q_P_p3, sig.f_P))  return false;
+  // M-ring: proves M_l = z·G ⇔ C_l − C_pseudo commits to zero (amount balance).
+  if (!check_ring_G(M, Q_M_p3, sig.f_M))  return false;
+
+  // Linking equation: x_chal^n · J  ?=  f_P·U + Σ_{m<n} x_chal^m · Q_J[m].
+  // REUSES f_P (the spend response), so J = x·U is bound to the SAME x the
+  // P-ring proves for P_l. The X^n coefficient pins J = x·U; Q_J spans only
+  // m<n, so the prover cannot inject an X^n term to move J off x·U. This is
+  // the binding the independent-f_U construction lacked.
+  {
+    ge_p3 lhs;
+    if (!scalarmult_p3(&lhs, x_pow[n], &J_p3)) return false;
+    ge_p3 rhs;
+    if (!scalarmult_p3(&rhs, sig.f_P.data, &U_p3)) return false;
+    for (size_t m = 0; m < n; ++m) {
+      ge_p3 term;
+      if (!scalarmult_p3(&term, x_pow[m], &Q_J_p3[m])) return false;
+      point_add(&rhs, &rhs, &term);
+    }
+    if (!point_equal(lhs, rhs)) return false;
+  }
 
   return true;
 }
@@ -852,8 +821,8 @@ void tx_sc_addmul(unsigned char dst[32],
 // dispatch can collapse them across the whole batch).
 //
 // Equation count: for ring_size = N ∈ {4, 8, 16} with n = log2(N),
-// each proof asserts 2n bit-commitment equations plus 3 ring equations
-// (P, M, U), so 2n + 3 total.
+// each proof asserts 2n bit-commitment equations plus the P-ring, M-ring
+// and linking equation, so 2n + 3 total.
 struct TriptychClaim {
   std::vector<std::vector<MSMTerm>>  equations;
   std::vector<EllipticCurveScalar>   gG;
@@ -887,14 +856,13 @@ bool triptych_collect_claims(
   if (sig.B.size()      != n) return false;
   if (sig.Q_P.size()    != n) return false;
   if (sig.Q_M.size()    != n) return false;
-  if (sig.Q_U.size()    != n) return false;
+  if (sig.Q_J.size()    != n) return false;
   if (sig.z.size()      != n) return false;
   if (sig.za.size()     != n) return false;
   if (sig.zb.size()     != n) return false;
 
   if (sc_check(sig.f_P.data) != 0) return false;
   if (sc_check(sig.f_M.data) != 0) return false;
-  if (sc_check(sig.f_U.data) != 0) return false;
   for (size_t j = 0; j < n; ++j) {
     if (sc_check(sig.z[j].data)  != 0) return false;
     if (sc_check(sig.za[j].data) != 0) return false;
@@ -907,13 +875,13 @@ bool triptych_collect_claims(
     std::memcpy(ki_as_point.data, &key_image, 32);
     if (!point_valid_for_pedersen(ki_as_point)) return false;
   }
-  ge_p3 I_p3;
-  if (ge_frombytes_vartime(&I_p3, reinterpret_cast<const unsigned char*>(&key_image)) != 0)
+  ge_p3 J_p3;
+  if (ge_frombytes_vartime(&J_p3, reinterpret_cast<const unsigned char*>(&key_image)) != 0)
     return false;
 
   // Decode all proof points; subgroup-check each.
   std::vector<ge_p3> I_bits_p3(n), A_p3(n), B_p3(n);
-  std::vector<ge_p3> Q_P_p3(n), Q_M_p3(n), Q_U_p3(n);
+  std::vector<ge_p3> Q_P_p3(n), Q_M_p3(n), Q_J_p3(n);
   for (size_t j = 0; j < n; ++j) {
     if (ge_frombytes_vartime(&I_bits_p3[j], reinterpret_cast<const unsigned char*>(&sig.I_bits[j])) != 0) return false;
     if (ge_frombytes_vartime(&A_p3[j],      reinterpret_cast<const unsigned char*>(&sig.A[j]))      != 0) return false;
@@ -925,13 +893,19 @@ bool triptych_collect_claims(
   for (size_t m = 0; m < n; ++m) {
     if (ge_frombytes_vartime(&Q_P_p3[m], reinterpret_cast<const unsigned char*>(&sig.Q_P[m])) != 0) return false;
     if (ge_frombytes_vartime(&Q_M_p3[m], reinterpret_cast<const unsigned char*>(&sig.Q_M[m])) != 0) return false;
-    if (ge_frombytes_vartime(&Q_U_p3[m], reinterpret_cast<const unsigned char*>(&sig.Q_U[m])) != 0) return false;
+    if (ge_frombytes_vartime(&Q_J_p3[m], reinterpret_cast<const unsigned char*>(&sig.Q_J[m])) != 0) return false;
     if (!subgroup_check_p3(Q_P_p3[m])) return false;
     if (!subgroup_check_p3(Q_M_p3[m])) return false;
-    if (!subgroup_check_p3(Q_U_p3[m])) return false;
+    if (!subgroup_check_p3(Q_J_p3[m])) return false;
   }
 
-  // Decode ring inputs; recompute U_k = Hp(P_k) and M_k = C_k − C_pseudo.
+  // Fixed linking-tag generator U (for the J = x·U linking equation).
+  ge_p3 U_p3;
+  if (ge_frombytes_vartime(&U_p3,
+      reinterpret_cast<const unsigned char*>(&keyimage_generator_U())) != 0)
+    return false;
+
+  // Decode ring inputs; recompute M_k = C_k − C_pseudo. No per-key U_k ring.
   ge_p3 pseudo_p3;
   if (ge_frombytes_vartime(&pseudo_p3, reinterpret_cast<const unsigned char*>(&pseudo_commit)) != 0)
     return false;
@@ -939,7 +913,7 @@ bool triptych_collect_claims(
   ge_cached pseudo_cached;
   ge_p3_to_cached(&pseudo_cached, &pseudo_p3);
 
-  std::vector<ge_p3> P(ring_size), M(ring_size), U(ring_size);
+  std::vector<ge_p3> P(ring_size), M(ring_size);
   for (size_t k = 0; k < ring_size; ++k) {
     if (!ct_public_key_valid(ring_pubkeys[k])) return false;
     if (ge_frombytes_vartime(&P[k], reinterpret_cast<const unsigned char*>(&ring_pubkeys[k])) != 0) return false;
@@ -950,8 +924,6 @@ bool triptych_collect_claims(
     ge_p1p1 diff;
     ge_sub(&diff, &C_k_p3, &pseudo_cached);
     ge_p1p1_to_p3(&M[k], &diff);
-
-    hash_to_ec(ring_pubkeys[k], U[k]);
   }
 
   // Recompute the Fiat-Shamir challenge.
@@ -960,7 +932,7 @@ bool triptych_collect_claims(
     message, ring_size, /*n_bits=*/n, /*n_q=*/n,
     ring_pubkeys, ring_commits, pseudo_commit, key_image,
     I_bits_p3.data(), A_p3.data(), B_p3.data(),
-    Q_P_p3.data(), Q_M_p3.data(), Q_U_p3.data(),
+    Q_P_p3.data(), Q_M_p3.data(), Q_J_p3.data(),
     x_chal);
 
   // Cache the Pedersen H point for the batch dispatch.
@@ -1030,25 +1002,23 @@ bool triptych_collect_claims(
     std::memcpy(pk[k].data, product, 32);
   }
 
-  // ── Powers x_chal^0 .. x_chal^{n-1} ──────────────────────────────────
-  std::vector<std::array<unsigned char, 32>> x_pow(n);
+  // ── Powers x_chal^0 .. x_chal^n (X^n needed by the linking equation) ──
+  std::vector<std::array<unsigned char, 32>> x_pow(n + 1);
   std::memset(x_pow[0].data(), 0, 32);
   x_pow[0][0] = 1;
-  if (n >= 2) std::memcpy(x_pow[1].data(), x_chal.data, 32);
-  for (size_t i = 2; i < n; ++i) {
+  if (n >= 1) std::memcpy(x_pow[1].data(), x_chal.data, 32);
+  for (size_t i = 2; i <= n; ++i) {
     sc_mul(x_pow[i].data(), x_pow[i - 1].data(), x_chal.data);
   }
 
-  // Generic ring builder. eq index is 2n + which_row. R/Q/U is one of
-  // {P, M, U}. For P and M the G-coefficient gets -f; for U the f_U
-  // term goes against the key image I_p3 (no G/H contribution from f_U).
+  // P/M ring builder (base G). eq index is 2n + which_row.
+  // Equation: Σ_k p_k(x_chal)·R_k − f_R·G − Σ_{m<n} x_chal^m·Q[m] == 0.
   auto build_ring_eq = [&](size_t eq_idx,
                            const std::vector<ge_p3>& R_pts,
                            const std::vector<ge_p3>& Q_pts,
-                           const EllipticCurveScalar& f_R,
-                           bool base_is_G) {
+                           const EllipticCurveScalar& f_R) {
     auto& eq = claim.equations[eq_idx];
-    eq.reserve(ring_size + n + (base_is_G ? 0 : 1));
+    eq.reserve(ring_size + n);
 
     // Σ_k p_k(x_chal) · R_k
     for (size_t k = 0; k < ring_size; ++k) {
@@ -1065,22 +1035,33 @@ bool triptych_collect_claims(
       t.point = Q_pts[m];
       eq.push_back(t);
     }
-    if (base_is_G) {
-      // − f_R on G
-      unsigned char neg_f[32]; tx_sc_neg(neg_f, f_R.data);
-      std::memcpy(claim.gG[eq_idx].data, neg_f, 32);
-    } else {
-      // − f_R · I (per-proof point, can't consolidate)
-      MSMTerm t;
-      tx_sc_neg(t.scalar.data, f_R.data);
-      t.point = I_p3;
-      eq.push_back(t);
-    }
+    // − f_R on G
+    unsigned char neg_f[32]; tx_sc_neg(neg_f, f_R.data);
+    std::memcpy(claim.gG[eq_idx].data, neg_f, 32);
   };
 
-  build_ring_eq(2 * n + 0, P, Q_P_p3, sig.f_P, /*base_is_G=*/true);
-  build_ring_eq(2 * n + 1, M, Q_M_p3, sig.f_M, /*base_is_G=*/true);
-  build_ring_eq(2 * n + 2, U, Q_U_p3, sig.f_U, /*base_is_G=*/false);
+  build_ring_eq(2 * n + 0, P, Q_P_p3, sig.f_P);
+  build_ring_eq(2 * n + 1, M, Q_M_p3, sig.f_M);
+
+  // Linking equation (eq 2n+2): x_chal^n·J − f_P·U − Σ_{m<n} x_chal^m·Q_J[m] == 0.
+  // REUSES f_P, so J = x·U binds to the same x as the P-ring. U is the fixed
+  // global generator (same point for every proof in the batch); we add it as a
+  // per-proof term rather than a consolidated base for code simplicity.
+  {
+    auto& eq = claim.equations[2 * n + 2];
+    eq.reserve(2 + n);
+    // + x_chal^n · J
+    MSMTerm tJ; std::memcpy(tJ.scalar.data, x_pow[n].data(), 32); tJ.point = J_p3; eq.push_back(tJ);
+    // − f_P · U
+    MSMTerm tU; tx_sc_neg(tU.scalar.data, sig.f_P.data); tU.point = U_p3; eq.push_back(tU);
+    // − Σ_{m<n} x_chal^m · Q_J[m]
+    for (size_t m = 0; m < n; ++m) {
+      MSMTerm t;
+      tx_sc_neg(t.scalar.data, x_pow[m].data());
+      t.point = Q_J_p3[m];
+      eq.push_back(t);
+    }
+  }
 
   return true;
 }
@@ -1146,9 +1127,9 @@ bool triptych_verify_batch(
       buf_size += rs * (32 /*pubkey*/ + 32 /*commit*/);
       const auto& s = sigs[i];
       buf_size += (s.I_bits.size() + s.A.size() + s.B.size() +
-                   s.Q_P.size()  + s.Q_M.size() + s.Q_U.size()) * 32;
+                   s.Q_P.size()  + s.Q_M.size() + s.Q_J.size()) * 32;
       buf_size += (s.z.size() + s.za.size() + s.zb.size()) * 32;
-      buf_size += 3 * 32; // f_P, f_M, f_U
+      buf_size += 2 * 32; // f_P, f_M
     }
 
     std::vector<unsigned char> buf(buf_size);
@@ -1174,11 +1155,10 @@ bool triptych_verify_batch(
         for (const auto& sc : v) { std::memcpy(ptr, &sc, 32); ptr += 32; }
       };
       copyPts(s.I_bits); copyPts(s.A); copyPts(s.B);
-      copyPts(s.Q_P);    copyPts(s.Q_M); copyPts(s.Q_U);
+      copyPts(s.Q_P);    copyPts(s.Q_M); copyPts(s.Q_J);
       copyScs(s.z); copyScs(s.za); copyScs(s.zb);
       std::memcpy(ptr, &s.f_P, 32); ptr += 32;
       std::memcpy(ptr, &s.f_M, 32); ptr += 32;
-      std::memcpy(ptr, &s.f_U, 32); ptr += 32;
     }
     assert(ptr == buf.data() + buf_size);
     cn_fast_hash(buf.data(), buf_size, batch_transcript);

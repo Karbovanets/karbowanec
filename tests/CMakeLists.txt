@@ -38,6 +38,7 @@ add_executable(HashTests Hash/main.cpp)
 
 add_executable(GKProofTests test_gk_proof.cpp)
 add_executable(TriptychTests test_triptych.cpp)
+add_executable(ForgeKeyImagePoC forge_ki_poc.cpp)
 add_executable(TxBalanceTests test_transaction_balance.cpp)
 add_executable(CTIntegrationTests test_ct_integration.cpp)
 add_executable(CTBench bench_ct_validation.cpp)
@@ -84,6 +85,7 @@ target_link_libraries(HashTests Crypto)
 
 target_link_libraries(GKProofTests Crypto Common ${Boost_LIBRARIES})
 target_link_libraries(TriptychTests Crypto Common ${Boost_LIBRARIES})
+target_link_libraries(ForgeKeyImagePoC Crypto Common ${Boost_LIBRARIES})
 target_link_libraries(TxBalanceTests Crypto Common ${Boost_LIBRARIES})
 target_link_libraries(CTIntegrationTests Crypto Common ${Boost_LIBRARIES})
 target_link_libraries(CTBench Crypto Common ${Boost_LIBRARIES})
@@ -133,7 +135,7 @@ if(NOT MSVC)
   set_property(TARGET gtest gtest_main IntegrationTestLibrary IntegrationTests TestGenerator UnitTests SystemTests HashTargetTests TransfersTests APPEND_STRING PROPERTY COMPILE_FLAGS " -Wno-undef -Wno-sign-compare")
 endif()
 
-add_custom_target(tests DEPENDS CoreTests IntegrationTests NodeRpcProxyTests PerformanceTests SystemTests TransfersTests UnitTests LMDBReorgTests DifficultyTests HashTargetTests HashTests GKProofTests TriptychTests TxBalanceTests CTIntegrationTests MixedV2Roundtrip KVMixedV2Roundtrip SwapDerivation V3ChainIntegration)
+add_custom_target(tests DEPENDS CoreTests IntegrationTests NodeRpcProxyTests PerformanceTests SystemTests TransfersTests UnitTests LMDBReorgTests DifficultyTests HashTargetTests HashTests GKProofTests TriptychTests ForgeKeyImagePoC TxBalanceTests CTIntegrationTests MixedV2Roundtrip KVMixedV2Roundtrip SwapDerivation V3ChainIntegration)
 
 set_property(TARGET
   tests
@@ -153,6 +155,7 @@ set_property(TARGET
   HashTests
   GKProofTests
   TriptychTests
+  ForgeKeyImagePoC
   TxBalanceTests
   CTIntegrationTests
   MixedV2Roundtrip
@@ -177,6 +180,7 @@ set_property(TARGET HashTargetTests PROPERTY OUTPUT_NAME "hash_target_tests")
 set_property(TARGET HashTests PROPERTY OUTPUT_NAME "hash_tests")
 set_property(TARGET GKProofTests PROPERTY OUTPUT_NAME "gk_proof_tests")
 set_property(TARGET TriptychTests PROPERTY OUTPUT_NAME "triptych_tests")
+set_property(TARGET ForgeKeyImagePoC PROPERTY OUTPUT_NAME "forge_ki_poc")
 set_property(TARGET TxBalanceTests PROPERTY OUTPUT_NAME "tx_balance_tests")
 set_property(TARGET CTIntegrationTests PROPERTY OUTPUT_NAME "ct_integration_tests")
 
@@ -191,6 +195,7 @@ add_test(SystemTests system_tests)
 add_test(UnitTests unit_tests)
 add_test(GKProofTests gk_proof_tests)
 add_test(TriptychTests triptych_tests)
+add_test(ForgeKeyImagePoC forge_ki_poc)
 add_test(TxBalanceTests tx_balance_tests)
 add_test(CTIntegrationTests ct_integration_tests)
 add_test(LMDBReorgTests lmdb_reorg_tests)

@@ -2729,52 +2729,30 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
       }
 
       const auto& referencedOutput = te.tx.outputs[outIdx];
-      const bool ringMemberIsKey = referencedOutput.target.type() == typeid(KeyOutput);
-      const bool ringMemberIsConfidential = referencedOutput.target.type() == typeid(ConfidentialOutput);
-      if (!ringMemberIsKey && !ringMemberIsConfidential) {
+      // Confidential-only rings (Route 1). A ConfidentialInput ring member MUST
+      // resolve to a ConfidentialOutput in the sentinel bucket. Transparent
+      // KeyOutputs are no longer admitted as ring members: the CT key image is
+      // J = x·U (fixed generator) while a transparent output's image is x·Hp(P)
+      // — allowing a transparent output to be CT-spent here would give the same
+      // output two distinct image formats and break double-spend detection.
+      // Transparent outputs are spendable only via a legacy KeyInput.
+      // (As decoys, transparent members added no anonymity anyway — their type
+      // is visible on-chain, so an analyst trivially excludes them.)
+      if (referencedOutput.target.type() != typeid(ConfidentialOutput)) {
         logger(ERROR) << "CT validation: input " << i << " ring member " << k
-                      << " has unsupported output type in tx " << txHash;
+                      << " is not a confidential output (confidential-only rings) in tx " << txHash;
+        return false;
+      }
+      if (memberAmount != CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT) {
+        logger(ERROR) << "CT validation: input " << i << " ring member " << k
+                      << " member amount " << memberAmount
+                      << " != CT_CONFIDENTIAL_OUTPUT_AMOUNT in tx " << txHash;
         return false;
       }
 
-      // Verify the ring member's claimed bucket matches the type and amount of
-      // the resolved on-chain output. CT outputs live in the sentinel bucket;
-      // transparent KeyOutputs live in their own amount bucket.
-      if (ringMemberIsConfidential) {
-        if (memberAmount != CryptoNote::parameters::CT_CONFIDENTIAL_OUTPUT_AMOUNT) {
-          logger(ERROR) << "CT validation: input " << i << " ring member " << k
-                        << " is confidential but member amount " << memberAmount
-                        << " != CT_CONFIDENTIAL_OUTPUT_AMOUNT in tx " << txHash;
-          return false;
-        }
-      } else {
-        if (memberAmount != referencedOutput.amount) {
-          logger(ERROR) << "CT validation: input " << i << " ring member " << k
-                        << " bucket amount " << memberAmount
-                        << " does not match referenced output amount " << referencedOutput.amount
-                        << " in tx " << txHash;
-          return false;
-        }
-      }
-
-      // Ring-size-1 ConfidentialInput is no longer accepted; see
-      // triptych_ring_size_supported() above. Transparent shielding
-      // (coinbase included) goes through v2 KeyInput now.
-
-      Crypto::PublicKey referencedPubkey;
-      Crypto::EllipticCurvePoint expectedCommitment;
-      if (ringMemberIsKey) {
-        referencedPubkey = boost::get<KeyOutput>(referencedOutput.target).key;
-        if (!Crypto::transparent_amount_to_commitment(referencedOutput.amount, expectedCommitment)) {
-          logger(ERROR) << "CT validation: input " << i << " failed to build expected commitment for ring member " << k
-                        << " in tx " << txHash;
-          return false;
-        }
-      } else {
-        const auto& referencedConfidentialOutput = boost::get<ConfidentialOutput>(referencedOutput.target);
-        referencedPubkey = referencedConfidentialOutput.targetKey;
-        expectedCommitment = referencedConfidentialOutput.commitment;
-      }
+      const auto& referencedConfidentialOutput = boost::get<ConfidentialOutput>(referencedOutput.target);
+      Crypto::PublicKey referencedPubkey = referencedConfidentialOutput.targetKey;
+      Crypto::EllipticCurvePoint expectedCommitment = referencedConfidentialOutput.commitment;
 
       if (!Crypto::ct_public_key_valid(referencedPubkey)) {
         logger(ERROR) << "CT validation: input " << i << " ring pubkey " << k << " invalid on-chain in tx " << txHash;
@@ -2874,7 +2852,7 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
     if (sig.I_bits.size() != expected_bits ||
         sig.A.size()      != expected_bits || sig.B.size()      != expected_bits ||
         sig.Q_P.size()    != expected_q    || sig.Q_M.size()    != expected_q    ||
-        sig.Q_U.size()    != expected_q    ||
+        sig.Q_J.size()    != expected_q    ||
         sig.z.size()      != expected_bits || sig.za.size()     != expected_bits ||
         sig.zb.size()     != expected_bits) {
       logger(ERROR) << "CT validation: input " << i << " Triptych proof shape"
@@ -2890,13 +2868,12 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
     proof.B      = sig.B;
     proof.Q_P    = sig.Q_P;
     proof.Q_M    = sig.Q_M;
-    proof.Q_U    = sig.Q_U;
+    proof.Q_J    = sig.Q_J;
     proof.z      = sig.z;
     proof.za     = sig.za;
     proof.zb     = sig.zb;
     proof.f_P    = sig.f_P;
     proof.f_M    = sig.f_M;
-    proof.f_U    = sig.f_U;
 
     batch_ring_pubkeys.push_back(verifiedRingPubkeys[i].data());
     batch_ring_commits.push_back(verifiedRingCommitments[i].data());

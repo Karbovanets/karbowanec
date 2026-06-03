@@ -314,9 +314,21 @@ Transaction buildConfidentialTransaction(
       std::memcpy(&pseudoCommitments[i], &pseudo_pk, 32);
     }
 
-    // Compute key image: I = x * Hp(P_real). Same regardless of input shape.
+    // Key image depends on the spend path:
+    //   KeyInput (transparent shield)  -> I = x·Hp(P)  (legacy CryptoNote image,
+    //     collides with a normal v1 spend of the same transparent output).
+    //   ConfidentialInput (CT spend)   -> J = x·U      (fixed-generator image,
+    //     bound to x by the Triptych linking track). Confidential outputs are
+    //     CT-spend-only, so the two image formats never apply to one output.
+    // triptych_sign recomputes the identical J internally; precomputing it here
+    // keeps the tx prefix hash (which includes ConfidentialInput.keyImage)
+    // consistent with the proof transcript.
     Crypto::PublicKey realPubkey = inputs[i].ringMembers[inputs[i].realIndex].pubkey;
-    Crypto::generate_key_image(realPubkey, inputs[i].spendPrivkey, keyImages[i]);
+    if (inputs[i].isTransparent) {
+      Crypto::generate_key_image(realPubkey, inputs[i].spendPrivkey, keyImages[i]);
+    } else if (!Crypto::triptych_key_image(inputs[i].spendPrivkey, keyImages[i])) {
+      throw std::runtime_error("Failed to compute CT key image for input " + std::to_string(i));
+    }
   }
 
   // ── Step 2: Assemble inputs into transaction prefix ────────────────────────
@@ -609,13 +621,12 @@ Transaction buildConfidentialTransaction(
     s.B      = std::move(proof.B);
     s.Q_P    = std::move(proof.Q_P);
     s.Q_M    = std::move(proof.Q_M);
-    s.Q_U    = std::move(proof.Q_U);
+    s.Q_J    = std::move(proof.Q_J);
     s.z      = std::move(proof.z);
     s.za     = std::move(proof.za);
     s.zb     = std::move(proof.zb);
     s.f_P    = proof.f_P;
     s.f_M    = proof.f_M;
-    s.f_U    = proof.f_U;
   }
 
   // ── Step 7: Compute excess and sign kernel ─────────────────────────────────

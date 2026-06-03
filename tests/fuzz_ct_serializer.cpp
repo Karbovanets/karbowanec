@@ -91,16 +91,16 @@ std::vector<BinaryArray> buildSeedCorpus() {
     appendVarint(b, 0);                       // vout count
     appendVarint(b, 0);                       // extra size
     appendVarint(b, 1);                       // ct_signatures count
-    b.push_back(0x00);                        // sig[0].n = 0 (Schnorr branch)
-    appendZeros(b, 3 * 32);                   // Q_P[0], Q_M[0], Q_U[0]
-    appendZeros(b, 3 * 32);                   // f_P, f_M, f_U
+    b.push_back(0x00);                        // sig[0].n = 0 (invalid: must be 2/3/4)
+    appendZeros(b, 3 * 32);                   // Q_P[0], Q_M[0], Q_J[0]
+    appendZeros(b, 2 * 32);                   // f_P, f_M
     appendVarint(b, 0);                       // ct_proofs count
     appendZeros(b, 96);                       // kernel (excess+sigE+sigS)
     corpus.push_back(std::move(b));
   }
 
   // Single CT input with a 4-member ring + corresponding Triptych proof
-  // (n = log2(4) = 2: 6×2 = 12 points, 3×2 + 3 = 9 scalars in the proof).
+  // (n = log2(4) = 2: 6×2 = 12 points, 3×2 + 2 = 8 scalars in the proof).
   {
     BinaryArray b;
     appendVarint(b, TRANSACTION_VERSION_CT);
@@ -122,8 +122,8 @@ std::vector<BinaryArray> buildSeedCorpus() {
     appendVarint(b, 0);                       // extra size
     appendVarint(b, 1);                       // ct_signatures count
     b.push_back(0x02);                        // sig[0].n = 2 (ring size 4)
-    appendZeros(b, 6 * 2 * 32);               // 6n=12 points (I_bits/A/B/Q_P/Q_M/Q_U)
-    appendZeros(b, (3 * 2 + 3) * 32);         // 3n+3=9 scalars (z/za/zb + f_P/f_M/f_U)
+    appendZeros(b, 6 * 2 * 32);               // 6n=12 points (I_bits/A/B/Q_P/Q_M/Q_J)
+    appendZeros(b, (3 * 2 + 2) * 32);         // 3n+2=8 scalars (z/za/zb + f_P/f_M)
     appendVarint(b, 0);                       // ct_proofs count
     appendZeros(b, 96);                       // kernel (excess+sigE+sigS)
     corpus.push_back(std::move(b));
