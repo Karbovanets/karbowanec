@@ -28,6 +28,7 @@
 #include "CryptoNoteCore/Account.h"
 #include "CryptoNoteCore/Currency.h"
 #include "CryptoNote.h"
+#include "Denominations.h"
 
 #include "INodeStubs.h"
 #include "TestBlockchainGenerator.h"
@@ -600,6 +601,79 @@ TEST_F(WalletLegacyApi, saveAndLoadCacheDetails) {
 
 TEST_F(WalletLegacyApi, sendMoneySuccessNoMixin) {
   ASSERT_NO_FATAL_FAILURE(TestSendMoney(10000000, 1000000, 0));
+}
+
+TEST_F(WalletLegacyApi, confidentialOutputCanBeRescannedReorgedAndSpentAgain) {
+  prepareBobWallet();
+
+  alice->initAndGenerate("pass");
+  ASSERT_NO_FATAL_FAILURE(WaitWalletSync(aliceWalletObserver.get()));
+  bob->initAndGenerate("pass2");
+  ASSERT_NO_FATAL_FAILURE(WaitWalletSync(bobWalletObserver.get()));
+
+  CryptoNote::AccountKeys aliceKeys;
+  alice->getAccountKeys(aliceKeys);
+  CryptoNote::AccountBase aliceBase;
+  aliceBase.setAccountKeys(aliceKeys);
+  ASSERT_TRUE(generator.generateFromBaseTx(aliceBase));
+  generator.generateEmptyBlocks(10);
+  aliceNode->updateObservers();
+  ASSERT_NO_FATAL_FAILURE(WaitWalletSync(aliceWalletObserver.get()));
+
+  // Amounts must be multiples of MIN_CT_DENOMINATION (0.01 KRB).
+  const uint64_t fundingAmount = 100 * CryptoNote::MIN_CT_DENOMINATION; // 1 KRB
+  const uint64_t spendAmount = 50 * CryptoNote::MIN_CT_DENOMINATION;    // 0.5 KRB
+  const uint64_t fee = CryptoNote::parameters::CT_MINIMUM_FEE;
+
+  aliceNode->setLastLocalBlockHeight(CryptoNote::parameters::CT_FORK_HEIGHT);
+  TransferMoney(*alice, *bob, fundingAmount, fee, 0);
+  ASSERT_NO_FATAL_FAILURE(WaitWalletSend(aliceWalletObserver.get()));
+  aliceNode->clearLastLocalBlockHeightOverride();
+
+  generator.generateEmptyBlocks(CryptoNote::parameters::CRYPTONOTE_TX_SPENDABLE_AGE);
+  bobNode->updateObservers();
+  ASSERT_NO_FATAL_FAILURE(WaitWalletSync(bobWalletObserver.get()));
+  ASSERT_EQ(fundingAmount, bob->actualBalance());
+
+  std::stringstream bobKeysOnly;
+  bob->save(bobKeysOnly, false, false);
+  ASSERT_NO_FATAL_FAILURE(WaitWalletSave(bobWalletObserver.get()));
+  bob->shutdown();
+
+  prepareBobWallet();
+  bobNode->setLastLocalBlockHeight(CryptoNote::parameters::CT_FORK_HEIGHT);
+  bob->initAndLoad(bobKeysOnly, "pass2");
+  ASSERT_NO_FATAL_FAILURE(WaitWalletLoad(bobWalletObserver.get()));
+  bobNode->updateObservers();
+  ASSERT_NO_FATAL_FAILURE(WaitWalletSync(bobWalletObserver.get()));
+  ASSERT_EQ(fundingAmount, bob->actualBalance());
+
+  bobNode->setLastLocalBlockHeight(CryptoNote::parameters::CT_FORK_HEIGHT);
+  TransferMoney(*bob, *alice, spendAmount, fee, 3);
+  ASSERT_NO_FATAL_FAILURE(WaitWalletSend(bobWalletObserver.get()));
+  bobNode->clearLastLocalBlockHeightOverride();
+
+  uint32_t detachedSpendHeight = static_cast<uint32_t>(generator.getBlockchain().size() - 1);
+  bobNode->startAlternativeChain(detachedSpendHeight);
+  generator.generateEmptyBlocks(1);
+  bob->shutdown();
+
+  prepareBobWallet();
+  bobKeysOnly.clear();
+  bobKeysOnly.seekg(0);
+  bob->initAndLoad(bobKeysOnly, "pass2");
+  ASSERT_NO_FATAL_FAILURE(WaitWalletLoad(bobWalletObserver.get()));
+  bobNode->updateObservers();
+  ASSERT_NO_FATAL_FAILURE(WaitWalletSync(bobWalletObserver.get()));
+  ASSERT_EQ(fundingAmount, bob->actualBalance());
+
+  bobNode->setLastLocalBlockHeight(CryptoNote::parameters::CT_FORK_HEIGHT);
+  TransferMoney(*bob, *alice, spendAmount, fee, 3);
+  ASSERT_NO_FATAL_FAILURE(WaitWalletSend(bobWalletObserver.get()));
+  bobNode->clearLastLocalBlockHeightOverride();
+
+  alice->shutdown();
+  bob->shutdown();
 }
 
 TEST_F(WalletLegacyApi, sendMoneySuccessWithMixin) {

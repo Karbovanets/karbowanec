@@ -80,6 +80,7 @@ namespace CryptoNote {
     virtual uint64_t getOutputTotalAmount() const override;
     virtual TransactionTypes::OutputType getOutputType(size_t index) const override;
     virtual void getOutput(size_t index, KeyOutput& output, uint64_t& amount) const override;
+    virtual void getOutput(size_t index, ConfidentialOutput& output) const override;
 
     virtual size_t getRequiredSignaturesCount(size_t index) const override;
     virtual bool findOutputsToAccount(const AccountPublicAddress& addr, const SecretKey& viewSecretKey, std::vector<uint32_t>& outs, uint64_t& outputAmount) const override;
@@ -334,7 +335,7 @@ namespace CryptoNote {
       info.realOutput.transactionIndex,
       signatures.data());
 
-    getSignatures(index) = signatures;
+    getSignatures(index) = std::move(signatures);
     invalidateHash();
   }
 
@@ -348,7 +349,13 @@ namespace CryptoNote {
       throw std::runtime_error("Invalid input index");
     }
 
-    return transaction.signatures[input];
+    // Ensure the variant slot holds a vector<Signature> before returning a
+    // reference. signInputKey only ever calls this for KeyInput slots, so we
+    // initialise the alternative on demand here.
+    if (!isKeyInputSig(transaction.signatures[input])) {
+      transaction.signatures[input] = std::vector<Signature>{};
+    }
+    return keyInputSig(transaction.signatures[input]);
   }
 
   BinaryArray TransactionImpl::getTransactionData() const {
@@ -445,6 +452,11 @@ namespace CryptoNote {
     amount = out.amount;
   }
 
+  void TransactionImpl::getOutput(size_t index, ConfidentialOutput& output) const {
+    const auto& out = getOutputChecked(transaction, index, TransactionTypes::OutputType::Confidential);
+    output = boost::get<ConfidentialOutput>(out.target);
+  }
+
   bool TransactionImpl::findOutputsToAccount(const AccountPublicAddress& addr, const SecretKey& viewSecretKey, std::vector<uint32_t>& out, uint64_t& amount) const {
     return ::CryptoNote::findOutputsToAccount(transaction, addr, viewSecretKey, out, amount);
   }
@@ -472,7 +484,12 @@ namespace CryptoNote {
     }
 
     for (size_t i = 0; i < transaction.inputs.size(); ++i) {
-      if (getRequiredSignaturesCount(i) > transaction.signatures[i].size()) {
+      const size_t required = getRequiredSignaturesCount(i);
+      if (required == 0) {
+        continue;  // BaseInput or ConfidentialInput slot — no legacy ring sig needed
+      }
+      if (!isKeyInputSig(transaction.signatures[i]) ||
+          required > keyInputSig(transaction.signatures[i]).size()) {
         return false;
       }
     }

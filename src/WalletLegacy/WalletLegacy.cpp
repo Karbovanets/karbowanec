@@ -63,6 +63,34 @@ namespace {
 
 const uint64_t ACCOUNT_CREATE_TIME_ACCURACY = 24 * 60 * 60;
 
+uint32_t actualBalanceFlags(bool forceLegacyTxs) {
+  return forceLegacyTxs ? CryptoNote::ITransfersContainer::IncludeKeyUnlocked :
+    CryptoNote::ITransfersContainer::IncludeDefault;
+}
+
+uint32_t pendingBalanceFlags(bool forceLegacyTxs) {
+  return forceLegacyTxs ? CryptoNote::ITransfersContainer::IncludeKeyNotUnlocked :
+    CryptoNote::ITransfersContainer::IncludeAllLocked;
+}
+
+uint64_t safeSubtract(uint64_t minuend, uint64_t subtrahend) {
+  return minuend > subtrahend ? minuend - subtrahend : 0;
+}
+
+uint64_t changeAmount(const CryptoNote::WalletUserTransactionsCache& transactionsCache) {
+  return safeSubtract(transactionsCache.unconfrimedOutsAmount(), transactionsCache.unconfirmedTransactionsAmount());
+}
+
+uint64_t calculateTotalBalance(const CryptoNote::ITransfersContainer& transferDetails,
+    const CryptoNote::WalletUserTransactionsCache& transactionsCache) {
+  uint64_t actual = safeSubtract(
+    transferDetails.balance(CryptoNote::ITransfersContainer::IncludeDefault),
+    transactionsCache.unconfrimedOutsAmount());
+  uint64_t pending = transferDetails.balance(CryptoNote::ITransfersContainer::IncludeAllLocked) +
+    changeAmount(transactionsCache);
+  return actual + pending;
+}
+
 void throwNotDefined() {
   throw std::runtime_error("The behavior is not defined!");
 }
@@ -145,6 +173,7 @@ WalletLegacy::WalletLegacy(const CryptoNote::Currency& currency, INode& node, Lo
   m_isStopping(false),
   m_lastNotifiedActualBalance(0),
   m_lastNotifiedPendingBalance(0),
+  m_lastNotifiedTotalBalance(0),
   m_lastNotifiedUnmixableBalance(0),
   m_blockchainSync(node, m_logger.getLogger(), currency.genesisBlockHash()),
   m_transfersSync(currency, m_logger.getLogger(), m_blockchainSync, node),
@@ -336,7 +365,7 @@ void WalletLegacy::initSync() {
   m_transferDetails = &subObject.getContainer();
   subObject.addObserver(this);
 
-  m_sender.reset(new WalletTransactionSender(m_currency, m_transactionsCache, m_account.getAccountKeys(), *m_transferDetails, m_node));
+  m_sender.reset(new WalletTransactionSender(m_currency, m_transactionsCache, m_account.getAccountKeys(), *m_transferDetails, m_node, m_forceLegacyTxs));
   m_state = INITIALIZED;
   
   m_blockchainSync.addObserver(this);
@@ -427,6 +456,7 @@ void WalletLegacy::shutdown() {
     m_transactionsCache.reset();
     m_lastNotifiedActualBalance = 0;
     m_lastNotifiedPendingBalance = 0;
+    m_lastNotifiedTotalBalance = 0;
     m_lastNotifiedUnmixableBalance = 0;
   }
 }
@@ -558,16 +588,24 @@ uint64_t WalletLegacy::actualBalance() {
   std::unique_lock<std::mutex> lock(m_cacheMutex);
   throwIfNotInitialised();
 
-  return m_transferDetails->balance(ITransfersContainer::IncludeKeyUnlocked) -
-    m_transactionsCache.unconfrimedOutsAmount();
+  uint64_t balance = m_transferDetails->balance(actualBalanceFlags(m_forceLegacyTxs));
+  uint64_t unconfirmedOuts = m_transactionsCache.unconfrimedOutsAmount();
+  return safeSubtract(balance, unconfirmedOuts);
 }
 
 uint64_t WalletLegacy::pendingBalance() {
   std::unique_lock<std::mutex> lock(m_cacheMutex);
   throwIfNotInitialised();
 
-  uint64_t change = m_transactionsCache.unconfrimedOutsAmount() - m_transactionsCache.unconfirmedTransactionsAmount();
-  return m_transferDetails->balance(ITransfersContainer::IncludeKeyNotUnlocked) + change;
+  uint64_t change = changeAmount(m_transactionsCache);
+  return m_transferDetails->balance(pendingBalanceFlags(m_forceLegacyTxs)) + change;
+}
+
+uint64_t WalletLegacy::totalBalance() {
+  std::unique_lock<std::mutex> lock(m_cacheMutex);
+  throwIfNotInitialised();
+
+  return calculateTotalBalance(*m_transferDetails, m_transactionsCache);
 }
 
 uint64_t WalletLegacy::unmixableBalance() {
@@ -575,7 +613,7 @@ uint64_t WalletLegacy::unmixableBalance() {
   throwIfNotInitialised();
 
   std::vector<TransactionOutputInformation> outputs;
-  m_transferDetails->getOutputs(outputs, ITransfersContainer::IncludeKeyUnlocked);
+  m_transferDetails->getOutputs(outputs, actualBalanceFlags(m_forceLegacyTxs));
 
   uint64_t money = 0;
 
@@ -628,7 +666,7 @@ bool WalletLegacy::getTransfer(TransferId transferId, WalletLegacyTransfer& tran
 
 size_t WalletLegacy::getUnlockedOutputsCount() {
   std::vector<TransactionOutputInformation> outputs;
-  m_transferDetails->getOutputs(outputs, ITransfersContainer::IncludeKeyUnlocked);
+  m_transferDetails->getOutputs(outputs, ITransfersContainer::IncludeDefault);
   return outputs.size();
 }
 
@@ -662,7 +700,7 @@ TransactionId WalletLegacy::sendTransaction(const WalletLegacyTransfer& transfer
   return sendTransaction(transfers, fee, extra, mixIn, unlockTimestamp);
 }
 
-TransactionId WalletLegacy::sendTransaction(const std::vector<WalletLegacyTransfer>& transfers, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp) {
+TransactionId WalletLegacy::sendTransaction(const std::vector<WalletLegacyTransfer>& transfers, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp, bool unshield) {
   TransactionId txId = 0;
   std::shared_ptr<WalletRequest> request;
   std::deque<std::shared_ptr<WalletLegacyEvent>> events;
@@ -672,7 +710,7 @@ TransactionId WalletLegacy::sendTransaction(const std::vector<WalletLegacyTransf
 
   {
     std::unique_lock<std::mutex> lock(m_cacheMutex);
-    request = m_sender->makeSendRequest(txId, events, transfers, _selectedOuts, fee, extra, mixIn, unlockTimestamp);
+    request = m_sender->makeSendRequest(txId, events, transfers, _selectedOuts, fee, extra, mixIn, unlockTimestamp, unshield);
   }
 
   notifyClients(events);
@@ -685,7 +723,7 @@ TransactionId WalletLegacy::sendTransaction(const std::vector<WalletLegacyTransf
   return txId;
 }
 
-TransactionId WalletLegacy::sendTransaction(const std::vector<WalletLegacyTransfer>& transfers, const std::list<TransactionOutputInformation>& selectedOuts, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp) {
+TransactionId WalletLegacy::sendTransaction(const std::vector<WalletLegacyTransfer>& transfers, const std::list<TransactionOutputInformation>& selectedOuts, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp, bool unshield) {
   TransactionId txId = 0;
   std::shared_ptr<WalletRequest> request;
   std::deque<std::shared_ptr<WalletLegacyEvent>> events;
@@ -693,7 +731,7 @@ TransactionId WalletLegacy::sendTransaction(const std::vector<WalletLegacyTransf
 
   {
     std::unique_lock<std::mutex> lock(m_cacheMutex);
-    request = m_sender->makeSendRequest(txId, events, transfers, selectedOuts, fee, extra, mixIn, unlockTimestamp);
+    request = m_sender->makeSendRequest(txId, events, transfers, selectedOuts, fee, extra, mixIn, unlockTimestamp, unshield);
   }
 
   notifyClients(events);
@@ -706,7 +744,7 @@ TransactionId WalletLegacy::sendTransaction(const std::vector<WalletLegacyTransf
   return txId;
 }
 
-std::string WalletLegacy::prepareRawTransaction(TransactionId& transactionId, const std::vector<WalletLegacyTransfer>& transfers, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp) {
+std::string WalletLegacy::prepareRawTransaction(TransactionId& transactionId, const std::vector<WalletLegacyTransfer>& transfers, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp, bool unshield) {
   std::deque<std::shared_ptr<WalletLegacyEvent>> events;
   throwIfNotInitialised();
 
@@ -716,7 +754,7 @@ std::string WalletLegacy::prepareRawTransaction(TransactionId& transactionId, co
 
   {
     std::unique_lock<std::mutex> lock(m_cacheMutex);
-    tx_as_hex = m_sender->makeRawTransaction(transactionId, events, transfers, _selectedOuts, fee, extra, mixIn, unlockTimestamp);
+    tx_as_hex = m_sender->makeRawTransaction(transactionId, events, transfers, _selectedOuts, fee, extra, mixIn, unlockTimestamp, unshield);
   }
 
   notifyClients(events);
@@ -724,7 +762,7 @@ std::string WalletLegacy::prepareRawTransaction(TransactionId& transactionId, co
   return tx_as_hex;
 }
 
-std::string WalletLegacy::prepareRawTransaction(TransactionId& transactionId, const std::vector<WalletLegacyTransfer>& transfers, const std::list<CryptoNote::TransactionOutputInformation>& selectedOuts, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp) {
+std::string WalletLegacy::prepareRawTransaction(TransactionId& transactionId, const std::vector<WalletLegacyTransfer>& transfers, const std::list<CryptoNote::TransactionOutputInformation>& selectedOuts, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp, bool unshield) {
   std::deque<std::shared_ptr<WalletLegacyEvent>> events;
   throwIfNotInitialised();
 
@@ -732,7 +770,7 @@ std::string WalletLegacy::prepareRawTransaction(TransactionId& transactionId, co
 
   {
     std::unique_lock<std::mutex> lock(m_cacheMutex);
-    tx_as_hex = m_sender->makeRawTransaction(transactionId, events, transfers, selectedOuts, fee, extra, mixIn, unlockTimestamp);
+    tx_as_hex = m_sender->makeRawTransaction(transactionId, events, transfers, selectedOuts, fee, extra, mixIn, unlockTimestamp, unshield);
   }
 
   notifyClients(events);
@@ -740,12 +778,12 @@ std::string WalletLegacy::prepareRawTransaction(TransactionId& transactionId, co
   return tx_as_hex;
 }
 
-std::string WalletLegacy::prepareRawTransaction(TransactionId& transactionId, const WalletLegacyTransfer& transfer, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp) {
+std::string WalletLegacy::prepareRawTransaction(TransactionId& transactionId, const WalletLegacyTransfer& transfer, uint64_t fee, const std::string& extra, uint64_t mixIn, uint64_t unlockTimestamp, bool unshield) {
   std::vector<WalletLegacyTransfer> transfers;
   transfers.push_back(transfer);
   throwIfNotInitialised();
 
-  return prepareRawTransaction(transactionId, transfers, fee, extra, mixIn, unlockTimestamp);
+  return prepareRawTransaction(transactionId, transfers, fee, extra, mixIn, unlockTimestamp, unshield);
 }
 
 void WalletLegacy::sendTransactionCallback(WalletRequest::Callback callback, std::error_code ec) {
@@ -876,6 +914,13 @@ void WalletLegacy::notifyIfBalanceChanged() {
 
   if (prevPending != pending) {
     m_observerManager.notify(&IWalletLegacyObserver::pendingBalanceUpdated, pending);
+  }
+
+  auto total = totalBalance();
+  auto prevTotal = m_lastNotifiedTotalBalance.exchange(total);
+
+  if (prevTotal != total) {
+    m_observerManager.notify(&IWalletLegacyObserver::totalBalanceUpdated, total);
   }
 
   auto unmixable = unmixableBalance();

@@ -71,6 +71,9 @@ struct Configuration {
   bool unregisterService;
   bool testnet;
   bool printAddresses;
+  // Force v1 plain (transparent) transactions even after the CT fork.
+  // Enabled with --legacy-tx; default false (wallet sends v2 CT post-fork).
+  bool legacyTx;
 
   size_t logLevel;
 

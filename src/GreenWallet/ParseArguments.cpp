@@ -152,6 +152,11 @@ Config parseArguments(int argc, char **argv)
       config.disableVerify = true;
     }
 
+    if (cmdOptionExists(argv, argv+argc, "--legacy-tx"))
+    {
+      config.legacyTx = true;
+    }
+
     return config;
 }
 
@@ -177,6 +182,8 @@ std::vector<CLICommand> getCLICommands()
          false, true},
 
         {"--daemon-no-verify", "Disable verification procedure", "", false, false},
+
+        {"--legacy-tx", "Send legacy v1 plain (transparent) transactions instead of CT v2", "", false, false},
 
         {"--wallet-file <file>", "Open the wallet <file>", "", false, true},
 

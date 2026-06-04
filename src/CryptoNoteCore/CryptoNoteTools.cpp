@@ -18,6 +18,8 @@
 #include "CryptoNoteTools.h"
 #include "CryptoNoteFormatUtils.h"
 
+#include <limits>
+
 namespace CryptoNote {
 template<>
 bool toBinaryArray(const BinaryArray& object, BinaryArray& binaryArray) {
@@ -74,6 +76,59 @@ uint64_t getOutputAmount(const Transaction& transaction) {
   }
 
   return amount;
+}
+
+namespace {
+// dst = a + b, returning false if the sum would wrap uint64_t.
+inline bool checkedAdd(uint64_t a, uint64_t b, uint64_t& dst) {
+  if (a > std::numeric_limits<uint64_t>::max() - b) {
+    return false;
+  }
+  dst = a + b;
+  return true;
+}
+}
+
+bool getInputAmountChecked(const Transaction& transaction, uint64_t& out) {
+  uint64_t acc = 0;
+  for (const auto& input : transaction.inputs) {
+    if (input.type() == typeid(KeyInput)) {
+      if (!checkedAdd(acc, boost::get<KeyInput>(input).amount, acc)) {
+        return false;
+      }
+    }
+  }
+  out = acc;
+  return true;
+}
+
+bool getOutputAmountChecked(const Transaction& transaction, uint64_t& out) {
+  uint64_t acc = 0;
+  for (const auto& output : transaction.outputs) {
+    if (!checkedAdd(acc, output.amount, acc)) {
+      return false;
+    }
+  }
+  out = acc;
+  return true;
+}
+
+bool computeCtPoolDelta(const Transaction& transaction, uint64_t fee,
+                        uint64_t& inflow, uint64_t& outflow) {
+  uint64_t plain_in = 0;
+  uint64_t plain_out = 0;
+  if (!getInputAmountChecked(transaction, plain_in)) return false;
+  if (!getOutputAmountChecked(transaction, plain_out)) return false;
+  uint64_t out_plus_fee = 0;
+  if (!checkedAdd(plain_out, fee, out_plus_fee)) return false;
+  if (plain_in >= out_plus_fee) {
+    inflow  = plain_in - out_plus_fee;
+    outflow = 0;
+  } else {
+    inflow  = 0;
+    outflow = out_plus_fee - plain_in;
+  }
+  return true;
 }
 
 void decomposeAmount(uint64_t amount, uint64_t dustThreshold, std::vector<uint64_t>& decomposedAmounts) {

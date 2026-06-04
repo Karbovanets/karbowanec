@@ -120,5 +120,16 @@ make SimpleWallet
 
 By default it will compile portable binary, to build optimized for your CPU, run Cmake with flag `-DARCH=native`.
 
+### Checkpointed Sync and CT Validation
+
+By default the daemon uses built-in checkpoints and signed DNS checkpoints to
+speed up historical sync. In the trusted checkpoint zone, a block still has to
+match its checkpoint hash, but the daemon may skip expensive historical checks,
+including full CT proof validation and local PoW for checkpointed blocks.
+
+Run with `--without-checkpoints` to sync without checkpoint shortcuts and
+perform full local validation from genesis. See
+`docs/CT_CHECKPOINT_TRUST.md` for the CT checkpoint trust model and checkpoint
+publishing policy.
 
 

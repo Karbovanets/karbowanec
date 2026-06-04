@@ -134,4 +134,18 @@ private:
   uint64_t m_balance;
 };
 
+class WalletTotalBalanceUpdatedEvent : public WalletLegacyEvent
+{
+public:
+  WalletTotalBalanceUpdatedEvent(uint64_t balance) : m_balance(balance) {};
+  virtual ~WalletTotalBalanceUpdatedEvent() {};
+
+  virtual void notify(Tools::ObserverManager<CryptoNote::IWalletLegacyObserver>& observer) override
+  {
+    observer.notify(&IWalletLegacyObserver::totalBalanceUpdated, m_balance);
+  }
+private:
+  uint64_t m_balance;
+};
+
 } /* namespace CryptoNote */

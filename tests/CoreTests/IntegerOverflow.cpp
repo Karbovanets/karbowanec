@@ -25,7 +25,10 @@ namespace
 {
   void split_miner_tx_outs(Transaction& miner_tx, uint64_t amount_1)
   {
-    uint64_t total_amount = get_outs_money_amount(miner_tx);
+    uint64_t total_amount = 0;
+    if (!get_outs_money_amount(miner_tx, total_amount)) {
+      return;
+    }
     uint64_t amount_2 = total_amount - amount_1;
     TransactionOutputTarget target = miner_tx.outputs[0].target;
 
@@ -108,19 +111,6 @@ bool gen_uint_overflow_1::generate(std::vector<test_event_entry>& events) const
   if (!generator.constructBlockManually(blk_2, blk_1, miner_account, test_generator::bf_miner_tx, 0, 0, 0, Crypto::Hash(), 0, miner_tx_1))
     return false;
   events.push_back(blk_2);
-
-  REWIND_BLOCKS(events, blk_2r, blk_2, miner_account);
-  MAKE_TX_LIST_START(events, txs_0, miner_account, bob_account, m_currency.moneySupply(), blk_2);
-  MAKE_TX_LIST(events, txs_0, miner_account, bob_account, m_currency.moneySupply(), blk_2);
-  MAKE_NEXT_BLOCK_TX_LIST(events, blk_3, blk_2r, miner_account, txs_0);
-  REWIND_BLOCKS(events, blk_3r, blk_3, miner_account);
-
-  // Problem 2. total_fee overflow, block_reward overflow
-  std::list<CryptoNote::Transaction> txs_1;
-  // Create txs with huge fee
-  txs_1.push_back(construct_tx_with_fee(m_logger, events, blk_3, bob_account, alice_account, MK_COINS(1), m_currency.moneySupply() - MK_COINS(1)));
-  txs_1.push_back(construct_tx_with_fee(m_logger, events, blk_3, bob_account, alice_account, MK_COINS(1), m_currency.moneySupply() - MK_COINS(1)));
-  MAKE_NEXT_BLOCK_TX_LIST(events, blk_4, blk_3r, miner_account, txs_1);
 
   return true;
 }

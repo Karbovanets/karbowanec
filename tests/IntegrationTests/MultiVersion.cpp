@@ -16,6 +16,7 @@
 // along with Karbo.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "../IntegrationTestLib/BaseFunctionalTests.h"
+#include "../IntegrationTestLib/TestNode.h"  // for Tests::accountKeysFromWallet
 
 #include <thread>
 #include <Logging/ConsoleLogger.h>
@@ -54,9 +55,12 @@ public:
     // create some address for mining
     CryptoNote::AccountBase stashAddress;
     stashAddress.generate();
+    // unlockMoney() now takes AccountKeys directly (signed-PoW). The string
+    // form was only ever used for logging here; keep it for diagnostics.
     auto stashAddressStr = m_currency.accountAddressAsString(stashAddress);
+    (void)stashAddressStr;
 
-    unlockMoney(stashAddressStr);
+    unlockMoney(stashAddress.getAccountKeys());
 
     std::vector<uint64_t> balances;
     for (auto& o : m_observers) {
@@ -91,7 +95,7 @@ public:
       }
     }
 
-    nodeDaemons[0]->startMining(1, stashAddressStr);
+    nodeDaemons[0]->startMining(1, stashAddress.getAccountKeys());
 
     for (size_t i = 0; i < m_nodeCount; ++i) {
       uint64_t total;
@@ -121,7 +125,7 @@ public:
         }
 
         logger(INFO) << "Starting mining at height " << prevHeight;
-        nodeDaemons[i]->startMining(1, m_wallets[shift]->getAddress());
+        nodeDaemons[i]->startMining(1, Tests::accountKeysFromWallet(*m_wallets[shift]));
 
         uint64_t newHeight = 0;
 
@@ -145,11 +149,12 @@ public:
     }
   }
 
-  void unlockMoney(const std::string& miningAddress) {
+  // Takes AccountKeys directly — see TestNode.h header note on signed-PoW.
+  void unlockMoney(const CryptoNote::AccountKeys& minerKeys) {
     logger(INFO, BRIGHT_YELLOW) << "Starting to mine blocks to unlock money";
 
     // unlock money
-    nodeDaemons[0]->startMining(1, miningAddress);
+    nodeDaemons[0]->startMining(1, minerKeys);
     for (auto& o : m_observers) {
       o->waitActualBalanceChange();
     }
@@ -211,7 +216,7 @@ public:
 
   void startShiftedMining(size_t shift) {
     for (size_t i = 0; i < m_nodeCount; ++i) {
-      nodeDaemons[i]->startMining(1, m_wallets[(i + shift) % m_nodeCount]->getAddress());
+      nodeDaemons[i]->startMining(1, Tests::accountKeysFromWallet(*m_wallets[(i + shift) % m_nodeCount]));
     }
   }
 

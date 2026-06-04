@@ -18,6 +18,8 @@
 // along with Karbo.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "Currency.h"
+#include "Denominations.h"
+#include <algorithm>
 #include <cctype>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/math/special_functions/round.hpp>
@@ -77,11 +79,30 @@ namespace CryptoNote {
     }
 
     if (isTestnet()) {
-      m_upgradeHeightV2 = 10;
-      m_upgradeHeightV3 = 60;
-      m_upgradeHeightV4 = 70;
-      m_upgradeHeightV5 = 80;
-      m_upgradeHeightV6 = 100;
+      // Apply compressed testnet upgrade schedule only where the caller did
+      // not explicitly override the height. CurrencyBuilder / CoreTests need
+      // to drive specific upgrade points (e.g. activating V7 at a controlled
+      // height to exercise CT activation logic). The mainnet UPGRADE_HEIGHT_V*
+      // constants are picked to be distinct from any value a test would set,
+      // so equality here reliably means "still at the default, safe to clamp".
+      if (m_upgradeHeightV2 == parameters::UPGRADE_HEIGHT_V2) {
+        m_upgradeHeightV2 = 10;
+      }
+      if (m_upgradeHeightV3 == parameters::UPGRADE_HEIGHT_V3) {
+        m_upgradeHeightV3 = 60;
+      }
+      if (m_upgradeHeightV4 == parameters::UPGRADE_HEIGHT_V4) {
+        m_upgradeHeightV4 = 70;
+      }
+      if (m_upgradeHeightV5 == parameters::UPGRADE_HEIGHT_V5) {
+        m_upgradeHeightV5 = 380;
+      }
+      if (m_upgradeHeightV6 == parameters::UPGRADE_HEIGHT_V6) {
+        m_upgradeHeightV6 = 400;
+      }
+      if (m_upgradeHeightV7 == parameters::UPGRADE_HEIGHT_V7) {
+        m_upgradeHeightV7 = 4294967294;
+      }
       m_blocksFileName = "testnet_" + m_blocksFileName;
       m_blocksCacheFileName = "testnet_" + m_blocksCacheFileName;
       m_blockIndexesFileName = "testnet_" + m_blockIndexesFileName;
@@ -133,7 +154,10 @@ namespace CryptoNote {
   }
 
   uint32_t Currency::upgradeHeight(uint8_t majorVersion) const {
-    if (majorVersion == BLOCK_MAJOR_VERSION_6) {
+    if (majorVersion == BLOCK_MAJOR_VERSION_7) {
+      return m_upgradeHeightV7;
+    }
+    else if (majorVersion == BLOCK_MAJOR_VERSION_6) {
       return m_upgradeHeightV6;
     }
     else if (majorVersion == BLOCK_MAJOR_VERSION_5) {
@@ -153,10 +177,16 @@ namespace CryptoNote {
     }
   }
 
-  uint64_t Currency::calculateReward(uint64_t alreadyGeneratedCoins) const {
+  uint64_t Currency::effectiveMoneySupply(uint32_t /*height*/) const {
+    return m_moneySupply;
+  }
+
+  uint64_t Currency::calculateReward(uint64_t alreadyGeneratedCoins, uint32_t height) const {
     assert(m_emissionSpeedFactor > 0 && m_emissionSpeedFactor <= 8 * sizeof(uint64_t));
+    uint64_t supply = effectiveMoneySupply(height);
+    uint64_t tailReward = CryptoNote::parameters::TAIL_EMISSION_REWARD;
     // Initial exponential emission curve with fallback to flat rate tail emission
-    uint64_t baseRewardInitial = alreadyGeneratedCoins < m_moneySupply ? (m_moneySupply - alreadyGeneratedCoins) >> m_emissionSpeedFactor : CryptoNote::parameters::TAIL_EMISSION_REWARD;
+    uint64_t baseRewardInitial = alreadyGeneratedCoins < supply ? (supply - alreadyGeneratedCoins) >> m_emissionSpeedFactor : tailReward;
     // Friedman's k-percent rule, inflation 2% of total coins in circulation p.a.
     const uint64_t blocksInOneYear = expectedNumberOfBlocksPerDay() * 365;
     assert(blocksInOneYear > 0);
@@ -167,9 +197,9 @@ namespace CryptoNote {
   }
 
   bool Currency::getBlockReward(uint8_t blockMajorVersion, size_t medianSize, size_t currentBlockSize, uint64_t alreadyGeneratedCoins,
-    uint64_t fee, uint64_t& reward, int64_t& emissionChange) const {
+    uint64_t fee, uint64_t& reward, int64_t& emissionChange, uint32_t height) const {
 
-    uint64_t baseReward = calculateReward(alreadyGeneratedCoins);
+    uint64_t baseReward = calculateReward(alreadyGeneratedCoins, height);
 
     size_t blockGrantedFullRewardZone = blockGrantedFullRewardZoneByBlockVersion(blockMajorVersion);
     medianSize = std::max(medianSize, blockGrantedFullRewardZone);
@@ -218,7 +248,7 @@ namespace CryptoNote {
 
     uint64_t blockReward;
     int64_t emissionChange;
-    if (!getBlockReward(blockMajorVersion, medianSize, currentBlockSize, alreadyGeneratedCoins, fee, blockReward, emissionChange)) {
+    if (!getBlockReward(blockMajorVersion, medianSize, currentBlockSize, alreadyGeneratedCoins, fee, blockReward, emissionChange, height)) {
       logger(INFO) << "Block is too big";
       return false;
     }
@@ -280,6 +310,10 @@ namespace CryptoNote {
   }
 
   bool Currency::isFusionTransaction(const std::vector<uint64_t>& inputsAmounts, const std::vector<uint64_t>& outputsAmounts, size_t size, uint32_t height) const {
+    if (isConfidentialTransactionsActivated(height)) {
+      return false;
+    }
+
     if (height <= CryptoNote::parameters::UPGRADE_HEIGHT_V3 ? size > CryptoNote::parameters::CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE_CURRENT * 30 / 100 : size > fusionTxMaxSize()) {
       logger(ERROR) << "Fusion transaction verification failed: size exceeded max allowed size.";
       return false;
@@ -320,6 +354,10 @@ namespace CryptoNote {
   }
 
   bool Currency::isFusionTransaction(const Transaction& transaction, size_t size, uint32_t height) const {
+    if (isConfidentialTransactionsActivated(height)) {
+      return false;
+    }
+
     assert(getObjectBinarySize(transaction) == size);
 
     std::vector<uint64_t> outputsAmounts;
@@ -388,11 +426,33 @@ namespace CryptoNote {
     return Common::Format::formatAmount(amount);
   }
 
+  std::string Currency::formatAmount(uint64_t amount, uint32_t /*height*/) const {
+    return Common::Format::formatAmount(amount);
+  }
+
+  std::string Currency::formatAmount(int64_t amount, uint32_t height) const {
+    if (amount < 0) {
+      return "-" + formatAmount(static_cast<uint64_t>(-amount), height);
+    }
+    return formatAmount(static_cast<uint64_t>(amount), height);
+  }
+
   bool Currency::parseAmount(const std::string& str, uint64_t& amount) const {
     return Common::Format::parseAmount(str, amount);
   }
 
+  bool Currency::parseAmount(const std::string& str, uint64_t& amount, uint32_t /*height*/) const {
+    return parseAmount(str, amount);
+  }
+
+  bool Currency::isDustOutput(uint64_t amount) {
+    return amount < CryptoNote::MIN_CT_DENOMINATION;
+  }
+
   uint64_t Currency::getMinimalFee(const uint32_t height) const {
+    if (isConfidentialTransactionsActivated(height))
+      return CryptoNote::parameters::CT_MINIMUM_FEE;
+
     if (height <= CryptoNote::parameters::UPGRADE_HEIGHT_V3_1)
       return CryptoNote::parameters::MINIMUM_FEE_V1;
     else if (height > CryptoNote::parameters::UPGRADE_HEIGHT_V3_1 && height <= CryptoNote::parameters::UPGRADE_HEIGHT_V4)
@@ -582,13 +642,17 @@ namespace CryptoNote {
     harmonic_mean_D = N / sum_inverse_D * adjust;
     nextDifficulty = harmonic_mean_D * T / LWMA;
     next_difficulty = static_cast<uint64_t>(nextDifficulty);
-    
+
     // minimum limit
     if (!isTestnet() && next_difficulty < 100000) {
       next_difficulty = 100000;
     }
 
-    return next_difficulty;
+    // Never return 0. On testnet the 100000 floor above is skipped, and the
+    // static_cast<uint64_t> of a sub-1.0 LWMA result can truncate to 0 in the
+    // difficulty-1 regime of a fresh chain — which trips Blockchain's
+    // "difficulty overhead" reject. Mainnet is unaffected (already >= 100000).
+    return std::max<difficulty_type>(1, next_difficulty);
   }
 
   template <typename T>
@@ -607,6 +671,20 @@ namespace CryptoNote {
 
     const int64_t  T = static_cast<int64_t>(m_difficultyTarget);
     int64_t  N = difficultyBlocksCount3();
+
+    // Low-height / short-window guard. The LWMA loop below indexes
+    // timestamps[1..N], so N must not exceed the history actually supplied. On
+    // mainnet the full window is always present (N unchanged); at low testnet
+    // heights fewer blocks exist, and without this clamp the loop reads past the
+    // vector — yielding a garbage (huge) difficulty that no test block can meet.
+    // Mirrors the equivalent clamps in nextDifficultyV3 / nextDifficultyV5.
+    if (static_cast<int64_t>(timestamps.size()) - 1 < N) {
+      N = static_cast<int64_t>(timestamps.size()) - 1;
+    }
+    if (N < 1) {
+      return 1;
+    }
+
     int64_t  L(0), ST, sum_3_ST(0);
     uint64_t next_D, prev_D;
 
@@ -651,13 +729,21 @@ namespace CryptoNote {
       next_D = 100000;
     }
 
-    return next_D;
+    // Never return 0. On testnet the 100000 floor above is skipped, and the
+    // clamp lower bound (prev_D*67/100) integer-underflows to 0 for small
+    // prev_D (e.g. the difficulty-1 regime of a fresh test chain), so next_D
+    // can land on 0 — which trips Blockchain's "difficulty overhead" reject.
+    // Mainnet is unaffected (already >= 100000). Mirrors nextDifficultyV5.
+    return std::max<difficulty_type>(1, next_D);
   }
 
-  difficulty_type Currency::nextDifficultyV5(uint32_t height, uint8_t blockMajorVersion,
-    std::vector<std::uint64_t> timestamps, std::vector<difficulty_type> cumulativeDifficulties) const {
+  difficulty_type Currency::nextDifficultyV5(
+    uint32_t height,
+    uint8_t blockMajorVersion,
+    std::vector<std::uint64_t> timestamps,
+    std::vector<difficulty_type> cumulativeDifficulties) const {
 
-    // LWMA-1 difficulty algorithm 
+    // LWMA-1 difficulty algorithm
     // Copyright (c) 2017-2018 Zawy, MIT License
     // See commented link below for required config file changes. Fix FTL and MTP.
     // https://github.com/zawy12/difficulty-algorithms/issues/3
@@ -666,12 +752,42 @@ namespace CryptoNote {
 
     height--; // there's difference between karbo1 and karbo2 here (height vs top block index)
 
-    if (height == upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5)) {
-    return cumulativeDifficulties[0] / height / RESET_WORK_FACTOR_V5;
+    const uint32_t upgradeHeightV5 = upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5);
+
+    /*
+      Mainnet: keep original V5 reset behavior for consensus compatibility.
+      Testnet: skip this reset. On low-height testnet this can produce bad/zero
+      difficulty or interact badly with the small available window.
+    */
+    if (!isTestnet() && height == upgradeHeightV5) {
+      difficulty_type resetDifficulty =
+          cumulativeDifficulties[0] / height / RESET_WORK_FACTOR_V5;
+
+      return std::max<difficulty_type>(1, resetDifficulty);
     }
-    uint32_t count = (uint32_t)difficultyBlocksCountByBlockVersion(blockMajorVersion) - 1;
-    if (height > upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5) && height < CryptoNote::parameters::UPGRADE_HEIGHT_V5 + count) {
-      uint32_t offset = count - (height - upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_5));
+
+    uint32_t count =
+        static_cast<uint32_t>(difficultyBlocksCountByBlockVersion(blockMajorVersion)) - 1;
+
+    /*
+      Mainnet: keep original post-upgrade window trimming.
+      Testnet: skip this. At low testnet heights, offset can be larger than the
+      available vectors and can break difficulty calculation/template generation.
+    */
+    if (!isTestnet() &&
+        height > upgradeHeightV5 &&
+        height < CryptoNote::parameters::UPGRADE_HEIGHT_V5 + count) {
+
+      uint32_t offset = count - (height - upgradeHeightV5);
+
+      /*
+        Nasty bug guard only. This should not affect normal mainnet behavior,
+        but prevents invalid erase if the available history is shorter than offset.
+      */
+      if (offset >= timestamps.size() || offset >= cumulativeDifficulties.size()) {
+        return 1;
+      }
+
       timestamps.erase(timestamps.begin(), timestamps.begin() + offset);
       cumulativeDifficulties.erase(cumulativeDifficulties.begin(), cumulativeDifficulties.begin() + offset);
     }
@@ -680,32 +796,81 @@ namespace CryptoNote {
 
     assert(timestamps.size() == cumulativeDifficulties.size());
 
+    /*
+      Testnet/mainnet safety guard. Original code assumes there are at least
+      two cumulative difficulty entries. Without this, size_t underflow is possible:
+      cumulativeDifficulties.size() - 1.
+    */
+    if (timestamps.size() <= 1 || cumulativeDifficulties.size() <= 1) {
+      return 1;
+    }
+
     const int64_t T = static_cast<int64_t>(m_difficultyTarget);
-    uint64_t N = std::min<uint64_t>(difficultyBlocksCount4(), cumulativeDifficulties.size() - 1); // adjust for new epoch difficulty reset, N should be by 1 block smaller
+
+    /*
+      Use the smaller available vector length. In normal mainnet operation they
+      are equal, so this does not change mainnet behavior.
+    */
+    uint64_t available =
+        std::min<uint64_t>(timestamps.size(), cumulativeDifficulties.size());
+
+    uint64_t N =
+        std::min<uint64_t>(difficultyBlocksCount4(), available - 1);
+
+    if (N == 0) {
+      return 1;
+    }
+
     uint64_t L(0), avg_D, next_D, i, this_timestamp(0), previous_timestamp(0);
 
     previous_timestamp = timestamps[0] - T;
+
     for (i = 1; i <= N; i++) {
       // Safely prevent out-of-sequence timestamps
-      if (timestamps[i] > previous_timestamp) { this_timestamp = timestamps[i]; }
-      else { this_timestamp = previous_timestamp + 1; }
+      if (timestamps[i] > previous_timestamp) {
+        this_timestamp = timestamps[i];
+      } else {
+        this_timestamp = previous_timestamp + 1;
+      }
+
       L += i * std::min<uint64_t>(6 * T, this_timestamp - previous_timestamp);
       previous_timestamp = this_timestamp;
     }
-    if (L < N * N * T / 20) { L = N * N * T / 20; }
+
+    if (L < N * N * T / 20) {
+      L = N * N * T / 20;
+    }
+
+    if (L == 0) {
+      return 1;
+    }
+
     avg_D = (cumulativeDifficulties[N] - cumulativeDifficulties[0]) / N;
+
+    /*
+      If testnet cumulative difficulty barely moved, avg_D can become 0.
+      Original mainnet is unlikely to hit this, but returning difficulty 0 is invalid.
+    */
+    if (avg_D == 0) {
+      return 1;
+    }
 
     // Prevent round off error for small D and overflow for large D.
     if (avg_D > 2000000 * N * N * T) {
       next_D = (avg_D / (200 * L)) * (N * (N + 1) * T * 99);
+    } else {
+      next_D = (avg_D * N * (N + 1) * T * 99) / (200 * L);
     }
-    else { next_D = (avg_D * N * (N + 1) * T * 99) / (200 * L); }
 
     // Optional. Make all insignificant digits zero for easy reading.
     i = 1000000000;
     while (i > 1) {
-      if (next_D > i * 100) { next_D = ((next_D + i / 2) / i) * i; break; }
-      else { i /= 10; }
+      if (next_D > i * 100) {
+        next_D = ((next_D + i / 2) / i) * i;
+        break;
+      } else {
+        i /= 10;
+      }
     }
 
     // minimum limit
@@ -713,7 +878,7 @@ namespace CryptoNote {
       next_D = 100000;
     }
 
-    return next_D;
+    return std::max<difficulty_type>(1, next_D);
   }
 
   bool Currency::checkProofOfWorkV1(Crypto::cn_context& context, const Block& block, difficulty_type currentDiffic,
@@ -776,6 +941,7 @@ namespace CryptoNote {
     case BLOCK_MAJOR_VERSION_4:
     case BLOCK_MAJOR_VERSION_5:
     case BLOCK_MAJOR_VERSION_6:
+    case BLOCK_MAJOR_VERSION_7:
       return checkProofOfWorkV1(context, block, currentDiffic, proofOfWork);
 
     case BLOCK_MAJOR_VERSION_2:
@@ -866,6 +1032,7 @@ namespace CryptoNote {
     upgradeHeightV4(parameters::UPGRADE_HEIGHT_V4);
     upgradeHeightV5(parameters::UPGRADE_HEIGHT_V5);
     upgradeHeightV6(parameters::UPGRADE_HEIGHT_V6);
+    upgradeHeightV7(parameters::UPGRADE_HEIGHT_V7);
     upgradeVotingThreshold(parameters::UPGRADE_VOTING_THRESHOLD);
     upgradeVotingWindow(parameters::UPGRADE_VOTING_WINDOW);
     upgradeWindow(parameters::UPGRADE_WINDOW);

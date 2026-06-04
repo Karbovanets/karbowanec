@@ -55,6 +55,7 @@ PaymentServiceJsonRpcServer::PaymentServiceJsonRpcServer(System::Dispatcher* sys
   handlers.emplace("getTransactionSecretKey", jsonHandler<GetTransactionSecretKey::Request, GetTransactionSecretKey::Response>(std::bind(&PaymentServiceJsonRpcServer::handleGetTransactionSecretKey, this, std::placeholders::_1, std::placeholders::_2)));
   handlers.emplace("getTransactionProof", jsonHandler<GetTransactionProof::Request, GetTransactionProof::Response>(std::bind(&PaymentServiceJsonRpcServer::handleGetTransactionProof, this, std::placeholders::_1, std::placeholders::_2)));
   handlers.emplace("sendTransaction", jsonHandler<SendTransaction::Request, SendTransaction::Response>(std::bind(&PaymentServiceJsonRpcServer::handleSendTransaction, this, std::placeholders::_1, std::placeholders::_2)));
+  handlers.emplace("unshield", jsonHandler<SendTransaction::Request, SendTransaction::Response>(std::bind(&PaymentServiceJsonRpcServer::handleUnshield, this, std::placeholders::_1, std::placeholders::_2)));
   handlers.emplace("createDelayedTransaction", jsonHandler<CreateDelayedTransaction::Request, CreateDelayedTransaction::Response>(std::bind(&PaymentServiceJsonRpcServer::handleCreateDelayedTransaction, this, std::placeholders::_1, std::placeholders::_2)));
   handlers.emplace("getDelayedTransactionHashes", jsonHandler<GetDelayedTransactionHashes::Request, GetDelayedTransactionHashes::Response>(std::bind(&PaymentServiceJsonRpcServer::handleGetDelayedTransactionHashes, this, std::placeholders::_1, std::placeholders::_2)));
   handlers.emplace("deleteDelayedTransaction", jsonHandler<DeleteDelayedTransaction::Request, DeleteDelayedTransaction::Response>(std::bind(&PaymentServiceJsonRpcServer::handleDeleteDelayedTransaction, this, std::placeholders::_1, std::placeholders::_2)));
@@ -238,6 +239,10 @@ std::error_code PaymentServiceJsonRpcServer::handleVerifyMessage(const VerifyMes
 
 std::error_code PaymentServiceJsonRpcServer::handleSendTransaction(const SendTransaction::Request& request, SendTransaction::Response& response) {
   return service.sendTransaction(request, response.transactionHash, response.transactionSecretKey);
+}
+
+std::error_code PaymentServiceJsonRpcServer::handleUnshield(const SendTransaction::Request& request, SendTransaction::Response& response) {
+  return service.sendTransaction(request, response.transactionHash, response.transactionSecretKey, true);
 }
 
 std::error_code PaymentServiceJsonRpcServer::handleCreateDelayedTransaction(const CreateDelayedTransaction::Request& request, CreateDelayedTransaction::Response& response) {

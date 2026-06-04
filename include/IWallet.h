@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 #include <boost/optional.hpp>
+#include "CryptoNoteConfig.h"
 #include "CryptoNote.h"
 #include "ITransfersContainer.h"
 
@@ -115,11 +116,17 @@ struct TransactionParameters {
   std::vector<std::string> sourceAddresses;
   std::vector<WalletOrder> destinations;
   uint64_t fee = 0;
-  uint64_t mixIn = 0;
+  uint64_t mixIn = parameters::DEFAULT_TX_MIXIN;
   std::string extra;
   uint64_t unlockTimestamp = 0;
   DonationSettings donation;
   std::string changeDestination;
+  // CT->CN unshield (transaction version 3): when true, the `destinations`
+  // (payouts) are produced as transparent KeyOutputs with cleartext amounts
+  // while any change stays confidential. Requires CT to be active. This is a
+  // privacy-reducing action (the payout amount is published on-chain), so it is
+  // a deliberate, separate intent rather than a default.
+  bool unshield = false;
 };
 
 struct WalletTransactionWithTransfers {

@@ -23,7 +23,7 @@
 #include "CryptoNoteCore/CryptoNoteBasic.h"
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "CryptoNoteCore/CryptoNoteSerialization.h"
-#include "CryptoNoteCore/CryptoNoteTools.h"
+#include "CryptoNoteCore/CryptoNoteTools.h"  // for keyInputSig() variant accessor
 #include "crypto/crypto.h"
 
 #include "MultiTransactionTestBase.h"
@@ -69,7 +69,14 @@ public:
   bool test()
   {
     const CryptoNote::KeyInput& txin = boost::get<CryptoNote::KeyInput>(m_tx.inputs[0]);
-    return Crypto::check_ring_signature(m_tx_prefix_hash, txin.keyImage, this->m_public_key_ptrs, ring_size, m_tx.signatures[0].data());
+    // tx.signatures[i] used to be a flat std::vector<Signature>. With CT
+    // (v2) introduction it became boost::variant<blank, vector<Signature>,
+    // CTInputSignature> — the KeyInput slot is held in the second
+    // alternative. keyInputSig() accesses that alternative and lets us
+    // recover the contiguous Signature* the ring-sig API expects.
+    const auto& sigs = CryptoNote::keyInputSig(m_tx.signatures[0]);
+    return Crypto::check_ring_signature(m_tx_prefix_hash, txin.keyImage,
+                                        this->m_public_key_ptrs, ring_size, sigs.data());
   }
 
 private:

@@ -73,7 +73,14 @@ void InProcTestNode::workerThread(std::promise<std::string>& initPromise) {
 
   try {
 
-    core.reset(new CryptoNote::core(m_currency, NULL, log, false));
+    // CryptoNote::core (Bytecoin-era lowercase class) was renamed to
+    // CryptoNote::Core, and the constructor now takes a System::Dispatcher
+    // (used for async chain work) as a required 4th arg. The legacy
+    // `blockchainIndexesEnabled` flag has been removed; payment-id / output
+    // indices are always populated under LMDB. We keep the trailing
+    // arguments at their defaults: rejectDeepReorgDepth=0 (no anti-rewrite
+    // limit), noBlobs=false (allow the daemon's blob cache).
+    core.reset(new CryptoNote::Core(m_currency, NULL, log, dispatcher));
     protocol.reset(new CryptoNote::CryptoNoteProtocolHandler(m_currency, dispatcher, *core, NULL, log));
     p2pNode.reset(new CryptoNote::NodeServer(dispatcher, *protocol, log));
     protocol->set_p2p_endpoint(p2pNode.get());
@@ -134,11 +141,12 @@ void InProcTestNode::workerThread(std::promise<std::string>& initPromise) {
   core.reset();
 }
 
-bool InProcTestNode::startMining(size_t threadsCount, const std::string &address) {
+bool InProcTestNode::startMining(size_t threadsCount, const CryptoNote::AccountKeys& keys) {
   assert(core.get());
-  AccountPublicAddress addr;
-  m_currency.parseAccountAddressString(address, addr);
-  return core->get_miner().start(addr, threadsCount);
+  // miner::start now takes AccountKeys directly so it can sign blocks
+  // (Karbo v5 signed-PoW). The previous AccountPublicAddress path is gone —
+  // see TestNode.h header comment.
+  return core->get_miner().start(keys, threadsCount);
 }
 
 bool InProcTestNode::stopMining() {
@@ -156,11 +164,11 @@ bool InProcTestNode::stopDaemon() {
   return true;
 }
 
-bool InProcTestNode::getBlockTemplate(const std::string &minerAddress, CryptoNote::Block &blockTemplate, uint64_t &difficulty) {
-  AccountPublicAddress addr;
-  m_currency.parseAccountAddressString(minerAddress, addr);
+bool InProcTestNode::getBlockTemplate(const CryptoNote::AccountKeys& minerKeys, CryptoNote::Block& blockTemplate, uint64_t& difficulty) {
   uint32_t height = 0;
-  return core->get_block_template(blockTemplate, addr, difficulty, height, BinaryArray());
+  // Core::get_block_template takes AccountKeys (signed-PoW needs the spend
+  // key alongside the coinbase target address).
+  return core->get_block_template(blockTemplate, minerKeys, difficulty, height, BinaryArray());
 }
 
 bool InProcTestNode::submitBlock(const std::string& block) {
@@ -197,7 +205,8 @@ bool InProcTestNode::makeINode(std::unique_ptr<CryptoNote::INode> &node) {
 }
 
 uint64_t InProcTestNode::getLocalHeight() {
-  return core->get_current_blockchain_height();
+  // Renamed to camelCase along with the rest of the Core public API.
+  return core->getCurrentBlockchainHeight();
 }
 
 }

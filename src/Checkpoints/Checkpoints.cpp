@@ -36,6 +36,8 @@
 #include "../CryptoNoteConfig.h"
 #include "Common/StringTools.h"
 #include "Common/DnsTools.h"
+#include "CryptoNoteCore/CryptoNoteBasicImpl.h"
+#include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 
 using namespace Logging;
 #undef ERROR
@@ -46,7 +48,7 @@ Checkpoints::Checkpoints(Logging::ILogger &log, uint32_t reject_deep_reorg_depth
   
 }
 //---------------------------------------------------------------------------
-bool Checkpoints::add_checkpoint(uint32_t height, const std::string &hash_str) {
+bool Checkpoints::add_checkpoint(uint32_t height, const std::string &hash_str, bool hardcoded) {
   Crypto::Hash h = NULL_HASH;
 
   if (!Common::podFromHex(hash_str, h)) {
@@ -57,6 +59,10 @@ bool Checkpoints::add_checkpoint(uint32_t height, const std::string &hash_str) {
   if (!m_points.insert({ height, h }).second) {
     logger(WARNING) << "Checkpoint already exists.";
     return false;
+  }
+
+  if (hardcoded) {
+    m_hardcoded_heights.insert(height);
   }
 
   return true;
@@ -90,6 +96,13 @@ bool Checkpoints::load_checkpoints_from_file(const std::string& fileName) {
 //---------------------------------------------------------------------------
 bool Checkpoints::is_in_checkpoint_zone(uint32_t  height) const {
   return !m_points.empty() && (height <= (--m_points.end())->first);
+}
+//---------------------------------------------------------------------------
+bool Checkpoints::is_in_hardcoded_checkpoint_zone(uint32_t height) const {
+  // *rbegin() is the largest trusted checkpoint; the zone is everything at
+  // or below it. Despite the historical "hardcoded" name, signed DNS
+  // checkpoints are admitted here after signature verification.
+  return !m_hardcoded_heights.empty() && (height <= *m_hardcoded_heights.rbegin());
 }
 //---------------------------------------------------------------------------
 bool Checkpoints::check_block(uint32_t  height, const Crypto::Hash &h,
@@ -186,27 +199,136 @@ bool Checkpoints::load_checkpoints_from_dns()
   auto dur = std::chrono::steady_clock::now() - start;
   logger(Logging::DEBUGGING) << "DNS query time: " << std::chrono::duration_cast<std::chrono::milliseconds>(dur).count() << " ms";
 
+  // Fail-closed: if no signer addresses are baked into this build, every DNS
+  // record is dropped without trying to verify it. Tampered DNS or an
+  // accidentally-misconfigured release can't sneak past the signature gate
+  // by simply omitting the signature field. The one-shot warning makes the
+  // misconfiguration visible to operators reading the log.
+  if (CryptoNote::DNS_CHECKPOINT_SIGNERS_COUNT == 0) {
+    logger(Logging::WARNING) << "DNS checkpoints fetched but no DNS_CHECKPOINT_SIGNERS "
+                                "configured in this build; ignoring " << records.size()
+                             << " record(s). Set DNS_CHECKPOINT_SIGNERS in CryptoNoteConfig.h "
+                                "to enable.";
+    return true;
+  }
+
+  // Pre-parse the approved signer list once per DNS fetch. Addresses that
+  // fail Base58/curve validation are logged and dropped so an accidentally-
+  // mistyped address in the config does not silently lock the verifier
+  // open to attacker signatures (it can't — Common::Base58::decode_addr
+  // would just reject — but we want the diagnostic to point at the bad
+  // entry).
+  std::vector<CryptoNote::AccountPublicAddress> signers;
+  signers.reserve(CryptoNote::DNS_CHECKPOINT_SIGNERS_COUNT);
+  for (size_t i = 0; i < CryptoNote::DNS_CHECKPOINT_SIGNERS_COUNT; ++i) {
+    CryptoNote::AccountPublicAddress addr;
+    uint64_t prefix = 0;
+    if (CryptoNote::parseAccountAddressString(prefix, addr,
+            std::string(CryptoNote::DNS_CHECKPOINT_SIGNERS[i]))) {
+      signers.push_back(addr);
+    } else {
+      logger(Logging::ERROR, BRIGHT_RED)
+          << "DNS_CHECKPOINT_SIGNERS[" << i << "]='"
+          << CryptoNote::DNS_CHECKPOINT_SIGNERS[i]
+          << "' is not a valid Karbo address; skipping.";
+    }
+  }
+  if (signers.empty()) {
+    logger(Logging::WARNING) << "No usable DNS checkpoint signers after parsing; "
+                                "ignoring all DNS records.";
+    return true;
+  }
+
   for (const auto& record : records) {
-    uint32_t height;
-    Crypto::Hash hash = NULL_HASH;
-    std::stringstream ss;
-    size_t del = record.find_first_of(':');
-    std::string height_str = record.substr(0, del), hash_str = record.substr(del + 1, 64);
-    ss.str(height_str);
-    ss >> height;
-    char c;
-    if (del == std::string::npos) continue;
-    if ((ss.fail() || ss.get(c)) || !Common::podFromHex(hash_str, hash)) {
-      logger(Logging::DEBUGGING) << "Failed to parse DNS checkpoint record: " << record;
+    // Required wire format: "<height>:<block_hash_64hex>:<signature>"
+    // The legacy 2-field "<height>:<hash>" format is rejected — it has no
+    // signature and so cannot be trusted to add even an anchor.
+    const size_t del1 = record.find(':');
+    if (del1 == std::string::npos) {
+      logger(Logging::WARNING) << "Malformed DNS checkpoint (no field delimiter): " << record;
+      continue;
+    }
+    const size_t del2 = record.find(':', del1 + 1);
+    if (del2 == std::string::npos) {
+      logger(Logging::WARNING) << "Malformed DNS checkpoint (legacy unsigned format, rejected): " << record;
       continue;
     }
 
-    if (!(0 == m_points.count(height))) {
-      logger(DEBUGGING) << "Checkpoint already exists for height: " << height << ". Ignoring DNS checkpoint.";
-    } else {
-      add_checkpoint(height, hash_str);
-      logger(DEBUGGING) << "Added DNS checkpoint: " << height_str << ":" << hash_str;
+    const std::string height_str = record.substr(0, del1);
+    const std::string hash_str   = record.substr(del1 + 1, del2 - del1 - 1);
+    const std::string sig_str    = record.substr(del2 + 1);
+
+    if (hash_str.size() != 64) {
+      logger(Logging::WARNING) << "Malformed DNS checkpoint (hash length " << hash_str.size()
+                               << " != 64): " << record;
+      continue;
     }
+
+    uint32_t height = 0;
+    {
+      std::stringstream ss(height_str);
+      char trailing;
+      ss >> height;
+      if (ss.fail() || ss.get(trailing)) {
+        logger(Logging::WARNING) << "Malformed DNS checkpoint (height not a clean number): " << record;
+        continue;
+      }
+    }
+
+    Crypto::Hash hash{};
+    if (!Common::podFromHex(hash_str, hash)) {
+      logger(Logging::WARNING) << "Malformed DNS checkpoint (hash not hex): " << record;
+      continue;
+    }
+
+    // Verify the signature against any one of the approved signers. The
+    // signed payload is the literal "<height>:<hash>" string — what the
+    // maintainer types into simplewallet's sign_message prompt.
+    const std::string signed_payload = height_str + ":" + hash_str;
+    bool verified = false;
+    for (const auto& signer : signers) {
+      if (CryptoNote::verifyMessage(signed_payload, signer, sig_str, logger.getLogger())) {
+        verified = true;
+        break;
+      }
+    }
+    if (!verified) {
+      logger(Logging::ERROR, BRIGHT_RED)
+          << "DNS checkpoint signature did not match any approved signer; "
+             "rejecting record: " << record;
+      continue;
+    }
+
+    if (m_points.count(height) != 0) {
+      logger(Logging::DEBUGGING) << "Checkpoint already exists for height: " << height
+                                 << ". Ignoring DNS checkpoint.";
+      continue;
+    }
+    // Signed DNS checkpoint: passes `hardcoded=true`.
+    //
+    // Rationale for treating signed DNS as equivalent to the baked-in
+    // CHECKPOINTS table: both anchors are signed by a maintainer key. The
+    // binary table is signed implicitly (the operator trusts the binary
+    // they chose to run); DNS records are signed explicitly against the
+    // DNS_CHECKPOINT_SIGNERS pubkey embedded in that same binary. A
+    // forger would need either signing key, and the binary release key
+    // strictly dominates the DNS one — losing the binary key is "publish
+    // a malicious daemon", losing the DNS key is "ship malicious blocks
+    // during fresh sync until release N+1 rotates the signer". Both keys
+    // are inside the same trust boundary; granting them the same in-
+    // protocol privileges is the consistent position.
+    //
+    // The practical effect: at heights anchored by a signed DNS record,
+    // CT transactions in the block route to the structural-only fast
+    // path (checkConfidentialTransactionStructure) instead of the full
+    // pipeline. This is the original sync-speedup intent of the
+    // checkpoint mechanism; restricting it to baked-in checkpoints only
+    // defeats the purpose of DNS checkpoints once they're authenticated.
+    //
+    // Unsigned DNS records are NOT admitted at all by the loader above —
+    // legacy 2-field "height:hash" entries are rejected at parse time.
+    add_checkpoint(height, hash_str, /*hardcoded=*/true);
+    logger(Logging::DEBUGGING) << "Added signed DNS checkpoint: " << height_str << ":" << hash_str;
   }
 
   return true;

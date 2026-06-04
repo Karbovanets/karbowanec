@@ -92,6 +92,7 @@ private:
   std::error_code handleGetTransactionSecretKey(const GetTransactionSecretKey::Request& request, GetTransactionSecretKey::Response& response);
   std::error_code handleGetTransactionProof(const GetTransactionProof::Request& request, GetTransactionProof::Response& response);
   std::error_code handleSendTransaction(const SendTransaction::Request& request, SendTransaction::Response& response);
+  std::error_code handleUnshield(const SendTransaction::Request& request, SendTransaction::Response& response);
   std::error_code handleCreateDelayedTransaction(const CreateDelayedTransaction::Request& request, CreateDelayedTransaction::Response& response);
   std::error_code handleGetDelayedTransactionHashes(const GetDelayedTransactionHashes::Request& request, GetDelayedTransactionHashes::Response& response);
   std::error_code handleDeleteDelayedTransaction(const DeleteDelayedTransaction::Request& request, DeleteDelayedTransaction::Response& response);

@@ -101,6 +101,10 @@ struct Config
 
     /* The wallet password */
     std::string walletPass = "";
+
+    /* Force v1 plain (transparent) transactions even after the CT fork.
+       Default false; wallets send v2 CT once the chain is post-fork. */
+    bool legacyTx = false;
 };
 
 struct AddressBookEntry

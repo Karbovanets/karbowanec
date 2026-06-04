@@ -47,8 +47,13 @@ namespace WalletConfig
     const long unsigned int addressLength = 95;
 
 
-    /* The mixin value to use with transactions */
-    const uint64_t defaultMixin = 5;
+    /* Default decoy count (= ring size - 1). DEFAULT_TX_MIXIN is set to
+       CT_MAX_RING_SIZE - 1 = 15, giving a default ring size of 16, which
+       is the largest Triptych ring. CT also supports ring sizes 4 and 8;
+       any other request gets rounded up by the wallet to the next
+       supported shape. Stored as decoys (not ring size) to match the
+       legacy sender's `mixIn` convention on the RPC wire. */
+    const uint64_t defaultMixin = CryptoNote::parameters::DEFAULT_TX_MIXIN;
 
     /* The default fee value to use with transactions (in ATOMIC units!) */
     const uint64_t defaultFee = CryptoNote::parameters::MINIMUM_FEE; 

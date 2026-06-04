@@ -32,6 +32,8 @@
 #include <GreenWallet/Open.h>
 #include <GreenWallet/Sync.h>
 #include <GreenWallet/Tools.h>
+#include "CryptoNoteConfig.h"
+#include "CryptoNoteCore/Currency.h"
 #include <GreenWallet/Transfer.h>
 #include <GreenWallet/Types.h>
 #include <GreenWallet/WalletConfig.h>
@@ -190,6 +192,33 @@ void balance(CryptoNote::INode &node, CryptoNote::WalletGreen &wallet,
                   << std::endl
                   << "Balances might be incorrect whilst this is ongoing."
                   << std::endl;
+    }
+
+    // Sub-MIN_CT outputs are spendable as transparent inputs but cannot become CT outputs;
+    // when sending CT they are absorbed into the transaction fee.
+    try {
+        auto outputs = wallet.getTransfers(0, CryptoNote::ITransfersContainer::IncludeKeyUnlocked);
+        uint64_t dustTotal = 0;
+        size_t dustCount = 0;
+        for (const auto& out : outputs) {
+            if (out.type == CryptoNote::TransactionTypes::OutputType::Key &&
+                CryptoNote::Currency::isDustOutput(out.amount)) {
+                dustTotal += out.amount;
+                ++dustCount;
+            }
+        }
+        if (dustCount > 0) {
+            std::cout << std::endl
+                      << InformationMsg("Note: " + std::to_string(dustCount)
+                         + " dust output(s) totaling "
+                         + Common::Format::formatAmount(dustTotal)
+                         + " KRB (below 0.01 KRB each).")
+                      << std::endl
+                      << InformationMsg("Spendable, but will be absorbed into fees"
+                         " rather than becoming confidential outputs.")
+                      << std::endl;
+        }
+    } catch (...) {
     }
 }
 

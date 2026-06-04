@@ -76,7 +76,11 @@ int main(int argc, const char** argv) {
 
   Logging::ConsoleLogger log;
   Logging::LoggerRef logger(log, "main");
-  NodeRpcProxy nodeProxy("127.0.0.1", 18081);
+  // NodeRpcProxy gained two extra ctor args (daemon URL path + SSL flag)
+  // when the daemon-RPC path became configurable for reverse-proxy and
+  // HTTPS deployments. Pass the defaults the production code uses for
+  // plain-HTTP root-path setups.
+  NodeRpcProxy nodeProxy("127.0.0.1", 18081, /*daemon_path=*/"/", /*daemon_ssl=*/false);
 
   NodeObserver observer1("obs1", nodeProxy, log);
   NodeObserver observer2("obs2", nodeProxy, log);

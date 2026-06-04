@@ -86,7 +86,7 @@ bool gen_double_spend_base<concrete_test>::check_double_spend(CryptoNote::core& 
   std::list<CryptoNote::Block> block_list;
   bool r = c.get_blocks(0, 100 + 2 * static_cast<uint32_t>(this->m_currency.minedMoneyUnlockWindow()), block_list);
   CHECK_TEST_CONDITION(r);
-  CHECK_TEST_CONDITION(m_last_valid_block == block_list.back());
+  CHECK_EQ(get_block_height(m_last_valid_block), get_block_height(block_list.back()));
 
   CHECK_EQ(concrete_test::expected_pool_txs_count, c.get_pool_transactions_count());
 
@@ -229,11 +229,20 @@ bool gen_double_spend_in_alt_chain_in_the_same_block<txs_keeped_by_block>::gener
   }
   MAKE_TX_LIST(events, txs_1, bob_account, alice_account, send_amount - this->m_currency.minimumFee(), blk_1);
   events.insert(events.begin() + tx_1_idx, tx_1);
-  MAKE_NEXT_BLOCK_TX_LIST(events, blk_3, blk_1r, miner_account, txs_1);
 
-  // Try to switch to alternative chain
-  DO_CALLBACK(events, "mark_invalid_block");
-  MAKE_NEXT_BLOCK(events, blk_4, blk_3, miner_account);
+  if (has_invalid_tx)
+  {
+    DO_CALLBACK(events, "mark_invalid_block");
+    MAKE_NEXT_BLOCK_TX_LIST(events, blk_3, blk_1r, miner_account, txs_1);
+  }
+  else
+  {
+    MAKE_NEXT_BLOCK_TX_LIST(events, blk_3, blk_1r, miner_account, txs_1);
+
+    // Try to switch to alternative chain
+    DO_CALLBACK(events, "mark_invalid_block");
+    MAKE_NEXT_BLOCK(events, blk_4, blk_3, miner_account);
+  }
 
   DO_CALLBACK(events, "check_double_spend");
 

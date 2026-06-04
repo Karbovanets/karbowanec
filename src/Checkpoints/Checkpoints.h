@@ -21,6 +21,7 @@
 
 #include <map>
 #include <mutex>
+#include <set>
 
 #include <CryptoNoteCore/CryptoNoteBasicImpl.h>
 #include <Logging/LoggerRef.h>
@@ -41,16 +42,40 @@ namespace CryptoNote
         std::unique_lock<std::mutex> lock_other(other.m_mutex, std::defer_lock);
         std::lock(lock_this, lock_other); // ensure no deadlock
         m_points = other.m_points;
+        // The hardcoded-vs-DNS distinction is consensus-relevant: it gates
+        // the CT structural-only validation fast path in pushBlock /
+        // handleIncomingTransaction. Forgetting to copy m_hardcoded_heights
+        // (and m_reject_deep_reorg_depth) silently downgrades a Checkpoints
+        // object that *had* hardcoded checkpoints into one that pretends
+        // every entry came from DNS. The most common path that exercises this
+        // assignment is Daemon.cpp's `m_core.set_checkpoints(std::move(
+        // checkpoints))` after seeding the binary table.
+        m_hardcoded_heights = other.m_hardcoded_heights;
+        m_reject_deep_reorg_depth = other.m_reject_deep_reorg_depth;
         logger = other.logger;
       }
 
       return *this;
     }
 
-    bool add_checkpoint(uint32_t height, const std::string& hash_str);
+    // `hardcoded` is the historical name for "trusted checkpoint". It is true
+    // for anchors inside the operator's trust boundary: the baked-in
+    // CryptoNote::CHECKPOINTS table, an operator-supplied file loaded via
+    // --load-checkpoints, or a DNS record verified against
+    // DNS_CHECKPOINT_SIGNERS. Unsigned DNS records are rejected before this
+    // function is called. The flag feeds is_in_hardcoded_checkpoint_zone(),
+    // which decides whether expensive historical consensus validation,
+    // including the CT structural-only fast path, may short-circuit.
+    bool add_checkpoint(uint32_t height, const std::string& hash_str, bool hardcoded = true);
     bool load_checkpoints_from_file(const std::string& fileName);
     bool load_checkpoints_from_dns();
     bool is_in_checkpoint_zone(uint32_t height) const;
+    // True iff `height` is at or below the largest trusted checkpoint height.
+    // The method keeps the historical "hardcoded" name, but the trusted set
+    // includes built-in checkpoints, operator file checkpoints, and signed DNS
+    // checkpoints. Returns false when no trusted checkpoints have been seeded
+    // (e.g. testnet, --without-checkpoints).
+    bool is_in_hardcoded_checkpoint_zone(uint32_t height) const;
     bool check_block(uint32_t height, const Crypto::Hash& h) const;
     bool check_block(uint32_t height, const Crypto::Hash& h, bool& is_a_checkpoint) const;
     bool is_alternative_block_allowed(uint32_t blockchain_height, uint32_t block_height) const;
@@ -59,6 +84,10 @@ namespace CryptoNote
 
   private:
     std::map<uint32_t, Crypto::Hash> m_points;
+    // Subset of m_points whose source was trusted at insertion time. Tracked
+    // as a parallel index (rather than embedded in the value of m_points) so
+    // existing iteration patterns over m_points stay unchanged.
+    std::set<uint32_t> m_hardcoded_heights;
     Logging::LoggerRef logger;
     mutable std::mutex m_mutex;
 

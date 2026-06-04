@@ -77,8 +77,9 @@ namespace CryptoNote {
      virtual bool getBlockSize(const Crypto::Hash& hash, size_t& size) override;
      virtual bool getAlreadyGeneratedCoins(const Crypto::Hash& hash, uint64_t& generatedCoins) override;
      virtual bool getBlockReward(uint8_t blockMajorVersion, size_t medianSize, size_t currentBlockSize, uint64_t alreadyGeneratedCoins, uint64_t fee,
-                                 uint64_t& reward, int64_t& emissionChange) override;
+                                 uint64_t& reward, int64_t& emissionChange, uint32_t height = 0) override;
      virtual bool scanOutputkeysForIndices(const KeyInput& txInToKey, std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) override;
+     virtual bool scanCtInputRingForIndices(const ConfidentialInput& cin, std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) override;
      virtual bool getBlockDifficulty(uint32_t height, difficulty_type& difficulty) override;
      virtual bool getBlockCumulativeDifficulty(uint32_t height, difficulty_type& difficulty) override;
      virtual bool getBlockTimestamp(uint32_t height, uint64_t& timestamp) override;
@@ -153,6 +154,8 @@ namespace CryptoNote {
        uint32_t& totalBlockCount, uint32_t& startBlockIndex) override;
      bool get_stat_info(core_stat_info& st_inf) override;
      virtual bool getblockEntry(uint32_t height, uint64_t& block_cumulative_size, difficulty_type& difficulty, uint64_t& already_generated_coins, uint64_t& reward, uint64_t& transactions_count, uint64_t& timestamp) override;
+     virtual bool getBlockStats(const std::vector<uint32_t>& heights, std::vector<BlockStatsEntry>& stats) override;
+     virtual bool getBlockStats(uint32_t startHeight, uint32_t endHeight, std::vector<BlockStatsEntry>& stats) override;
 
      virtual bool get_tx_outputs_gindexs(const Crypto::Hash& tx_id, std::vector<uint32_t>& indexs) override;
      Crypto::Hash get_tail_id();
@@ -166,6 +169,7 @@ namespace CryptoNote {
      void print_blockchain_index();
      std::string print_pool(bool short_format);
      std::list<CryptoNote::tx_memory_pool::TransactionDetails> getMemoryPool() const;
+     tx_memory_pool& getMempool() { return m_mempool; } // Accessor used by tests, not intended for use in production code
      void print_blockchain_outs(const std::string& file);
      virtual bool getPoolChanges(const Crypto::Hash& tailBlockId, const std::vector<Crypto::Hash>& knownTxsIds,
                                  std::vector<Transaction>& addedTxs, std::vector<Crypto::Hash>& deletedTxsIds) override;
@@ -178,6 +182,10 @@ namespace CryptoNote {
 
      uint64_t getNextBlockDifficulty() override;
      uint64_t getTotalGeneratedAmount() override;
+     uint64_t getConfidentialSupply() override;
+     uint64_t getPqPlainSupply() override;
+     bool getConfidentialSupplyAtBlock(const Crypto::Hash& blockHash, uint64_t& supply) override;
+     bool getPqPlainSupplyAtBlock(const Crypto::Hash& blockHash, uint64_t& supply) override;
      uint8_t getBlockMajorVersionForHeight(uint32_t height) const;
      virtual bool getMixin(const Transaction& transaction, uint64_t& mixin) override;
 
@@ -193,11 +201,13 @@ namespace CryptoNote {
      bool is_tx_spendtime_unlocked(uint64_t unlock_time, uint32_t height);
 
    private:
-     bool add_new_tx(const Transaction& tx, const Crypto::Hash& tx_hash, size_t blob_size, tx_verification_context& tvc, bool keeped_by_block);
+     bool add_new_tx(const Transaction& tx, const Crypto::Hash& tx_hash, size_t blob_size,
+                     tx_verification_context& tvc, bool keeped_by_block,
+                     TxValidationContext validationContext);
      bool load_state_data();
      bool parse_tx_from_blob(Transaction& tx, Crypto::Hash& tx_hash, Crypto::Hash& tx_prefix_hash, const BinaryArray& blob);
 
-     bool check_tx_syntax(const Transaction& txc, const Crypto::Hash& txHash);
+     bool check_tx_syntax(const Transaction& txc, const Crypto::Hash& txHash, uint32_t height);
      //check correct values, amounts and all lightweight checks not related with database
      bool check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, bool keeped_by_block);
      //check if tx already in memory pool or in main blockchain
@@ -209,7 +219,6 @@ namespace CryptoNote {
 
      bool update_miner_block_template();
      bool handle_command_line(const boost::program_options::variables_map& vm);
-     bool check_tx_inputs_keyimages_diff(const Transaction& tx);
      virtual void blockchainUpdated() override;
      virtual void txDeletedFromPool() override;
      void poolUpdated();

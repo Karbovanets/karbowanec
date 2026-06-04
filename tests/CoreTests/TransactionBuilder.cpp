@@ -130,7 +130,7 @@ void TransactionBuilder::signSources(const Crypto::Hash& prefixHash, const std::
     }
 
     tx.signatures.push_back(std::vector<Crypto::Signature>());
-    std::vector<Crypto::Signature>& sigs = tx.signatures.back();
+    std::vector<Crypto::Signature>& sigs = keyInputSig(tx.signatures.back());
     sigs.resize(src_entr.keyInfo.outputs.size());
     generate_ring_signature(prefixHash, boost::get<KeyInput>(tx.inputs[i]).keyImage, keys_ptrs, contexts[i].secretKey, src_entr.keyInfo.realOutput.transactionIndex, sigs.data());
     i++;

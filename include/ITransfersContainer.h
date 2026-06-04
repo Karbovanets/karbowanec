@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <limits>
 #include <vector>
+#include "CryptoTypes.h"
 #include "crypto/hash.h"
 #include "ITransaction.h"
 #include "IObservable.h"
@@ -41,6 +42,15 @@ struct TransactionInformation {
   uint64_t totalAmountOut;
   std::vector<uint8_t> extra;
   Crypto::Hash paymentId;
+  // Plaintext fee. For CT (v2) txs the input/output amounts are blinded, so
+  // totalAmountIn/Out are meaningless and the fee cannot be derived from them;
+  // it is taken from the explicit prefix fee at scan time. For v1 txs it is
+  // totalAmountIn - totalAmountOut (0 for coinbase).
+  uint64_t fee = 0;
+  // True iff the tx is a coinbase (carries a BaseInput). Replaces the old
+  // "totalAmountIn == 0" heuristic, which misfires on fully-confidential CT
+  // spends whose transparent input total is also 0.
+  bool isBase = false;
 };
 
 
@@ -56,9 +66,13 @@ struct TransactionOutputInformation {
   Crypto::PublicKey transactionPublicKey;
 
   union {
-    Crypto::PublicKey outputKey; // Type: Key 
+    Crypto::PublicKey outputKey; // Type: Key
     uint32_t requiredSignatures; // Type: Multisignature
   };
+
+  // CT fields (valid when type == Confidential)
+  Crypto::EllipticCurvePoint commitment;       // Pedersen commitment C = v*H + r*G
+  Crypto::EllipticCurveScalar blindingFactor;   // blinding factor r
 };
 
 struct TransactionSpentOutputInformation: public TransactionOutputInformation {
@@ -80,18 +94,21 @@ public:
     // output type
     IncludeTypeKey = 0x100,
     IncludeTypeMultisignature = 0x200,
+    IncludeTypeConfidential = 0x400,
     // combinations
     IncludeStateAll = 0xff,
     IncludeTypeAll = 0xff00,
 
     IncludeKeyUnlocked = IncludeTypeKey | IncludeStateUnlocked,
     IncludeKeyNotUnlocked = IncludeTypeKey | IncludeStateLocked | IncludeStateSoftLocked,
+    IncludeConfidentialUnlocked = IncludeTypeConfidential | IncludeStateUnlocked,
+    IncludeConfidentialNotUnlocked = IncludeTypeConfidential | IncludeStateLocked | IncludeStateSoftLocked,
 
     IncludeAllLocked = IncludeTypeAll | IncludeStateLocked | IncludeStateSoftLocked,
     IncludeAllUnlocked = IncludeTypeAll | IncludeStateUnlocked,
     IncludeAll = IncludeTypeAll | IncludeStateAll,
 
-    IncludeDefault = IncludeKeyUnlocked
+    IncludeDefault = IncludeKeyUnlocked | IncludeConfidentialUnlocked
   };
 
   virtual size_t transfersCount() const = 0;

@@ -164,14 +164,14 @@ std::shared_ptr<WalletLegacyEvent> WalletUserTransactionsCache::onTransactionUpd
   }
   m_unconfirmedTransactions.erase(txInfo.transactionHash);
 
-  bool isCoinbase = txInfo.totalAmountIn == 0;
+  bool isCoinbase = txInfo.isBase;
 
   if (id == CryptoNote::WALLET_LEGACY_INVALID_TRANSACTION_ID) {
     WalletLegacyTransaction transaction;
     transaction.firstTransferId = WALLET_LEGACY_INVALID_TRANSFER_ID;
     transaction.transferCount = 0;
     transaction.totalAmount = txBalance;
-    transaction.fee = isCoinbase ? 0 : txInfo.totalAmountIn - txInfo.totalAmountOut;
+    transaction.fee = txInfo.fee;
     transaction.sentTime = 0;
     transaction.hash = txInfo.transactionHash;
     transaction.blockHeight = txInfo.blockHeight;

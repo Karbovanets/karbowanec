@@ -19,13 +19,61 @@
 
 #include <Common/Math.h>
 #include "CryptoNoteCore/Account.h"
+#include "CryptoNoteCore/Blockchain.h"
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "CryptoNoteCore/Difficulty.h"
 
+#include <iostream>
+
 using namespace std;
 using namespace CryptoNote;
+
+namespace {
+
+// Dispatch PoW longhash by block version. The standalone
+// CryptoNoteFormatUtils::get_block_longhash returns false for V5+ (production
+// V5+ PoW lives on Blockchain::getBlockLongHash, which mixes 8 historical
+// blocks per iteration × 128 iterations and runs yespower at the end). We
+// reproduce that dispatch here so the test generator's PoW search behaves the
+// same way the real daemon would when stripping a freshly-built block.
+//
+// `blockchain` may be null. If a V5+ block is requested without a Blockchain
+// sink, we log the misconfiguration and return false — the caller's PoW loop
+// then spins, which surfaces as a hung test rather than silently producing a
+// block that the daemon would reject. This is the contract the public
+// fillNonce overloads document.
+bool computeBlockLongHashForTest(Crypto::cn_context& context,
+                                  const CryptoNote::Block& blk,
+                                  Crypto::Hash& res,
+                                  CryptoNote::Blockchain* blockchain) {
+  if (blk.majorVersion < CryptoNote::BLOCK_MAJOR_VERSION_5) {
+    return get_block_longhash(context, blk, res);
+  }
+  if (blockchain == nullptr) {
+    // One-shot warning per process so the log doesn't get flooded by the
+    // test generator's nonce search loop. Tests that exercise V5+ blocks
+    // must call test_generator::setBlockchain() (or pass a Blockchain* to
+    // the fillNonce overload).
+    static bool warned = false;
+    if (!warned) {
+      std::cerr << "[test_generator] V5+ PoW search requested but no Blockchain "
+                   "sink was wired — call test_generator::setBlockchain(&core."
+                   "get_blockchain_storage()) before constructing V5+ blocks.\n";
+      warned = true;
+    }
+    return false;
+  }
+  // Use the public 3-arg overload (it wraps the private 5-arg version with an
+  // empty alt-chain and the daemon's configured no_blobs setting). Sufficient
+  // for our usage because in test_generator we always mine on top of the main
+  // chain; alt-chain inclusion paths in tests submit alt blocks via the daemon
+  // first, which populates m_alternative_chains independently.
+  return blockchain->getBlockLongHash(context, blk, res);
+}
+
+}  // namespace
 
 #ifndef CHECK_AND_ASSERT_MES
 #define CHECK_AND_ASSERT_MES(expr, fail_ret_val, message)   do{if(!(expr)) {std::cerr << message << std::endl; return fail_ret_val;};}while(0)
@@ -75,7 +123,7 @@ void test_generator::addBlock(const CryptoNote::Block& blk, size_t tsxSize, uint
   const size_t blockSize = tsxSize + getObjectBinarySize(blk.baseTransaction);
   int64_t emissionChange;
   uint64_t blockReward;
-  m_currency.getBlockReward(blk.majorVersion, Common::medianValue(blockSizes), blockSize, alreadyGeneratedCoins, fee, blockReward, emissionChange);
+  m_currency.getBlockReward(blk.majorVersion, Common::medianValue(blockSizes), blockSize, alreadyGeneratedCoins, fee, blockReward, emissionChange, get_block_height(blk));
   m_blocksInfo[get_block_hash(blk)] = BlockInfo(blk.previousBlockHash, alreadyGeneratedCoins + emissionChange, blockSize);
 }
 
@@ -105,7 +153,7 @@ bool test_generator::constructBlock(CryptoNote::Block& blk, uint32_t height, con
   }
 
   blk.baseTransaction = boost::value_initialized<Transaction>();
-  size_t targetBlockSize = txsSize + getObjectBinarySize(blk.baseTransaction);
+  size_t targetBlockSize = txsSize;
   while (true) {
     Crypto::SecretKey minerTxKey;
     if (!m_currency.constructMinerTx(blk.majorVersion, height, Common::medianValue(blockSizes), alreadyGeneratedCoins, targetBlockSize,
@@ -159,12 +207,18 @@ bool test_generator::constructBlock(CryptoNote::Block& blk, uint32_t height, con
     }
   }
 
-  // Nonce search...
+  // Nonce search. For V5+ blocks this delegates to Blockchain::getBlockLongHash
+  // (yespower over a PoT mixed with 8 historical blocks per iteration). For
+  // V1–V4 it uses the standalone get_block_longhash (cn_slow_hash). If a V5+
+  // block is requested without a Blockchain sink, computeBlockLongHashForTest
+  // returns false and the loop will spin — call setBlockchain() before
+  // mining V5+ blocks (the warning is emitted once per process).
   blk.nonce = 0;
   Crypto::cn_context context;
   while (true) {
     Crypto::Hash h;
-    if (get_block_longhash(context, blk, h) && check_hash(h, getTestDifficulty()))
+    if (computeBlockLongHashForTest(context, blk, h, m_blockchain) &&
+        check_hash(h, getTestDifficulty()))
       break;
     blk.nonce++;
     if (blk.nonce == 0) blk.timestamp++;
@@ -219,7 +273,7 @@ bool test_generator::constructBlockManually(Block& blk, const Block& prevBlock, 
     blk.baseTransaction = baseTransaction;
   } else {
     blk.baseTransaction = boost::value_initialized<Transaction>();
-    size_t currentBlockSize = txsSizes + getObjectBinarySize(blk.baseTransaction);
+    size_t currentBlockSize = txsSizes;
     // TODO: This will work, until size of constructed block is less then m_currency.blockGrantedFullRewardZone()
     Crypto::SecretKey minerTxKey2;
     if (!m_currency.constructMinerTx(blk.majorVersion, height, Common::medianValue(blockSizes), alreadyGeneratedCoins, currentBlockSize, 0,
@@ -247,7 +301,9 @@ bool test_generator::constructBlockManually(Block& blk, const Block& prevBlock, 
 
   difficulty_type aDiffic = actualParams & bf_diffic ? diffic : getTestDifficulty();
   if (1 < aDiffic) {
-    fillNonce(blk, aDiffic);
+    // Route through the version-aware overload so V5+ blocks use yespower if
+    // a Blockchain sink is wired into this generator.
+    fillNonce(blk, aDiffic, m_blockchain);
   }
 
   addBlock(blk, txsSizes, fee, blockSizes, alreadyGeneratedCoins);
@@ -298,11 +354,19 @@ bool test_generator::constructMaxSizeBlock(CryptoNote::Block& blk, const CryptoN
 }
 
 void fillNonce(CryptoNote::Block& blk, const difficulty_type& diffic) {
+  // Compatibility overload — V1–V4 PoW only. For V5+ callers must use the
+  // Blockchain-aware overload below.
+  fillNonce(blk, diffic, /*blockchain=*/nullptr);
+}
+
+void fillNonce(CryptoNote::Block& blk, const difficulty_type& diffic,
+               CryptoNote::Blockchain* blockchain) {
   blk.nonce = 0;
   Crypto::cn_context context;
   while (true) {
     Crypto::Hash h;
-    if (get_block_longhash(context, blk, h) && check_hash(h, diffic))
+    if (computeBlockLongHashForTest(context, blk, h, blockchain) &&
+        check_hash(h, diffic))
       break;
     blk.nonce++;
     if (blk.nonce == 0) blk.timestamp++;
@@ -325,7 +389,7 @@ bool constructMinerTxManually(const CryptoNote::Currency& currency, uint8_t bloc
   // This will work, until size of constructed block is less then currency.blockGrantedFullRewardZone()
   int64_t emissionChange;
   uint64_t blockReward;
-  if (!currency.getBlockReward(blockMajorVersion, 0, 0, alreadyGeneratedCoins, fee, blockReward, emissionChange)) {
+  if (!currency.getBlockReward(blockMajorVersion, 0, 0, alreadyGeneratedCoins, fee, blockReward, emissionChange, height)) {
     std::cerr << "Block is too big" << std::endl;
     return false;
   }
