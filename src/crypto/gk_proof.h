@@ -79,7 +79,7 @@ bool gk_verify(const EllipticCurvePoint& C,
 // across nodes. Mirrors triptych_verify_batch's transcript shape.
 //
 // Independence from the Triptych spend proof: separate domain separators
-// ("GKBatchTranscriptV1" / "Triptych-KarboCT-v1"), separate per-proof
+// ("GKBatchTranscriptV1" / "Triptych-KarboCT-v2"), separate per-proof
 // challenges, separate batched α derivations. The only shared input is
 // tx_hash (the tx prefix hash), which both proofs commit to as their
 // transaction-identity binding — without that shared anchor an attacker

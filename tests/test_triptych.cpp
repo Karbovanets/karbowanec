@@ -6,7 +6,7 @@
 //   - unsupported ring sizes (1, 2, 3, 5, 7, 9, 12, 32) rejected up front
 //     (ring-size-1 Schnorr carve-out is intentionally not supported — the
 //     simpler two-Schnorr shape would not bind the same x to both P = xG
-//     and I = x·Hp(P), letting a holder forge fresh key images)
+//     and J = x·U, letting a holder forge fresh key images)
 //   - rejection of: wrong message, wrong pseudo-commitment, wrong key
 //     image, tampered scalar/point in every component of the proof
 //   - hidden-inflation attempt (different amount in real vs pseudo) is
@@ -469,7 +469,7 @@ static void test_key_image_consistency() {
 // Re-run sign/verify but with a tx_hash chosen so that, if we accidentally
 // shared the GK domain separator, a GK proof bound to the same tx_hash
 // would be mistaken for a Triptych proof (or vice versa). Triptych's
-// transcript embeds "Triptych-KarboCT-v1" explicitly; this is here as a
+// transcript embeds "Triptych-KarboCT-v2" explicitly; this is here as a
 // regression marker if anyone tampers with the domain constant.
 
 static void test_domain_separation_marker() {

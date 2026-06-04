@@ -63,16 +63,16 @@ struct RingMemberRef {
 // Contains the ring of public keys and commitments, a pseudo-output commitment,
 // and key image. Triptych spend proofs are stored separately in Transaction body.
 //
-// Ring members may be of mixed type (transparent + confidential) and mixed
-// amount: see RingMemberRef. ringMembers[i] corresponds to ringPubkeys[i]
-// and ringCommitments[i]; the three vectors are parallel and must have
-// equal length.
+// Consensus admits confidential-only rings here: each RingMemberRef must
+// resolve to a ConfidentialOutput in the CT sentinel bucket. ringMembers[i]
+// corresponds to ringPubkeys[i] and ringCommitments[i]; the three vectors are
+// parallel and must have equal length.
 struct ConfidentialInput {
   std::vector<RingMemberRef>               ringMembers;       // per-member (amount, outputIndex)
   std::vector<Crypto::PublicKey>           ringPubkeys;       // one-time public keys of ring members
   std::vector<Crypto::EllipticCurvePoint>  ringCommitments;   // Pedersen commitments of ring members
   Crypto::EllipticCurvePoint               pseudoCommitment;  // C' = v*H + r'*G
-  Crypto::KeyImage                         keyImage;          // I = x * Hp(P)
+  Crypto::KeyImage                         keyImage;          // J = x * U for CT inputs
 };
 
 typedef boost::variant<BaseInput, KeyInput, ConfidentialInput> TransactionInput;

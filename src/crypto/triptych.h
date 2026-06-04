@@ -78,7 +78,7 @@
 //
 // Fiat-Shamir transcript (one canonical serialization, NO ad-hoc hashing
 // elsewhere). The challenge commits to:
-//   - domain separator "Triptych-KarboCT-v1"   (separation from GK/MLSAG)
+//   - domain separator "Triptych-KarboCT-v2"   (separation from GK/MLSAG)
 //   - tx prefix hash (message)                 (binds proof to the tx)
 //   - n as one byte                            (ring-size domain split)
 //   - every ring pubkey P_k in order
@@ -102,22 +102,20 @@
 // could swap a valid Triptych from tx A with a valid GK from tx B. The
 // prefix hash is exactly that identity. The proofs do NOT share verifier
 // challenges, batched α scalars, or any other internal randomness — the
-// domain tags ("Triptych-KarboCT-v1", "GKBatchTranscriptV1", etc.) keep
+// domain tags ("Triptych-KarboCT-v2", "GKBatchTranscriptV1", etc.) keep
 // the proof systems algebraically independent so a soundness break in one
 // cannot be leveraged against the other. Future refactoring must preserve
 // this property: do NOT merge the transcripts or pull challenges across.
 //
 // Timing side channel during signing (NOT verification):
 //   triptych_sign() branches on the bits of `true_index` to build the I_bits
-//   commitments, the bit-commitment Q polynomials, and the selector-polynomial
-//   coefficients. The sc_invert(spend_privkey) call is also variable-time
-//   (square-and-multiply over the public exponent L−2, but with the secret
-//   spend key as base). An adversary who can observe per-signature wall-clock
-//   from inside the prover's host could in principle narrow the ring's
-//   anonymity set over many signatures and learn statistical bits of the
-//   spend key. This matches the academic Triptych reference and ref10's
-//   `ge_scalarmult`, which is also variable-time on the secret scalar in
-//   `x · Hp(P)` and `x · G` everywhere else in the wallet.
+//   commitments, the bit-commitment Q polynomials, the selector-polynomial
+//   coefficients, and the secret-scalar fixed-generator multiply J = x·U.
+//   An adversary who can observe per-signature wall-clock from inside the
+//   prover's host could in principle narrow the ring's anonymity set over
+//   many signatures and learn statistical bits of the spend key. This matches
+//   the academic Triptych reference and ref10's `ge_scalarmult`, which is also
+//   variable-time on secret-scalar operations elsewhere in the wallet.
 //
 // Threat model: signing happens locally in the user's wallet process.
 // Realistic exploitation requires a co-located observer (malicious hypervisor,
@@ -178,7 +176,7 @@ struct TriptychSignature {
 // spend_privkey:   secret spend key x such that P_l = x·G
 // real_blinding:   blinding factor r of the real input's commitment C_l
 // pseudo_blinding: blinding factor r' of the pseudo-output commitment C'
-// key_image:       [out] linking tag I = x · Hp(P_l)
+// key_image:       [out] linking tag J = x · U
 // sig:             [out] Triptych signature (variable arrays sized to log2(ring_size))
 //
 // Returns false on bad inputs (bad points, index out of range, ring_size not

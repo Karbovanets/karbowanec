@@ -49,8 +49,8 @@ inline size_t log2_ring(size_t ring_size) {
 // Triptych supports power-of-two ring sizes 4, 8, 16. A ring-size-1
 // Schnorr carve-out was considered for v5+ coinbase but rejected as
 // unsound: the simpler "two independent Schnorr proofs" shape would not
-// bind the same x to both P = xG and I = x·Hp(P), letting a holder
-// forge fresh key images. Transparent shielding (coinbase included)
+// bind the same x to both P = xG and J = x·U, letting a holder forge fresh
+// key images. Transparent shielding (coinbase included)
 // goes through v2 KeyInput with a legacy ring signature, so a
 // ConfidentialInput never needs ring size 1.
 //
@@ -942,7 +942,7 @@ bool triptych_collect_claims(
 
   // Build equation lists. ring_size ∈ {4, 8, 16}; the prior ring-size-1
   // Schnorr carve-out was unsound (did not bind the same x in P = xG and
-  // I = x·Hp(P)) and has been removed.
+  // J = x·U) and has been removed.
   const size_t n_eq = 2 * n + 3;
   claim.equations.assign(n_eq, {});
   claim.gG.assign(n_eq, EllipticCurveScalar{});

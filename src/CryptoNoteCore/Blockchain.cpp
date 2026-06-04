@@ -2615,7 +2615,7 @@ bool Blockchain::checkConfidentialTransaction(const Transaction& tx, const Crypt
     // Triptych supports ring sizes 4, 8, 16. Ring size 1 used to be allowed
     // as a Schnorr-branch carve-out for v5+ coinbase, but the simpler
     // "two independent Schnorr proofs" shape did not bind the same x in
-    // P = xG and I = x·Hp(P) — a holder could forge fresh key images for
+    // P = xG and J = x·U — a holder could forge fresh key images for
     // the same spend. Phase B routes transparent shielding (coinbase
     // included) through v2 KeyInput with a legacy ring signature, so
     // ConfidentialInput never needs ring size 1 in practice.

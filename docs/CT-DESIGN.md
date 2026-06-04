@@ -134,7 +134,7 @@ mistaken belief that Karbo's CT was aiming for Monero parity.
   vanilla shielded send.
   **The *spend* path is identical to `v2 CT → CT`:** the confidential value
   being consumed is still spent by a `ConfidentialInput` (same Triptych
-  proof, same key image `I = x·H_p(P)`), and mixed *inputs* (`KeyInput` +
+  proof, same key image `J = x·U`), and mixed *inputs* (`KeyInput` +
   `ConfidentialInput`) already exist in `v2`, so `v3` inherits input handling
   verbatim. The one genuinely new consensus surface is the **plain-output
   term in the balance kernel** — see "v3 unshield: scope and the balance
