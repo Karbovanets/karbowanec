@@ -51,7 +51,9 @@ add_library(CryptoNoteProtocol ${CryptoNoteProtocol})
 add_library(Common ${Common})
 add_library(Crypto ${Crypto})
 add_library(CryptoPq ${CryptoPq})
-target_link_libraries(CryptoPq PUBLIC oqs chacha20poly1305)
+# Common provides Tools::Base58 used by PqAddress encoding; Base58 in turn
+# references Crypto::cn_fast_hash.
+target_link_libraries(CryptoPq PUBLIC oqs chacha20poly1305 Common Crypto)
 # liboqs's generated <oqs/*.h> headers live in PROJECT_BINARY_DIR/include but
 # are only exposed via include_directories() in liboqs's own subdir, so they
 # don't propagate through the oqs target. Add the path explicitly here.

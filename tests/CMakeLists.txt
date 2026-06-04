@@ -38,6 +38,7 @@ add_executable(HashTests Hash/main.cpp)
 
 add_executable(PqPrimitivesTests test_pq_primitives.cpp)
 add_executable(PqDeriveTests test_pq_derive.cpp)
+add_executable(PqSeedAddressTests test_pq_seed_address.cpp)
 
 target_link_libraries(CoreTests TestGenerator Wallet CryptoNoteCore Serialization System Logging Common Crypto BlockchainExplorer Checkpoints ${Boost_LIBRARIES})
 target_link_libraries(CryptoTests Crypto Common ${Boost_LIBRARIES})
@@ -54,6 +55,7 @@ target_link_libraries(HashTests Crypto)
 
 target_link_libraries(PqPrimitivesTests CryptoPq gtest ${Boost_LIBRARIES})
 target_link_libraries(PqDeriveTests CryptoPq gtest ${Boost_LIBRARIES})
+target_link_libraries(PqSeedAddressTests CryptoPq gtest ${Boost_LIBRARIES})
 
 if(MSVC)
   target_link_libraries(SystemTests ws2_32)
@@ -105,6 +107,7 @@ set_property(TARGET
   HashTests
   PqPrimitivesTests
   PqDeriveTests
+  PqSeedAddressTests
 PROPERTY FOLDER "tests")
 
 add_dependencies(IntegrationTestLibrary version)
@@ -123,6 +126,7 @@ set_property(TARGET HashTargetTests PROPERTY OUTPUT_NAME "hash_target_tests")
 set_property(TARGET HashTests PROPERTY OUTPUT_NAME "hash_tests")
 set_property(TARGET PqPrimitivesTests PROPERTY OUTPUT_NAME "pq_primitives_tests")
 set_property(TARGET PqDeriveTests PROPERTY OUTPUT_NAME "pq_derive_tests")
+set_property(TARGET PqSeedAddressTests PROPERTY OUTPUT_NAME "pq_seed_address_tests")
 
 add_test(CoreTests core_tests --generate_and_play_test_data)
 add_test(CryptoTests crypto_tests ${CMAKE_CURRENT_SOURCE_DIR}/crypto/tests.txt)
@@ -135,4 +139,5 @@ add_test(SystemTests system_tests)
 add_test(UnitTests unit_tests)
 add_test(PqPrimitivesTests pq_primitives_tests)
 add_test(PqDeriveTests pq_derive_tests)
+add_test(PqSeedAddressTests pq_seed_address_tests)
 add_test(LMDBReorgTests lmdb_reorg_tests)

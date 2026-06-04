@@ -13,6 +13,8 @@
   "transaction_version": 4,
   "block_major_version": 7,
   "domains": {
+    "view_root":    "karbo-pq-view-root-v1",
+    "spend_root":   "karbo-pq-spend-root-v1",
     "inputs_hash":  "karbo-pq-inputs-hash-v1",
     "out_context":  "karbo-pq-out-context-v1",
     "spend_seed":   "karbo-pq-spend-seed-v1",
@@ -23,6 +25,22 @@
     "_reserved_phase2": "karbo-pq-ct-mask-v1"
   },
   "vectors": {
+    "view_seed": {
+      "_note": "L=64 (FIPS 203 KeyGen d||z); spec L=32 is overridden — see PqSeed.h.",
+      "seed_master": "pat(32,1,0)",
+      "salt": "00 * 32",
+      "info": "karbo-pq-view-root-v1",
+      "L": 64,
+      "output": "79c534a401ab72ff802da7441fbfa1d027f5f38e81192b6e0e81e5b840341ef33fd6632bafa1a8cfb124118b33d6d3346335c2b2adc3d053a664dca0e7bce3b7"
+    },
+    "spend_root": {
+      "_note": "Reserved; unused in Phase 1.",
+      "seed_master": "pat(32,1,0)",
+      "salt": "00 * 32",
+      "info": "karbo-pq-spend-root-v1",
+      "L": 32,
+      "output": "a79a34b7614d62dfc1e0a9364557e342c92cce4a09b814e96f7e8381043a2ad0"
+    },
     "inputs_hash": {
       "inputs": [
         { "prev_txid": "pat(32,1,0)",   "prev_out_index": 7 },
