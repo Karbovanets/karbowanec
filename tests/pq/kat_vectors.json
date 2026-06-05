@@ -58,6 +58,16 @@
       "out_context": "<out_context above>",
       "output": "e93bdb04989a7a2833eea56830bb5d5091d2b4ecda8b0754a0abf8d69b0225c9"
     },
+    "pq_output_enc_payload": {
+      "_note": "ChaCha20-Poly1305(key=aead_key, nonce=00*12, aad=out_context||LE64(amount), msg=rho). 48 bytes (32 ct + 16 tag).",
+      "ss": "pat(32,1,0)",
+      "kem_ct": "pat(1088,7,3)",
+      "out_context": "<out_context above>",
+      "output_index": 1,
+      "amount": 1000000,
+      "rho": "pat(32,3,9)",
+      "output": "b228e03adc437d64c251fcb8bc35f115ccc096cf8a5af789fd72ac3533764593aa115dcb2b4845404ec9dcf2b06191da"
+    },
     "spend_commit": {
       "_note": "spend_pub is the recipient's long-term ML-DSA-65 spend key (ownership-model fix).",
       "spend_pub": "pat(1952,5,1)",
