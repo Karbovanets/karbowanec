@@ -69,6 +69,22 @@ const uint64_t DEFAULT_DUST_THRESHOLD                        = UINT64_C(10000000
 const uint64_t MIN_TX_MIXIN_SIZE                             = 2;
 const uint64_t MAX_TX_MIXIN_SIZE                             = 20;
 const uint64_t MAX_EXTRA_SIZE                                = 1024;
+// PQ account-registration tags carry a 1184-byte ML-KEM view key, which does
+// not fit in the legacy 1024-byte cap. From block major v6 (PQ activation) the
+// cap is raised to 4096; pre-fork blocks keep 1024 (no retroactive change).
+const uint64_t MAX_EXTRA_SIZE_PQ                             = 4096;
+
+// PQ Phase 1 transaction limits (spec §1.2). These are consensus caps.
+const uint64_t MAX_PQ_INPUTS_PER_TX                          = 8;
+const uint64_t MAX_PQ_OUTPUTS_PER_TX                         = 16;
+const uint64_t MAX_PQ_TX_SIZE                                = 48 * 1024;
+
+// Free-fee account registration (spec §11). FREE_REG_POW_TARGET is a
+// placeholder; calibrate on 2020-era mid-range Android (~3 s) before any
+// production fork-height commitment.
+const uint64_t FREE_REG_REF_WINDOW                          = 60;
+const uint64_t FREE_REG_PER_BLOCK                           = 100;
+const uint64_t FREE_REG_POW_TARGET                          = UINT64_C(0xFFFFFFFFFFFFFFFF);
 
 const uint64_t MAX_TRANSACTION_SIZE_LIMIT                    = CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE_CURRENT / 4 - CRYPTONOTE_COINBASE_BLOB_RESERVED_SIZE;
 
@@ -193,12 +209,23 @@ constexpr size_t DNS_CHECKPOINT_SIGNERS_COUNT                =
   (sizeof(DNS_CHECKPOINT_SIGNERS) / sizeof(DNS_CHECKPOINT_SIGNERS[0])) - 1;
 
 const uint8_t  CURRENT_TRANSACTION_VERSION                   =  1;
+// Post-quantum transaction family (Phase 1, plain amounts). On this CT-less
+// branch PQ is the next free transaction version after plain v1, and activates
+// at block major v6 (the previously reserved, never-activated slot).
+const uint8_t  TRANSACTION_VERSION_PQ                        =  2;
 const uint8_t  BLOCK_MAJOR_VERSION_1                         =  1;
 const uint8_t  BLOCK_MAJOR_VERSION_2                         =  2;
 const uint8_t  BLOCK_MAJOR_VERSION_3                         =  3;
 const uint8_t  BLOCK_MAJOR_VERSION_4                         =  4;
 const uint8_t  BLOCK_MAJOR_VERSION_5                         =  5;
-const uint8_t  BLOCK_MAJOR_VERSION_6                         =  6;
+const uint8_t  BLOCK_MAJOR_VERSION_6                         =  6;  // PQ-plain (Phase 1) activation
+const uint8_t  BLOCK_MAJOR_VERSION_7                         =  7;  // reserved for future CPQ (Phase 2)
+
+// Version-gated extra-size cap. Behaviour-preserving for all historical
+// (< v6) blocks; loosened to MAX_EXTRA_SIZE_PQ only from the PQ fork onward.
+inline uint64_t maxExtraSize(uint8_t blockMajorVersion) {
+  return blockMajorVersion >= BLOCK_MAJOR_VERSION_6 ? parameters::MAX_EXTRA_SIZE_PQ : parameters::MAX_EXTRA_SIZE;
+}
 const uint8_t  BLOCK_MINOR_VERSION_0                         =  0;
 const uint8_t  BLOCK_MINOR_VERSION_1                         =  1;
 

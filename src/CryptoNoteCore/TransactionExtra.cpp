@@ -95,6 +95,26 @@ bool parseTransactionExtra(const std::vector<uint8_t> &transactionExtra, std::ve
         transactionExtraFields.push_back(reg);
         break;
       }
+
+      case TX_EXTRA_TAG_PQ_ACCOUNT_REGISTRATION: {
+        TransactionExtraPqAccountRegistration reg;
+        read(iss, reg.viewPub.data(), reg.viewPub.size());
+        transactionExtraFields.push_back(reg);
+        break;
+      }
+
+      case TX_EXTRA_TAG_POW: {
+        TransactionExtraPow pow;
+        ar(pow.refBlockHash, "ref_block_hash");
+        uint8_t le[8];
+        read(iss, le, sizeof(le));
+        pow.nonce = 0;
+        for (int i = 0; i < 8; ++i) {
+          pow.nonce |= static_cast<uint64_t>(le[i]) << (8 * i);
+        }
+        transactionExtraFields.push_back(pow);
+        break;
+      }
       }
     }
   } catch (std::exception &) {
@@ -132,6 +152,14 @@ struct ExtraSerializerVisitor : public boost::static_visitor<bool> {
 
   bool operator()(const TransactionExtraAccountRegistration& t) {
     return addAccountRegistrationToExtra(extra, t.spendPublicKey, t.viewPublicKey);
+  }
+
+  bool operator()(const TransactionExtraPqAccountRegistration& t) {
+    return addPqAccountRegistrationToExtra(extra, t.viewPub);
+  }
+
+  bool operator()(const TransactionExtraPow& t) {
+    return appendPowTagToExtra(extra, t);
   }
 };
 
@@ -312,6 +340,59 @@ bool isWellFormedAccountRegistration(const std::vector<uint8_t>& tx_extra) {
   }
 
   return true;
+}
+
+bool addPqAccountRegistrationToExtra(std::vector<uint8_t>& tx_extra, const std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>& viewPub) {
+  size_t start = tx_extra.size();
+  tx_extra.resize(start + 1 + viewPub.size());
+  tx_extra[start] = TX_EXTRA_TAG_PQ_ACCOUNT_REGISTRATION;
+  memcpy(&tx_extra[start + 1], viewPub.data(), viewPub.size());
+  return true;
+}
+
+bool getPqAccountRegistrationFromExtra(const std::vector<uint8_t>& tx_extra, TransactionExtraPqAccountRegistration& reg) {
+  std::vector<TransactionExtraField> tx_extra_fields;
+  if (!parseTransactionExtra(tx_extra, tx_extra_fields)) {
+    return false;
+  }
+  return findTransactionExtraFieldByType(tx_extra_fields, reg);
+}
+
+bool appendPowTagToExtra(std::vector<uint8_t>& tx_extra, const TransactionExtraPow& pow) {
+  size_t start = tx_extra.size();
+  tx_extra.resize(start + 1 + sizeof(Hash) + 8);
+  tx_extra[start] = TX_EXTRA_TAG_POW;
+  memcpy(&tx_extra[start + 1], &pow.refBlockHash, sizeof(Hash));
+  // nonce: 8 bytes little-endian, the final bytes of the tag (and of tx_extra,
+  // when this is appended last).
+  size_t noncePos = start + 1 + sizeof(Hash);
+  for (int i = 0; i < 8; ++i) {
+    tx_extra[noncePos + i] = static_cast<uint8_t>((pow.nonce >> (8 * i)) & 0xFF);
+  }
+  return true;
+}
+
+bool getPowTagFromExtra(const std::vector<uint8_t>& tx_extra, TransactionExtraPow& pow) {
+  std::vector<TransactionExtraField> tx_extra_fields;
+  if (!parseTransactionExtra(tx_extra, tx_extra_fields)) {
+    return false;
+  }
+  return findTransactionExtraFieldByType(tx_extra_fields, pow);
+}
+
+bool isPowTagLastField(const std::vector<uint8_t>& tx_extra) {
+  std::vector<TransactionExtraField> extraFields;
+  if (!parseTransactionExtra(tx_extra, extraFields) || extraFields.empty()) {
+    return false;
+  }
+  int powCount = 0;
+  for (const auto& f : extraFields) {
+    if (f.type() == typeid(TransactionExtraPow)) {
+      ++powCount;
+    }
+  }
+  // Fields are parsed in wire order, so back() is the last field on the wire.
+  return powCount == 1 && extraFields.back().type() == typeid(TransactionExtraPow);
 }
 
 

@@ -1265,10 +1265,11 @@ bool Blockchain::prevalidate_miner_transaction(const Block& b, uint32_t height) 
     return false;
   }
   uint64_t extraSize = (uint64_t)b.baseTransaction.extra.size();
+  uint64_t maxExtra = CryptoNote::maxExtraSize(b.majorVersion);
   if (height > CryptoNote::parameters::UPGRADE_HEIGHT_V4_2 &&
-      extraSize > CryptoNote::parameters::MAX_EXTRA_SIZE) {
+      extraSize > maxExtra) {
     logger(ERROR, BRIGHT_RED) << "The miner transaction extra is too large in block "
-      << get_block_hash(b) << ". Allowed: " << CryptoNote::parameters::MAX_EXTRA_SIZE
+      << get_block_hash(b) << ". Allowed: " << maxExtra
       << ", actual: " << extraSize;
     return false;
   }

@@ -19,6 +19,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <vector>
 #include <boost/variant.hpp>
 
@@ -27,13 +29,19 @@
 #define TX_EXTRA_PADDING_MAX_COUNT          255
 #define TX_EXTRA_NONCE_MAX_COUNT            255
 
-#define TX_EXTRA_TAG_PADDING                0x00
-#define TX_EXTRA_TAG_PUBKEY                 0x01
-#define TX_EXTRA_NONCE                      0x02
-#define TX_EXTRA_MERGE_MINING_TAG           0x03
-#define TX_EXTRA_TAG_ACCOUNT_REGISTRATION   0x04
+#define TX_EXTRA_TAG_PADDING                  0x00
+#define TX_EXTRA_TAG_PUBKEY                   0x01
+#define TX_EXTRA_NONCE                        0x02
+#define TX_EXTRA_MERGE_MINING_TAG             0x03
+#define TX_EXTRA_TAG_ACCOUNT_REGISTRATION     0x04
+// PQ Phase 1 tags (spec §4 / §11). Distinct from the classical 0x04 tag.
+#define TX_EXTRA_TAG_PQ_ACCOUNT_REGISTRATION  0x05
+#define TX_EXTRA_TAG_POW                      0x06
 
 #define TX_EXTRA_NONCE_PAYMENT_ID           0x00
+
+// ML-KEM-768 public (view) key length carried by a PQ account registration.
+#define TX_EXTRA_PQ_VIEW_PUBKEY_SIZE          1184
 
 namespace CryptoNote {
 
@@ -59,11 +67,25 @@ struct TransactionExtraAccountRegistration {
   Crypto::PublicKey viewPublicKey;
 };
 
+// PQ account registration: a single ML-KEM-768 view public key (spec §4).
+struct TransactionExtraPqAccountRegistration {
+  std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE> viewPub;
+};
+
+// Anti-spam PoW for free-fee registration (spec §11.2). On the wire this tag is
+// laid out as: tag(1) || refBlockHash(32) || nonce(8, little-endian). It MUST be
+// the LAST field in tx_extra so the nonce is the final 8 bytes — letting a phone
+// grind nonces without re-serializing the whole transaction.
+struct TransactionExtraPow {
+  Crypto::Hash refBlockHash;
+  uint64_t     nonce;
+};
+
 // tx_extra_field format, except tx_extra_padding and tx_extra_pub_key:
 //   varint tag;
 //   varint size;
 //   varint data[];
-typedef boost::variant<TransactionExtraPadding, TransactionExtraPublicKey, TransactionExtraNonce, TransactionExtraMergeMiningTag, TransactionExtraAccountRegistration> TransactionExtraField;
+typedef boost::variant<TransactionExtraPadding, TransactionExtraPublicKey, TransactionExtraNonce, TransactionExtraMergeMiningTag, TransactionExtraAccountRegistration, TransactionExtraPqAccountRegistration, TransactionExtraPow> TransactionExtraField;
 
 
 
@@ -98,5 +120,17 @@ bool parsePaymentId(const std::string& paymentIdString, Crypto::Hash& paymentId)
 bool addAccountRegistrationToExtra(std::vector<uint8_t>& tx_extra, const Crypto::PublicKey& spendKey, const Crypto::PublicKey& viewKey);
 bool getAccountRegistrationFromExtra(const std::vector<uint8_t>& tx_extra, TransactionExtraAccountRegistration& reg);
 bool isWellFormedAccountRegistration(const std::vector<uint8_t>& tx_extra);
+
+// PQ account registration (tag 0x05).
+bool addPqAccountRegistrationToExtra(std::vector<uint8_t>& tx_extra, const std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>& viewPub);
+bool getPqAccountRegistrationFromExtra(const std::vector<uint8_t>& tx_extra, TransactionExtraPqAccountRegistration& reg);
+
+// PQ anti-spam PoW tag (tag 0x06). appendPowTagToExtra MUST be the final write
+// into tx_extra; the layout guarantees the nonce occupies the last 8 bytes.
+bool appendPowTagToExtra(std::vector<uint8_t>& tx_extra, const TransactionExtraPow& pow);
+bool getPowTagFromExtra(const std::vector<uint8_t>& tx_extra, TransactionExtraPow& pow);
+// True iff the PoW tag is present exactly once and is the last field in tx_extra
+// (so the nonce is the final 8 bytes). Required for free-reg validity (spec §11.2).
+bool isPowTagLastField(const std::vector<uint8_t>& tx_extra);
 
 }
