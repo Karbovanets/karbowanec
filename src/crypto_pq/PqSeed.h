@@ -23,22 +23,32 @@
 
 #include "PqHash.h"
 #include "PqKem.h"
+#include "PqDsa.h"
 
-// Wallet seed -> view-key derivation chain for the Karbo PQ transaction family
-// (spec §4). This is a CEMENTED v4 surface: recovery from a seed must always
-// produce the same view keypair, so the derivation never changes.
+// Wallet seed -> key derivation chain for the Karbo PQ transaction family.
+// CEMENTED v2 surface: recovery from a seed must always produce the same keys.
 //
 //   seed_master  (32 bytes, BIP39 or CSPRNG)
-//   view_seed    = HKDF-SHA3-256(seed_master, salt=0, info="karbo-pq-view-root-v1", L=64)
-//   (view_pub, view_sk) = ML-KEM-768.KeyGen(seed = view_seed)
-//   spend_root   = HKDF-SHA3-256(seed_master, salt=0, info="karbo-pq-spend-root-v1", L=32)
-//                  // reserved; UNUSED in Phase 1
 //
-// SPEC DEVIATION (decided 2026-06-04): the spec text derives view_seed at L=32,
-// but FIPS 203 ML-KEM.KeyGen consumes 64 bytes of randomness (d || z). The spec
-// is under-specified on the 32->64 bridge. We resolve it by deriving view_seed
-// directly at L=64 and feeding all 64 bytes to KeyGen — one derivation, no extra
-// domain string. This is the cemented behaviour for v4.
+//   view branch (scanning / stealth delivery):
+//     view_seed  = HKDF-SHA3-256(seed_master, salt=0, info="karbo-pq-view-root-v1", L=64)
+//     (view_pub, view_sk) = ML-KEM-768.KeyGen(seed = view_seed)
+//
+//   spend branch (spending authority):
+//     spend_seed = HKDF-SHA3-256(seed_master, salt=0, info="karbo-pq-spend-root-v1", L=32)
+//     (spend_pub, spend_sk) = ML-DSA-65.KeyGen(xi = spend_seed)
+//
+// OWNERSHIP-MODEL FIX (decided 2026-06-04, deviates from draft spec §4/§6):
+// the draft derived the per-output spend key from the ML-KEM shared secret ss
+// alone. Because the SENDER computes ss via Encaps, the sender could also derive
+// the spend key and spend the output it sent — every payment was clawable. We
+// fix this by giving each identity a LONG-TERM ML-DSA-65 spend keypair (this
+// "spend branch", formerly reserved). The spend public key lives in the address;
+// only the holder of spend_sk can sign a spend. See docs/PQ-OWNERSHIP-FIX.md.
+//
+// L note: ML-DSA.KeyGen takes a 32-byte xi (FIPS 204), so the spend branch uses
+// L=32 directly. The view branch uses L=64 because FIPS 203 ML-KEM.KeyGen
+// consumes 64 bytes (d || z) — see the view_seed note above.
 
 namespace CryptoPQ {
 
@@ -46,16 +56,18 @@ constexpr char kDomainViewRoot[]  = "karbo-pq-view-root-v1";
 constexpr char kDomainSpendRoot[] = "karbo-pq-spend-root-v1";
 
 using SeedMaster = std::array<uint8_t, 32>;
-using SpendRoot  = Hash256;  // 32 bytes, reserved
 
-// view_seed: the 64-byte ML-KEM keypair seed (see deviation note above).
+// view_seed: the 64-byte ML-KEM keypair seed.
 KemKeypairSeed deriveViewSeed(const SeedMaster& seedMaster) noexcept;
 
-// Full view keypair derived deterministically from the master seed.
+// Full view keypair (scanning) derived deterministically from the master seed.
 std::pair<KemPublicKey, KemSecretKey> deriveViewKeys(const SeedMaster& seedMaster);
 
-// spend_root — derived and exposed for forward compatibility; NOT used by any
-// Phase 1 validation or wallet path.
-SpendRoot deriveSpendRoot(const SeedMaster& seedMaster) noexcept;
+// spend_seed: the 32-byte ML-DSA keypair seed (xi).
+DsaKeypairSeed deriveSpendSeed(const SeedMaster& seedMaster) noexcept;
+
+// Long-term ML-DSA spend keypair (spending authority) derived from the master
+// seed. spend_pub goes in the address; spend_sk authorizes spends.
+std::pair<DsaPublicKey, DsaSecretKey> deriveSpendKeys(const SeedMaster& seedMaster);
 
 }  // namespace CryptoPQ

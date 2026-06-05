@@ -22,21 +22,30 @@
 #include <string>
 
 #include "crypto_pq/PqKem.h"
+#include "crypto_pq/PqDsa.h"
 
-// PQ address (spec §3). CEMENTED v4 surface — the layout and checksum never
-// change. The string encoding (base58 vs bech32m) is still an open item, so we
-// support both behind a runtime selector until the choice is finalized.
+// PQ address (spec §3, amended). CEMENTED v2 surface — the layout and checksum
+// never change. The string encoding (base58 vs bech32m) is still an open item,
+// so we support both behind a runtime selector until the choice is finalized.
+//
+// The address carries TWO public keys:
+//   * viewPub  (ML-KEM-768, 1184 B) — stealth delivery / scanning.
+//   * spendPub (ML-DSA-65,  1952 B) — spending authority. Added by the
+//     ownership-model fix (docs/PQ-OWNERSHIP-FIX.md): only the holder of the
+//     matching spend secret can spend, so the sender cannot claw payments back.
 //
 // Wire layout fed to the encoder:
-//   version (1) || varint(networkPrefix) || viewPub (1184) || checksum (4)
-// checksum = first 4 bytes of SHA3-256(version || varint(networkPrefix) || viewPub)
+//   version (1) || varint(networkPrefix) || viewPub (1184) || spendPub (1952) || checksum (4)
+// checksum = first 4 bytes of
+//   SHA3-256(version || varint(networkPrefix) || viewPub || spendPub)
 
 namespace CryptoNote {
 
 struct PqAddress {
   uint8_t                            version = 0x01;
   uint64_t                           networkPrefix = 0;
-  std::array<uint8_t, CryptoPQ::kKemPublicKeyBytes> viewPub{};  // 1184
+  std::array<uint8_t, CryptoPQ::kKemPublicKeyBytes> viewPub{};   // 1184
+  std::array<uint8_t, CryptoPQ::kDsaPublicKeyBytes> spendPub{};  // 1952
   std::array<uint8_t, 4>             checksum{};
 };
 
@@ -47,7 +56,8 @@ enum class PqAddressEncoding {
 
 // Build an address from its parts, filling version=1 and the derived checksum.
 PqAddress makePqAddress(uint64_t networkPrefix,
-                        const CryptoPQ::KemPublicKey& viewPub);
+                        const CryptoPQ::KemPublicKey& viewPub,
+                        const CryptoPQ::DsaPublicKey& spendPub);
 
 // The 4-byte checksum over (version || varint(networkPrefix) || viewPub).
 std::array<uint8_t, 4> pqAddressChecksum(const PqAddress& addr);

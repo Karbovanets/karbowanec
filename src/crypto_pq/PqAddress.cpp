@@ -49,12 +49,14 @@ bool readVarint(const std::string& s, std::size_t& pos, uint64_t& v) {
   return false;
 }
 
-// Bytes hashed for the checksum: version || varint(networkPrefix) || viewPub.
+// Bytes hashed for the checksum:
+//   version || varint(networkPrefix) || viewPub || spendPub.
 std::string checksumPreimage(const PqAddress& addr) {
   std::string m;
   m.push_back(static_cast<char>(addr.version));
   writeVarint(m, addr.networkPrefix);
   m.append(reinterpret_cast<const char*>(addr.viewPub.data()), addr.viewPub.size());
+  m.append(reinterpret_cast<const char*>(addr.spendPub.data()), addr.spendPub.size());
   return m;
 }
 
@@ -70,9 +72,11 @@ bool parsePayload(const std::string& p, PqAddress& out) {
   if (p.empty()) return false;
   out.version = static_cast<uint8_t>(p[pos++]);
   if (!readVarint(p, pos, out.networkPrefix)) return false;
-  if (p.size() - pos != out.viewPub.size() + 4) return false;
+  if (p.size() - pos != out.viewPub.size() + out.spendPub.size() + 4) return false;
   std::memcpy(out.viewPub.data(), p.data() + pos, out.viewPub.size());
   pos += out.viewPub.size();
+  std::memcpy(out.spendPub.data(), p.data() + pos, out.spendPub.size());
+  pos += out.spendPub.size();
   std::memcpy(out.checksum.data(), p.data() + pos, 4);
   // Verify checksum.
   return pqAddressChecksum(out) == out.checksum;
@@ -186,11 +190,14 @@ std::array<uint8_t, 4> pqAddressChecksum(const PqAddress& addr) {
   return chk;
 }
 
-PqAddress makePqAddress(uint64_t networkPrefix, const CryptoPQ::KemPublicKey& viewPub) {
+PqAddress makePqAddress(uint64_t networkPrefix,
+                        const CryptoPQ::KemPublicKey& viewPub,
+                        const CryptoPQ::DsaPublicKey& spendPub) {
   PqAddress a;
   a.version = 0x01;
   a.networkPrefix = networkPrefix;
   a.viewPub = viewPub;
+  a.spendPub = spendPub;
   a.checksum = pqAddressChecksum(a);
   return a;
 }

@@ -68,28 +68,12 @@ TEST(PqDerive, OutContext) {
               "2d8b4e207f8cd9b052e4ebd6e6a752b4a6f1363e52481a00445c8cec0a2f8615");
 }
 
-TEST(PqDerive, SpendSeed) {
-    Hash256 ih = inputsHash(fixedInputs());
-    Hash256 oc = outContext(ih, pat<1088>(7, 3), 1);
-    KemShared ss = pat<32>(1, 0);
-    EXPECT_EQ(to_hex(deriveSpendSeed(ss, oc)),
-              "64f4dd994f27b62861feb57217a235cab9a05e2da32b9633f2b84317f507d671");
-}
-
 TEST(PqDerive, AeadKey) {
     Hash256 ih = inputsHash(fixedInputs());
     Hash256 oc = outContext(ih, pat<1088>(7, 3), 1);
     KemShared ss = pat<32>(1, 0);
     EXPECT_EQ(to_hex(deriveAeadKey(ss, oc)),
               "e93bdb04989a7a2833eea56830bb5d5091d2b4ecda8b0754a0abf8d69b0225c9");
-}
-
-TEST(PqDerive, SpendSeedAndAeadKeyDiffer) {
-    // Same IKM + out_context, different info domain -> independent keys.
-    Hash256 ih = inputsHash(fixedInputs());
-    Hash256 oc = outContext(ih, pat<1088>(7, 3), 1);
-    KemShared ss = pat<32>(1, 0);
-    EXPECT_NE(deriveSpendSeed(ss, oc), deriveAeadKey(ss, oc));
 }
 
 TEST(PqDerive, SpendCommit) {
@@ -121,7 +105,7 @@ TEST(PqDerive, TxSigningDigest) {
     Hash256 sc = spendCommit(pk, rho);
 
     UnsignedTx tx;
-    tx.version = 4;
+    tx.version = 2;  // TRANSACTION_VERSION_PQ
     tx.fee = 12345;
 
     DigestInput di;
@@ -140,7 +124,7 @@ TEST(PqDerive, TxSigningDigest) {
     tx.outputs.push_back(out);
 
     EXPECT_EQ(to_hex(txSigningDigest(tx)),
-              "586ee9aba67d7fdf5fa810a6daeda929fa86032db86eb4e248d47ecc21527722");
+              "7d6a2e0c67518c04002915b7dd0e80a868c3254dcb3f780047f322137be02516");
 }
 
 TEST(PqDerive, TxSigningDigestIsTamperSensitive) {
@@ -148,7 +132,7 @@ TEST(PqDerive, TxSigningDigestIsTamperSensitive) {
     Rho rho = pat<32>(3, 9);
 
     UnsignedTx tx;
-    tx.version = 4;
+    tx.version = 2;  // TRANSACTION_VERSION_PQ
     tx.fee = 12345;
     DigestInput di; di.prevTxid = pat<32>(1, 0); di.prevOutIndex = 7;
     di.authPub = pk; di.rhoReveal = rho;
@@ -177,7 +161,7 @@ TEST(PqDerive, TxSigningDigestIsTamperSensitive) {
 TEST(PqDerive, ReservedCtMaskNamespaceUnused) {
     const std::string reserved = kReservedCtMask;
     const char* used[] = {
-        kDomainInputsHash, kDomainOutContext, kDomainSpendSeed, kDomainAeadKey,
+        kDomainInputsHash, kDomainOutContext, kDomainAeadKey,
         kDomainSpendCommit, kDomainNullifier, kDomainTxSign,
     };
     for (const char* tag : used) {

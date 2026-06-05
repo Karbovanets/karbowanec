@@ -44,7 +44,6 @@ namespace CryptoPQ {
 // Bytes hashed are the string contents WITHOUT a trailing NUL.
 constexpr char kDomainInputsHash[]  = "karbo-pq-inputs-hash-v1";
 constexpr char kDomainOutContext[]  = "karbo-pq-out-context-v1";
-constexpr char kDomainSpendSeed[]   = "karbo-pq-spend-seed-v1";
 constexpr char kDomainAeadKey[]     = "karbo-pq-aead-key-v1";
 constexpr char kDomainSpendCommit[] = "karbo-pq-spend-commit-v1";
 constexpr char kDomainNullifier[]   = "karbo-pq-nullifier-v1";
@@ -55,6 +54,12 @@ constexpr char kDomainTxSign[]      = "karbo-pq-tx-sign-v1";
 constexpr char kReservedCtMask[]    = "karbo-pq-ct-mask-v1";
 
 using Rho = std::array<uint8_t, 32>;
+
+// NOTE (ownership-model fix, docs/PQ-OWNERSHIP-FIX.md): the "spend public key"
+// bound by spendCommit / nullifier / revealed as authPub is the recipient's
+// LONG-TERM ML-DSA-65 spend key (from the address), NOT a per-output key derived
+// from the KEM shared secret. The draft's per-output spend_seed derivation was
+// removed because the sender (who knows ss) could reconstruct it and spend.
 
 // One referenced UTXO, in the transaction's canonical input order.
 struct InputRef {
@@ -82,7 +87,7 @@ struct DigestOutput {
 // An unsigned PQ transaction body, the input to the ML-DSA signing digest.
 // (Session 5 will build this from the on-wire types.)
 struct UnsignedTx {
-  uint8_t                   version = 4;
+  uint8_t                   version = 2;  // TRANSACTION_VERSION_PQ
   std::vector<DigestInput>  inputs;
   std::vector<DigestOutput> outputs;
   uint64_t                  fee = 0;
@@ -97,19 +102,21 @@ Hash256 outContext(const Hash256& inputsHash,
                    const KemCiphertext& kemCt,
                    uint32_t outputIndex) noexcept;
 
-// 3. spendSeed = HKDF-SHA3-256(IKM=ss, salt=0, info=domain || outContext, L=32).
-Hash256 deriveSpendSeed(const KemShared& ss, const Hash256& outContext) noexcept;
-
-// 4. aeadKey = HKDF-SHA3-256(IKM=ss, salt=0, info=domain || outContext, L=32).
+// 3. aeadKey = HKDF-SHA3-256(IKM=ss, salt=0, info=domain || outContext, L=32).
+//    Encrypts/decrypts the per-output rho delivered to the recipient.
 Hash256 deriveAeadKey(const KemShared& ss, const Hash256& outContext) noexcept;
 
-// 5. spendCommit = SHA3-256(domain || pk_i || rho).
-Hash256 spendCommit(const DsaPublicKey& pkI, const Rho& rho) noexcept;
+// 4. spendCommit = SHA3-256(domain || spendPub || rho). spendPub is the
+//    recipient's long-term ML-DSA spend public key (from the address).
+Hash256 spendCommit(const DsaPublicKey& spendPub, const Rho& rho) noexcept;
 
-// 6. nullifier = SHA3-256(domain || pk_i || rho). Node-side only; never serialized.
-Hash256 nullifier(const DsaPublicKey& pkI, const Rho& rho) noexcept;
+// 5. nullifier = SHA3-256(domain || spendPub || rho). Node-side only; never
+//    serialized. rho makes it unique per output, so reusing one spend key across
+//    many outputs still yields distinct nullifiers.
+Hash256 nullifier(const DsaPublicKey& spendPub, const Rho& rho) noexcept;
 
-// 7. txSigningDigest — exact byte order per spec §8.1.
+// 6. txSigningDigest — exact byte order per spec §8.1. Each input's authPub is
+//    the long-term spend public key revealed at spend time.
 Hash256 txSigningDigest(const UnsignedTx& tx) noexcept;
 
 }  // namespace CryptoPQ

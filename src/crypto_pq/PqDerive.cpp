@@ -73,14 +73,6 @@ Hash256 outContext(const Hash256& inputsHash,
   return sha3_256(buf.data(), buf.size());
 }
 
-Hash256 deriveSpendSeed(const KemShared& ss, const Hash256& outContext) noexcept {
-  std::vector<uint8_t> info;
-  info.reserve(sizeof(kDomainSpendSeed) + outContext.size());
-  appendDomain(info, kDomainSpendSeed);
-  appendBytes(info, outContext.data(), outContext.size());
-  return hkdf_sha3_256(ss.data(), ss.size(), info.data(), info.size());
-}
-
 Hash256 deriveAeadKey(const KemShared& ss, const Hash256& outContext) noexcept {
   std::vector<uint8_t> info;
   info.reserve(sizeof(kDomainAeadKey) + outContext.size());
@@ -89,20 +81,20 @@ Hash256 deriveAeadKey(const KemShared& ss, const Hash256& outContext) noexcept {
   return hkdf_sha3_256(ss.data(), ss.size(), info.data(), info.size());
 }
 
-Hash256 spendCommit(const DsaPublicKey& pkI, const Rho& rho) noexcept {
+Hash256 spendCommit(const DsaPublicKey& spendPub, const Rho& rho) noexcept {
   std::vector<uint8_t> buf;
-  buf.reserve(sizeof(kDomainSpendCommit) + pkI.size() + rho.size());
+  buf.reserve(sizeof(kDomainSpendCommit) + spendPub.size() + rho.size());
   appendDomain(buf, kDomainSpendCommit);
-  appendBytes(buf, pkI.data(), pkI.size());
+  appendBytes(buf, spendPub.data(), spendPub.size());
   appendBytes(buf, rho.data(), rho.size());
   return sha3_256(buf.data(), buf.size());
 }
 
-Hash256 nullifier(const DsaPublicKey& pkI, const Rho& rho) noexcept {
+Hash256 nullifier(const DsaPublicKey& spendPub, const Rho& rho) noexcept {
   std::vector<uint8_t> buf;
-  buf.reserve(sizeof(kDomainNullifier) + pkI.size() + rho.size());
+  buf.reserve(sizeof(kDomainNullifier) + spendPub.size() + rho.size());
   appendDomain(buf, kDomainNullifier);
-  appendBytes(buf, pkI.data(), pkI.size());
+  appendBytes(buf, spendPub.data(), spendPub.size());
   appendBytes(buf, rho.data(), rho.size());
   return sha3_256(buf.data(), buf.size());
 }
