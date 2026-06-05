@@ -42,6 +42,7 @@ add_executable(PqSeedAddressTests test_pq_seed_address.cpp)
 add_executable(PqExtraTests test_pq_extra.cpp)
 add_executable(PqWireTests test_pq_wire.cpp)
 add_executable(PqOutputBuilderTests test_pq_output_builder.cpp)
+add_executable(PqScanTests test_pq_scan.cpp)
 
 target_link_libraries(CoreTests TestGenerator Wallet CryptoNoteCore Serialization System Logging Common Crypto BlockchainExplorer Checkpoints ${Boost_LIBRARIES})
 target_link_libraries(CryptoTests Crypto Common ${Boost_LIBRARIES})
@@ -62,6 +63,7 @@ target_link_libraries(PqSeedAddressTests CryptoPq gtest ${Boost_LIBRARIES})
 target_link_libraries(PqExtraTests CryptoNoteCore Serialization System Logging Common Crypto gtest ${Boost_LIBRARIES})
 target_link_libraries(PqWireTests CryptoNoteCore Serialization System Logging Common Crypto gtest ${Boost_LIBRARIES})
 target_link_libraries(PqOutputBuilderTests CryptoPq gtest ${Boost_LIBRARIES})
+target_link_libraries(PqScanTests CryptoPq gtest ${Boost_LIBRARIES})
 
 if(MSVC)
   target_link_libraries(SystemTests ws2_32)
@@ -119,6 +121,7 @@ set_property(TARGET
   PqExtraTests
   PqWireTests
   PqOutputBuilderTests
+  PqScanTests
 PROPERTY FOLDER "tests")
 
 add_dependencies(IntegrationTestLibrary version)
@@ -141,6 +144,7 @@ set_property(TARGET PqSeedAddressTests PROPERTY OUTPUT_NAME "pq_seed_address_tes
 set_property(TARGET PqExtraTests PROPERTY OUTPUT_NAME "pq_extra_tests")
 set_property(TARGET PqWireTests PROPERTY OUTPUT_NAME "pq_wire_tests")
 set_property(TARGET PqOutputBuilderTests PROPERTY OUTPUT_NAME "pq_output_builder_tests")
+set_property(TARGET PqScanTests PROPERTY OUTPUT_NAME "pq_scan_tests")
 
 add_test(CoreTests core_tests --generate_and_play_test_data)
 add_test(CryptoTests crypto_tests ${CMAKE_CURRENT_SOURCE_DIR}/crypto/tests.txt)
@@ -157,4 +161,5 @@ add_test(PqSeedAddressTests pq_seed_address_tests)
 add_test(PqExtraTests pq_extra_tests)
 add_test(PqWireTests pq_wire_tests)
 add_test(PqOutputBuilderTests pq_output_builder_tests)
+add_test(PqScanTests pq_scan_tests)
 add_test(LMDBReorgTests lmdb_reorg_tests)
