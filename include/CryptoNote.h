@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 #include <boost/variant.hpp>
 #include "android.h"
@@ -38,9 +40,37 @@ struct KeyOutput {
   Crypto::PublicKey key;
 };
 
-typedef boost::variant<BaseInput, KeyInput> TransactionInput;
+// --- PQ Phase 1 wire types (transaction version 2) ------------------------
+// Plain amounts: the value lives in the enclosing TransactionOutput.amount.
+// Fixed-size byte blobs (consensus-enforced lengths). Stored as vectors so the
+// variant stays small; the serializer reads/writes exactly these many bytes.
+constexpr size_t PQ_KEM_CIPHERTEXT_SIZE = 1088;  // ML-KEM-768 ciphertext
+constexpr size_t PQ_ENC_PAYLOAD_SIZE    = 48;    // ChaCha20-Poly1305(rho) = 32 ct + 16 tag
+constexpr size_t PQ_AUTH_PUB_SIZE       = 1952;  // ML-DSA-65 public (spend) key
+constexpr size_t PQ_RHO_SIZE            = 32;
+constexpr size_t PQ_SIGNATURE_SIZE      = 3309;  // ML-DSA-65 signature
 
-typedef boost::variant<KeyOutput> TransactionOutputTarget;
+// One PQ input. The ML-DSA signature lives INSIDE the input (not in the legacy
+// Transaction.signatures vector). authPub is the spender's long-term ML-DSA
+// spend public key (see docs/PQ-OWNERSHIP-FIX.md).
+struct PqInput {
+  Crypto::Hash         prevTxid;
+  uint32_t             prevOutIndex;
+  std::vector<uint8_t> authPub;     // PQ_AUTH_PUB_SIZE
+  std::vector<uint8_t> rhoReveal;   // PQ_RHO_SIZE
+  std::vector<uint8_t> signature;   // PQ_SIGNATURE_SIZE
+};
+
+// One PQ output target. amount is plain (in TransactionOutput.amount).
+struct PqOutput {
+  std::vector<uint8_t> kemCt;       // PQ_KEM_CIPHERTEXT_SIZE
+  std::vector<uint8_t> encPayload;  // PQ_ENC_PAYLOAD_SIZE
+  Crypto::Hash         spendCommit; // SHA3-256(spend_pub || rho)
+};
+
+typedef boost::variant<BaseInput, KeyInput, PqInput> TransactionInput;
+
+typedef boost::variant<KeyOutput, PqOutput> TransactionOutputTarget;
 
 struct TransactionOutput {
   uint64_t amount;
@@ -51,6 +81,9 @@ using TransactionInputs = std::vector<TransactionInput>;
 
 struct TransactionPrefix {
   uint8_t version;
+  // PQ sub-type (TX_PQ / TX_BRIDGE / TX_FREE_REG). Only present on the wire for
+  // version >= TRANSACTION_VERSION_PQ; 0 for legacy v1.
+  uint8_t txType = 0;
   uint64_t unlockTime;
   TransactionInputs inputs;
   std::vector<TransactionOutput> outputs;

@@ -40,6 +40,7 @@ add_executable(PqPrimitivesTests test_pq_primitives.cpp)
 add_executable(PqDeriveTests test_pq_derive.cpp)
 add_executable(PqSeedAddressTests test_pq_seed_address.cpp)
 add_executable(PqExtraTests test_pq_extra.cpp)
+add_executable(PqWireTests test_pq_wire.cpp)
 
 target_link_libraries(CoreTests TestGenerator Wallet CryptoNoteCore Serialization System Logging Common Crypto BlockchainExplorer Checkpoints ${Boost_LIBRARIES})
 target_link_libraries(CryptoTests Crypto Common ${Boost_LIBRARIES})
@@ -58,6 +59,7 @@ target_link_libraries(PqPrimitivesTests CryptoPq gtest ${Boost_LIBRARIES})
 target_link_libraries(PqDeriveTests CryptoPq gtest ${Boost_LIBRARIES})
 target_link_libraries(PqSeedAddressTests CryptoPq gtest ${Boost_LIBRARIES})
 target_link_libraries(PqExtraTests CryptoNoteCore Serialization System Logging Common Crypto gtest ${Boost_LIBRARIES})
+target_link_libraries(PqWireTests CryptoNoteCore Serialization System Logging Common Crypto gtest ${Boost_LIBRARIES})
 
 if(MSVC)
   target_link_libraries(SystemTests ws2_32)
@@ -74,6 +76,7 @@ if(MSVC)
   target_link_libraries(IntegrationTests legacy_stdio_definitions.lib ${OPENSSL_LIBRARIES} ws2_32)
   target_link_libraries(TransfersTests legacy_stdio_definitions.lib ${OPENSSL_LIBRARIES} ws2_32)
   target_link_libraries(PqExtraTests legacy_stdio_definitions.lib ws2_32)
+  target_link_libraries(PqWireTests legacy_stdio_definitions.lib ws2_32)
 endif()
 
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR APPLE AND NOT ANDROID)
@@ -112,6 +115,7 @@ set_property(TARGET
   PqDeriveTests
   PqSeedAddressTests
   PqExtraTests
+  PqWireTests
 PROPERTY FOLDER "tests")
 
 add_dependencies(IntegrationTestLibrary version)
@@ -132,6 +136,7 @@ set_property(TARGET PqPrimitivesTests PROPERTY OUTPUT_NAME "pq_primitives_tests"
 set_property(TARGET PqDeriveTests PROPERTY OUTPUT_NAME "pq_derive_tests")
 set_property(TARGET PqSeedAddressTests PROPERTY OUTPUT_NAME "pq_seed_address_tests")
 set_property(TARGET PqExtraTests PROPERTY OUTPUT_NAME "pq_extra_tests")
+set_property(TARGET PqWireTests PROPERTY OUTPUT_NAME "pq_wire_tests")
 
 add_test(CoreTests core_tests --generate_and_play_test_data)
 add_test(CryptoTests crypto_tests ${CMAKE_CURRENT_SOURCE_DIR}/crypto/tests.txt)
@@ -146,4 +151,5 @@ add_test(PqPrimitivesTests pq_primitives_tests)
 add_test(PqDeriveTests pq_derive_tests)
 add_test(PqSeedAddressTests pq_seed_address_tests)
 add_test(PqExtraTests pq_extra_tests)
+add_test(PqWireTests pq_wire_tests)
 add_test(LMDBReorgTests lmdb_reorg_tests)

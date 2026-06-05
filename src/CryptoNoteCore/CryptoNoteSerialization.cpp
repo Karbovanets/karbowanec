@@ -49,6 +49,8 @@ size_t getSignaturesCount(const TransactionInput& input) {
   struct txin_signature_size_visitor : public boost::static_visitor < size_t > {
     size_t operator()(const BaseInput& txin) const { return 0; }
     size_t operator()(const KeyInput& txin) const { return txin.outputIndexes.size(); }
+    // PQ inputs carry their ML-DSA signature inline, not in Transaction.signatures.
+    size_t operator()(const PqInput& txin) const { return 0; }
   };
 
   return boost::apply_visitor(txin_signature_size_visitor(), input);
@@ -57,7 +59,9 @@ size_t getSignaturesCount(const TransactionInput& input) {
 struct BinaryVariantTagGetter: boost::static_visitor<uint8_t> {
   uint8_t operator()(const CryptoNote::BaseInput) { return  0xff; }
   uint8_t operator()(const CryptoNote::KeyInput) { return  0x2; }
+  uint8_t operator()(const CryptoNote::PqInput) { return  0x10; }
   uint8_t operator()(const CryptoNote::KeyOutput) { return  0x2; }
+  uint8_t operator()(const CryptoNote::PqOutput) { return  0x10; }
   uint8_t operator()(const CryptoNote::Transaction) { return  0xcc; }
   uint8_t operator()(const CryptoNote::Block) { return  0xbb; }
 };
@@ -86,6 +90,12 @@ void getVariantValue(CryptoNote::ISerializer& serializer, uint8_t tag, CryptoNot
     in = v;
     break;
   }
+  case 0x10: {
+    CryptoNote::PqInput v;
+    serializer(v, "value");
+    in = v;
+    break;
+  }
   default:
     throw std::runtime_error("Unknown variant tag");
   }
@@ -95,6 +105,12 @@ void getVariantValue(CryptoNote::ISerializer& serializer, uint8_t tag, CryptoNot
   switch(tag) {
   case 0x2: {
     CryptoNote::KeyOutput v;
+    serializer(v, "data");
+    out = v;
+    break;
+  }
+  case 0x10: {
+    CryptoNote::PqOutput v;
     serializer(v, "data");
     out = v;
     break;
@@ -170,8 +186,17 @@ namespace CryptoNote {
 void serialize(TransactionPrefix& txP, ISerializer& serializer) {
   serializer(txP.version, "version");
 
-  if (CURRENT_TRANSACTION_VERSION < txP.version) {
+  if (txP.version > TRANSACTION_VERSION_PQ) {
     throw std::runtime_error("Wrong transaction version");
+  }
+
+  // The PQ sub-type byte is present only from transaction version 2 onward.
+  // Legacy v1 transactions have no txType on the wire (and it stays 0), so the
+  // prefix hash of historical transactions is unchanged.
+  if (txP.version >= TRANSACTION_VERSION_PQ) {
+    serializer(txP.txType, "tx_type");
+  } else {
+    txP.txType = 0;
   }
 
   serializer(txP.unlockTime, "unlock_time");
@@ -255,6 +280,27 @@ void serialize(KeyInput& key, ISerializer& serializer) {
   serializer(key.keyImage, "k_image");
 }
 
+// Fixed-length byte blob: exactly `expected` bytes, no length prefix. On read
+// the buffer is resized and exactly that many bytes are consumed; on write the
+// buffer must already be `expected` bytes (consensus well-formedness). This is
+// how the PQ field-length checks are enforced.
+static void serializePqBlob(std::vector<uint8_t>& v, size_t expected, Common::StringView name, ISerializer& serializer) {
+  if (serializer.type() == ISerializer::INPUT) {
+    v.resize(expected);
+  } else if (v.size() != expected) {
+    throw std::runtime_error("PQ wire field has wrong size");
+  }
+  serializer.binary(v.data(), expected, name);
+}
+
+void serialize(PqInput& key, ISerializer& serializer) {
+  serializer(key.prevTxid, "prev_txid");
+  serializer(key.prevOutIndex, "prev_out_index");
+  serializePqBlob(key.authPub,   PQ_AUTH_PUB_SIZE,   "auth_pub",   serializer);
+  serializePqBlob(key.rhoReveal, PQ_RHO_SIZE,        "rho_reveal", serializer);
+  serializePqBlob(key.signature, PQ_SIGNATURE_SIZE,  "signature",  serializer);
+}
+
 void serialize(TransactionInputs & inputs, ISerializer & serializer) {
   serializer(inputs, "vin");
 }
@@ -282,6 +328,12 @@ void serialize(TransactionOutputTarget& output, ISerializer& serializer) {
 
 void serialize(KeyOutput& key, ISerializer& serializer) {
   serializer(key.key, "key");
+}
+
+void serialize(PqOutput& output, ISerializer& serializer) {
+  serializePqBlob(output.kemCt,      PQ_KEM_CIPHERTEXT_SIZE, "kem_ct",      serializer);
+  serializePqBlob(output.encPayload, PQ_ENC_PAYLOAD_SIZE,    "enc_payload", serializer);
+  serializer(output.spendCommit, "spend_commit");
 }
 
 void serialize(ParentBlockSerializer& pbs, ISerializer& serializer) {
