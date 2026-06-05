@@ -19,9 +19,10 @@
 
 #include <cstddef>
 
-// Cryptographically secure random bytes for the PQ layer. Backed by liboqs's
-// CSPRNG (the OS entropy source) — NOT the std::mt19937 in src/crypto/random.h,
-// which is predictable and unfit for secret material like the per-output rho.
+// Cryptographically secure random bytes for the PQ layer. Thin wrapper over the
+// shared OS-CSPRNG helper ::secure_random_bytes (src/crypto/crypto-util.c) —
+// the same source the rest of the crypto/wallet stack uses after the RNG fix
+// ported from the CT work. Suitable for secret material like the per-output rho.
 
 namespace CryptoPQ {
 

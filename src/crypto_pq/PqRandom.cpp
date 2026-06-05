@@ -17,17 +17,17 @@
 
 #include "PqRandom.h"
 
-#include <cstdint>
-
 extern "C" {
-#include <oqs/rand.h>
+#include "crypto/crypto-util.h"
 }
 
 namespace CryptoPQ {
 
 void secure_random_bytes(void* out, std::size_t len) {
-  // liboqs defaults to the platform CSPRNG (getrandom / BCryptGenRandom).
-  OQS_randombytes(static_cast<uint8_t*>(out), len);
+  // Route through the shared OS-CSPRNG helper (src/crypto/crypto-util.c),
+  // the same source the rest of the crypto/wallet stack uses. Keeps all
+  // randomness on one vetted path rather than a parallel mechanism.
+  ::secure_random_bytes(out, len);
 }
 
 }  // namespace CryptoPQ
