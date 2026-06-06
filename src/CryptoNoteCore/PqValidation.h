@@ -53,6 +53,19 @@ struct PqResolvedInput {
 //  - unlockTime == 0; legacy signatures vector empty
 bool checkPqTransactionSemantic(const Transaction& tx, std::string* error);
 
+// Context-free shape checks for one v2 TX_BRIDGE transaction (one-way legacy ->
+// PQ migration). The input side is classical (KeyInput + ring signatures,
+// validated by the existing v1 path); only the bridge-specific shape is checked
+// here:
+//  - subtype == TX_BRIDGE
+//  - non-empty; every input is a KeyInput (no PqInput); every output is a
+//    PqOutput (no classical output) -> one-way, no mixed families
+//  - outputs <= MAX_PQ_OUTPUTS_PER_TX; PqOutput field lengths exact; amount != 0
+//  - unlockTime == 0; serialized size <= MAX_PQ_TX_SIZE
+// Balance, ring signatures, key-image double-spend and fee floor are enforced by
+// the classical pipeline (check_tx_semantic / checkTransactionInputs).
+bool checkBridgeTransactionSemantic(const Transaction& tx, std::string* error);
+
 // Context-free input/balance/signature checks given resolved referenced outputs
 // (resolved[i] corresponds to tx.inputs[i]). On success, *outNullifiers (if not
 // null) is filled with each input's nullifier so the caller can test them

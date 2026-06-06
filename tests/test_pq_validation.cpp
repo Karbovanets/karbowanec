@@ -249,6 +249,88 @@ TEST(PqValidation, SemanticRejectsWrongFieldSize) {
     EXPECT_FALSE(checkPqTransactionSemantic(b.tx, &err));
 }
 
+// --- TX_BRIDGE semantic (classical inputs -> PQ outputs) -------------------
+
+namespace {
+
+PqOutput makeBridgePqOutput(uint64_t amount) {
+    CryptoPQ::SeedMaster mr = pat<32>(4, 1);
+    auto v = CryptoPQ::deriveViewKeys(mr);
+    auto s = CryptoPQ::deriveSpendKeys(mr);
+    CryptoPQ::Hash256 ih = pat<32>(1, 1);
+    CryptoPQ::PqBuiltOutput built =
+        CryptoPQ::buildPqOutput(v.first, s.first, ih, 0, amount);
+    PqOutput po;
+    po.kemCt = toVec(built.kemCt);
+    po.encPayload = built.encPayload;
+    std::memcpy(po.spendCommit.data, built.spendCommit.data(), 32);
+    return po;
+}
+
+Transaction makeBridgeTx() {
+    Transaction tx;
+    tx.version = TRANSACTION_VERSION_PQ;
+    tx.txType = TX_BRIDGE;
+    tx.unlockTime = 0;
+    KeyInput ki; ki.amount = 1000000; ki.outputIndexes = {0, 1};
+    ki.keyImage = Crypto::KeyImage{};
+    tx.inputs.push_back(ki);
+    TransactionOutput out; out.amount = 900000; out.target = makeBridgePqOutput(900000);
+    tx.outputs.push_back(out);
+    // Bridge keeps the classical ring-signature vector (validated downstream).
+    tx.signatures.resize(1);
+    return tx;
+}
+
+}  // namespace
+
+TEST(PqValidation, BridgeAcceptsValidShape) {
+    Transaction tx = makeBridgeTx();
+    std::string err;
+    EXPECT_TRUE(checkBridgeTransactionSemantic(tx, &err)) << err;
+}
+
+TEST(PqValidation, BridgeRejectsWrongSubtype) {
+    Transaction tx = makeBridgeTx();
+    tx.txType = TX_PQ;
+    std::string err;
+    EXPECT_FALSE(checkBridgeTransactionSemantic(tx, &err));
+}
+
+TEST(PqValidation, BridgeRejectsPqInput) {
+    Transaction tx = makeBridgeTx();
+    PqInput in;
+    in.prevTxid = hashPat(1, 0); in.prevOutIndex = 0;
+    in.authPub.assign(PQ_AUTH_PUB_SIZE, 0);
+    in.rhoReveal.assign(PQ_RHO_SIZE, 0);
+    in.signature.assign(PQ_SIGNATURE_SIZE, 0);
+    tx.inputs.push_back(in);  // mixing a PQ input into a bridge
+    std::string err;
+    EXPECT_FALSE(checkBridgeTransactionSemantic(tx, &err));
+}
+
+TEST(PqValidation, BridgeRejectsClassicalOutput) {
+    Transaction tx = makeBridgeTx();
+    TransactionOutput out; out.amount = 1; out.target = KeyOutput{};
+    tx.outputs.push_back(out);
+    std::string err;
+    EXPECT_FALSE(checkBridgeTransactionSemantic(tx, &err));
+}
+
+TEST(PqValidation, BridgeRejectsUnlockTime) {
+    Transaction tx = makeBridgeTx();
+    tx.unlockTime = 1;
+    std::string err;
+    EXPECT_FALSE(checkBridgeTransactionSemantic(tx, &err));
+}
+
+TEST(PqValidation, BridgeRejectsZeroAmountOutput) {
+    Transaction tx = makeBridgeTx();
+    tx.outputs[0].amount = 0;
+    std::string err;
+    EXPECT_FALSE(checkBridgeTransactionSemantic(tx, &err));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

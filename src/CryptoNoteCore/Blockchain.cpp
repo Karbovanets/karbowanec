@@ -36,6 +36,7 @@
 #include "CryptoNoteTools.h"
 #include "TransactionExtra.h"
 #include "PqValidation.h"
+#include "PqTxType.h"
 #include "crypto_pq/PqDerive.h"
 
 #include "../crypto/hash.h"
@@ -2064,10 +2065,22 @@ bool Blockchain::checkTransactionInputs(const Transaction& tx, uint32_t* pmax_us
 
 bool Blockchain::checkTransactionInputs(const Transaction& tx, const Crypto::Hash& tx_prefix_hash,
                                          uint32_t* pmax_used_block_height) {
-  // PQ (v2) transactions carry no legacy signatures and reference outputs by
-  // outpoint, not global index — they have their own input pipeline.
+  // PQ (v2) transactions. TX_PQ references outputs by outpoint and carries no
+  // legacy signatures — its own pipeline. TX_BRIDGE has classical (ring-signed)
+  // KeyInputs, so after a height gate it flows through the classical loop below.
   if (tx.version >= TRANSACTION_VERSION_PQ) {
-    return checkPqInputs(tx, pmax_used_block_height);
+    if (tx.txType == TX_PQ) {
+      return checkPqInputs(tx, pmax_used_block_height);
+    } else if (tx.txType == TX_BRIDGE) {
+      if (getBlockMajorVersionForHeight(getCurrentBlockchainHeight()) < BLOCK_MAJOR_VERSION_6) {
+        logger(INFO, BRIGHT_WHITE) << "bridge transaction seen before v6 activation, rejected: "
+                                   << getObjectHash(tx);
+        return false;
+      }
+      // fall through to the classical KeyInput validation loop
+    } else {
+      return false;
+    }
   }
 
   size_t inputIndex = 0;

@@ -146,6 +146,43 @@ bool checkPqTransactionSemantic(const Transaction& tx, std::string* error) {
   return true;
 }
 
+bool checkBridgeTransactionSemantic(const Transaction& tx, std::string* error) {
+  if (tx.txType != TX_BRIDGE) {
+    return fail(error, "not a TX_BRIDGE subtype");
+  }
+  if (tx.inputs.empty() || tx.outputs.empty()) {
+    return fail(error, "TX_BRIDGE with empty inputs or outputs");
+  }
+  if (tx.outputs.size() > parameters::MAX_PQ_OUTPUTS_PER_TX) {
+    return fail(error, "too many bridge PQ outputs");
+  }
+  if (tx.unlockTime != 0) {
+    return fail(error, "bridge tx must have unlockTime == 0");
+  }
+  // One-way: classical inputs only.
+  for (const auto& in : tx.inputs) {
+    if (in.type() != typeid(KeyInput)) {
+      return fail(error, "TX_BRIDGE input is not a classical KeyInput");
+    }
+  }
+  // Outputs must all be PQ.
+  for (const auto& out : tx.outputs) {
+    if (out.target.type() != typeid(PqOutput)) {
+      return fail(error, "TX_BRIDGE output is not a PqOutput");
+    }
+    if (out.amount == 0) {
+      return fail(error, "bridge PQ output with zero amount");
+    }
+    if (!pqOutputFieldsValid(boost::get<PqOutput>(out.target))) {
+      return fail(error, "bridge PqOutput field has wrong length");
+    }
+  }
+  if (toBinaryArray(tx).size() > parameters::MAX_PQ_TX_SIZE) {
+    return fail(error, "bridge tx exceeds MAX_PQ_TX_SIZE");
+  }
+  return true;
+}
+
 bool checkPqTransactionInputs(const Transaction& tx,
                              const std::vector<PqResolvedInput>& resolved,
                              uint64_t minFeePerByte,

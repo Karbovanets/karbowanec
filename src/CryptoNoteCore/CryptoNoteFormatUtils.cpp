@@ -38,6 +38,7 @@
 #include "Rpc/CoreRpcServerCommandsDefinitions.h"
 
 #include "CryptoNoteConfig.h"
+#include "PqTxType.h"
 
 using namespace Logging;
 using namespace Crypto;
@@ -144,10 +145,11 @@ uint32_t get_block_height(const Block& b) {
 }
 
 bool check_inputs_types_supported(const TransactionPrefix& tx) {
-  // PQ transactions (v2) carry PqInput; legacy (v1) carry KeyInput. The family
-  // must be uniform within a tx — this per-version branch enforces no mixing.
-  const std::type_info& allowed =
-      tx.version >= TRANSACTION_VERSION_PQ ? typeid(PqInput) : typeid(KeyInput);
+  // Input families: v1 and v2 TX_BRIDGE use classical KeyInput; only v2 TX_PQ
+  // uses PqInput. The family must be uniform within a tx (no mixing) — this
+  // branch enforces it.
+  const bool pqInputs = tx.version >= TRANSACTION_VERSION_PQ && tx.txType == TX_PQ;
+  const std::type_info& allowed = pqInputs ? typeid(PqInput) : typeid(KeyInput);
   for (const auto& in : tx.inputs) {
     if (in.type() != allowed) {
       return false;
