@@ -1295,21 +1295,34 @@ bool Core::handleIncomingTransaction(const Transaction& tx, const Crypto::Hash& 
       return false;
     }
   
-    if (!check_tx_fee(tx, txHash, blobSize, tvc, height)) {
-      tvc.m_verification_failed = true;
-      return false;
+    // Legacy fee/mixin accounting reads classical KeyInput amounts and ring
+    // sizes. TX_PQ has neither — its fee floor (MIN_PQ_FEE_PER_BYTE) and the
+    // value balance are enforced in checkPqTransactionInputs. TX_BRIDGE keeps
+    // classical inputs, so these still apply to it.
+    const bool pqOnlyInputs = tx.version >= TRANSACTION_VERSION_PQ && tx.txType == TX_PQ;
+    // The decomposed-amount rule is a classical-output rule; PQ outputs (TX_PQ
+    // and TX_BRIDGE) carry arbitrary plain amounts.
+    const bool hasPqOutputs = tx.version >= TRANSACTION_VERSION_PQ;
+
+    if (!pqOnlyInputs) {
+      if (!check_tx_fee(tx, txHash, blobSize, tvc, height)) {
+        tvc.m_verification_failed = true;
+        return false;
+      }
+
+      if (!check_tx_mixin(tx, txHash, height)) {
+        logger(INFO) << "Transaction verification failed: mixin count for transaction " << txHash << " is too large, rejected";
+        tvc.m_verification_failed = true;
+        return false;
+      }
     }
 
-    if (!check_tx_mixin(tx, txHash, height)) {
-      logger(INFO) << "Transaction verification failed: mixin count for transaction " << txHash << " is too large, rejected";
-      tvc.m_verification_failed = true;
-      return false;
-    }
-
-    if (!check_tx_unmixable(tx, txHash, height)) {
-      logger(ERROR) << "Transaction verification failed: unmixable output for transaction " << txHash << ", rejected";
-      tvc.m_verification_failed = true;
-      return false;
+    if (!hasPqOutputs) {
+      if (!check_tx_unmixable(tx, txHash, height)) {
+        logger(ERROR) << "Transaction verification failed: unmixable output for transaction " << txHash << ", rejected";
+        tvc.m_verification_failed = true;
+        return false;
+      }
     }
 
   }

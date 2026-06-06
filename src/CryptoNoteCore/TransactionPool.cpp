@@ -38,6 +38,7 @@
 #include "CryptoNoteFormatUtils.h"
 #include "CryptoNoteTools.h"
 #include "CryptoNoteConfig.h"
+#include "PqTxType.h"
 
 using namespace Logging;
 
@@ -117,23 +118,35 @@ namespace CryptoNote {
       return false;
     }
 
-    uint64_t inputs_amount = 0;
-    if (!get_inputs_money_amount(tx, inputs_amount)) {
-      tvc.m_verification_failed = true;
-      return false;
+    // TX_PQ input value lives in the referenced outputs (chain state), not in
+    // the input — get_inputs_money_amount would read 0 and falsely reject. Its
+    // balance and PQ fee floor are enforced by checkTransactionInputs ->
+    // checkPqInputs below. (TX_BRIDGE has classical inputs, so it uses the
+    // normal accounting.)
+    const bool pqOnlyInputs = tx.version >= TRANSACTION_VERSION_PQ && tx.txType == TX_PQ;
+    uint64_t fee = 0;
+    bool isFusionTransaction = false;
+    if (!pqOnlyInputs) {
+      uint64_t inputs_amount = 0;
+      if (!get_inputs_money_amount(tx, inputs_amount)) {
+        tvc.m_verification_failed = true;
+        return false;
+      }
+
+      uint64_t outputs_amount = get_outs_money_amount(tx);
+
+      if (outputs_amount > inputs_amount) {
+        logger(INFO) << "transaction use more money then it has: use " << m_currency.formatAmount(outputs_amount) <<
+          ", have " << m_currency.formatAmount(inputs_amount);
+        tvc.m_verification_failed = true;
+        return false;
+      }
+
+      fee = inputs_amount - outputs_amount;
+      isFusionTransaction = fee == 0 && m_currency.isFusionTransaction(tx, blobSize, m_core.getCurrentBlockchainHeight());
     }
-
-    uint64_t outputs_amount = get_outs_money_amount(tx);
-
-    if (outputs_amount > inputs_amount) {
-      logger(INFO) << "transaction use more money then it has: use " << m_currency.formatAmount(outputs_amount) <<
-        ", have " << m_currency.formatAmount(inputs_amount);
-      tvc.m_verification_failed = true;
-      return false;
-    }
-
-    const uint64_t fee = inputs_amount - outputs_amount;
-    bool isFusionTransaction = fee == 0 && m_currency.isFusionTransaction(tx, blobSize, m_core.getCurrentBlockchainHeight());
+    // TODO(pq): for TX_PQ, resolve referenced output amounts to set an accurate
+    // per-byte fee for mempool prioritization (currently sorts as zero-fee).
 
     //check key images for transaction if it is not kept by block
     if (!keptByBlock) {
