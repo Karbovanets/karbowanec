@@ -124,7 +124,7 @@ TEST(PqDerive, TxSigningDigest) {
     tx.outputs.push_back(out);
 
     EXPECT_EQ(to_hex(txSigningDigest(tx)),
-              "7d6a2e0c67518c04002915b7dd0e80a868c3254dcb3f780047f322137be02516");
+              "c875c53291a7b0b0acdd8888780e680af7ff9f21087390dce1eb9ad85d78b732");
 }
 
 TEST(PqDerive, TxSigningDigestIsTamperSensitive) {
@@ -151,6 +151,18 @@ TEST(PqDerive, TxSigningDigestIsTamperSensitive) {
     UnsignedTx t3 = tx;
     t3.outputs[0].amount += 1;  // flip an output amount
     EXPECT_NE(base, txSigningDigest(t3));
+
+    // The digest must also bind the prefix fields that the txid covers but the
+    // draft §8.1 omitted: txType, unlockTime, and extra. Otherwise a relayer
+    // could mutate them without invalidating the signature.
+    UnsignedTx t4 = tx; t4.txType = 2;  // TX_BRIDGE
+    EXPECT_NE(base, txSigningDigest(t4));
+
+    UnsignedTx t5 = tx; t5.unlockTime = 1;
+    EXPECT_NE(base, txSigningDigest(t5));
+
+    UnsignedTx t6 = tx; t6.extra = {0x01, 0x02, 0x03};
+    EXPECT_NE(base, txSigningDigest(t6));
 }
 
 // ===========================================================================

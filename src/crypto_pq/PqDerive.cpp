@@ -103,6 +103,8 @@ Hash256 txSigningDigest(const UnsignedTx& tx) noexcept {
   std::vector<uint8_t> buf;
   appendDomain(buf, kDomainTxSign);
   buf.push_back(tx.version);
+  buf.push_back(tx.txType);
+  appendLe64(buf, tx.unlockTime);
   appendLe32(buf, static_cast<uint32_t>(tx.inputs.size()));
   for (const auto& in : tx.inputs) {
     appendBytes(buf, in.prevTxid.data(), in.prevTxid.size());
@@ -118,6 +120,8 @@ Hash256 txSigningDigest(const UnsignedTx& tx) noexcept {
     appendBytes(buf, out.encPayload.data(), out.encPayload.size());
     appendBytes(buf, out.spendCommit.data(), out.spendCommit.size());
   }
+  appendLe32(buf, static_cast<uint32_t>(tx.extra.size()));
+  appendBytes(buf, tx.extra.data(), tx.extra.size());
   appendLe64(buf, tx.fee);
   return sha3_256(buf.data(), buf.size());
 }

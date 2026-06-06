@@ -70,6 +70,9 @@ bool fail(std::string* error, const char* msg) {
 CryptoPQ::Hash256 pqSigningDigest(const Transaction& tx, uint64_t fee) {
   CryptoPQ::UnsignedTx u;
   u.version = tx.version;
+  u.txType = tx.txType;
+  u.unlockTime = tx.unlockTime;
+  u.extra = tx.extra;
   u.fee = fee;
   for (const auto& in : tx.inputs) {
     const PqInput& pin = boost::get<PqInput>(in);

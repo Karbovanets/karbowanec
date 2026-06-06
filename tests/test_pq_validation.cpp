@@ -195,6 +195,16 @@ TEST(PqValidation, RejectsFeeBelowFloor) {
     EXPECT_FALSE(checkPqTransactionInputs(b.tx, b.resolved, parameters::MIN_PQ_FEE_PER_BYTE, nullptr, &err));
 }
 
+TEST(PqValidation, RejectsExtraTamper) {
+    // tx_extra is bound by the signing digest, so appending bytes after signing
+    // (without re-signing) must fail signature verification — closes the
+    // malleability gap where extra changed the txid but not the signature.
+    BuiltTx b = buildSignedTx(1000000, 900000);
+    b.tx.extra = {0xDE, 0xAD, 0xBE, 0xEF};  // mutate extra, keep stale signature
+    std::string err;
+    EXPECT_FALSE(checkPqTransactionInputs(b.tx, b.resolved, kMinFee, nullptr, &err));
+}
+
 TEST(PqValidation, RejectsDuplicateNullifier) {
     // Two inputs spending the same output (same authPub+rho) -> same nullifier.
     BuiltTx b = buildSignedTx(1000000, 900000);
