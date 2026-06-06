@@ -78,6 +78,9 @@ const uint64_t MAX_EXTRA_SIZE_PQ                             = 4096;
 const uint64_t MAX_PQ_INPUTS_PER_TX                          = 8;
 const uint64_t MAX_PQ_OUTPUTS_PER_TX                         = 16;
 const uint64_t MAX_PQ_TX_SIZE                                = 48 * 1024;
+// Minimum PQ fee per serialized byte (consensus floor). Placeholder — calibrate
+// with the fork parameters before mainnet activation.
+const uint64_t MIN_PQ_FEE_PER_BYTE                           = 1;
 
 // Free-fee account registration (spec §11). FREE_REG_POW_TARGET is a
 // placeholder; calibrate on 2020-era mid-range Android (~3 s) before any

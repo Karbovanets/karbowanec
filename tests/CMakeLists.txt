@@ -44,6 +44,7 @@ add_executable(PqWireTests test_pq_wire.cpp)
 add_executable(PqOutputBuilderTests test_pq_output_builder.cpp)
 add_executable(PqScanTests test_pq_scan.cpp)
 add_executable(PqNullifierDbTests test_pq_nullifier_db.cpp)
+add_executable(PqValidationTests test_pq_validation.cpp)
 
 target_link_libraries(CoreTests TestGenerator Wallet CryptoNoteCore Serialization System Logging Common Crypto BlockchainExplorer Checkpoints ${Boost_LIBRARIES})
 target_link_libraries(CryptoTests Crypto Common ${Boost_LIBRARIES})
@@ -66,6 +67,7 @@ target_link_libraries(PqWireTests CryptoNoteCore Serialization System Logging Co
 target_link_libraries(PqOutputBuilderTests CryptoPq gtest ${Boost_LIBRARIES})
 target_link_libraries(PqScanTests CryptoPq gtest ${Boost_LIBRARIES})
 target_link_libraries(PqNullifierDbTests CryptoNoteCore Serialization System Logging Common Crypto CryptoPq gtest ${Boost_LIBRARIES})
+target_link_libraries(PqValidationTests CryptoNoteCore Serialization System Logging Common Crypto CryptoPq gtest ${Boost_LIBRARIES})
 
 if(MSVC)
   target_link_libraries(SystemTests ws2_32)
@@ -84,6 +86,7 @@ if(MSVC)
   target_link_libraries(PqExtraTests legacy_stdio_definitions.lib ws2_32)
   target_link_libraries(PqWireTests legacy_stdio_definitions.lib ws2_32)
   target_link_libraries(PqNullifierDbTests legacy_stdio_definitions.lib ws2_32)
+  target_link_libraries(PqValidationTests legacy_stdio_definitions.lib ws2_32)
 endif()
 
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR APPLE AND NOT ANDROID)
@@ -126,6 +129,7 @@ set_property(TARGET
   PqOutputBuilderTests
   PqScanTests
   PqNullifierDbTests
+  PqValidationTests
 PROPERTY FOLDER "tests")
 
 add_dependencies(IntegrationTestLibrary version)
@@ -150,6 +154,7 @@ set_property(TARGET PqWireTests PROPERTY OUTPUT_NAME "pq_wire_tests")
 set_property(TARGET PqOutputBuilderTests PROPERTY OUTPUT_NAME "pq_output_builder_tests")
 set_property(TARGET PqScanTests PROPERTY OUTPUT_NAME "pq_scan_tests")
 set_property(TARGET PqNullifierDbTests PROPERTY OUTPUT_NAME "pq_nullifier_db_tests")
+set_property(TARGET PqValidationTests PROPERTY OUTPUT_NAME "pq_validation_tests")
 
 add_test(CoreTests core_tests --generate_and_play_test_data)
 add_test(CryptoTests crypto_tests ${CMAKE_CURRENT_SOURCE_DIR}/crypto/tests.txt)
@@ -168,4 +173,5 @@ add_test(PqWireTests pq_wire_tests)
 add_test(PqOutputBuilderTests pq_output_builder_tests)
 add_test(PqScanTests pq_scan_tests)
 add_test(PqNullifierDbTests pq_nullifier_db_tests)
+add_test(PqValidationTests pq_validation_tests)
 add_test(LMDBReorgTests lmdb_reorg_tests)
