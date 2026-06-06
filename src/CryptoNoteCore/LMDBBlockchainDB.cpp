@@ -122,7 +122,7 @@ bool LMDBBlockchainDB::open(const std::string& path) {
   int rc = mdb_env_create(&m_env);
   if (rc) { close(); return false; }
 
-  rc = mdb_env_set_maxdbs(m_env, 16);
+  rc = mdb_env_set_maxdbs(m_env, 20);
   if (rc) { close(); return false; }
 
   // Start at 1 GB; grows as needed via resizeMap()
@@ -153,6 +153,7 @@ bool LMDBBlockchainDB::open(const std::string& path) {
     openDb(setupTxn, "hash_to_height",    0,                         m_dbiHashToHeight);
     openDb(setupTxn, "hashing_blobs",     0,                         m_dbiHashingBlobs);
     openDb(setupTxn, "spent_keys",        0,                         m_dbiSpentKeys);
+    openDb(setupTxn, "pq_nullifiers",     0,                         m_dbiPqNullifiers);
     openDb(setupTxn, "tx_indices",        0,                         m_dbiTxIndices);
     openDb(setupTxn, "key_outputs",       0,                         m_dbiKeyOutputs);
     openDb(setupTxn, "key_output_counts", 0,                         m_dbiKeyOutputCounts);
@@ -218,6 +219,7 @@ void LMDBBlockchainDB::clear() {
   dropDb(m_dbiHashToHeight);
   dropDb(m_dbiHashingBlobs);
   dropDb(m_dbiSpentKeys);
+  dropDb(m_dbiPqNullifiers);
   dropDb(m_dbiTxIndices);
   dropDb(m_dbiKeyOutputs);
   dropDb(m_dbiKeyOutputCounts);
@@ -635,6 +637,54 @@ bool LMDBBlockchainDB::removeSpentKey(const Crypto::KeyImage& ki) {
   int rc = mdb_del(m_writeTxn, m_dbiSpentKeys, &k, nullptr);
   if (rc == MDB_NOTFOUND) return false;
   checkRc(rc, "removeSpentKey");
+  return true;
+}
+
+// ─── pq_nullifiers ──────────────────────────────────────────────────────────
+
+bool LMDBBlockchainDB::putPqNullifier(const Crypto::Hash& nullifier,
+                                      uint32_t blockHeight,
+                                      const Crypto::Hash& txid) {
+  assert(m_writeTxn);
+  MDB_val k = {sizeof(nullifier), const_cast<Crypto::Hash*>(&nullifier)};
+  uint8_t valBuf[4 + 32];
+  encBE32(valBuf, blockHeight);
+  memcpy(valBuf + 4, txid.data, 32);
+  MDB_val v = {sizeof(valBuf), valBuf};
+  int rc = mdb_put(m_writeTxn, m_dbiPqNullifiers, &k, &v, 0);
+  checkRc(rc, "putPqNullifier");
+  return true;
+}
+
+bool LMDBBlockchainDB::hasPqNullifier(const Crypto::Hash& nullifier) const {
+  auto guard = readTxn();
+  MDB_val k = {sizeof(nullifier), const_cast<Crypto::Hash*>(&nullifier)}, v{};
+  int rc = mdb_get(guard.txn, m_dbiPqNullifiers, &k, &v);
+  if (rc == MDB_NOTFOUND) return false;
+  checkRc(rc, "hasPqNullifier");
+  return true;
+}
+
+bool LMDBBlockchainDB::getPqNullifier(const Crypto::Hash& nullifier,
+                                      uint32_t& height, Crypto::Hash& txid) const {
+  auto guard = readTxn();
+  MDB_val k = {sizeof(nullifier), const_cast<Crypto::Hash*>(&nullifier)}, v{};
+  int rc = mdb_get(guard.txn, m_dbiPqNullifiers, &k, &v);
+  if (rc == MDB_NOTFOUND) return false;
+  checkRc(rc, "getPqNullifier");
+  if (v.mv_size != 4 + 32) return false;
+  const uint8_t* p = static_cast<const uint8_t*>(v.mv_data);
+  height = decBE32(p);
+  memcpy(txid.data, p + 4, 32);
+  return true;
+}
+
+bool LMDBBlockchainDB::removePqNullifier(const Crypto::Hash& nullifier) {
+  assert(m_writeTxn);
+  MDB_val k = {sizeof(nullifier), const_cast<Crypto::Hash*>(&nullifier)};
+  int rc = mdb_del(m_writeTxn, m_dbiPqNullifiers, &k, nullptr);
+  if (rc == MDB_NOTFOUND) return false;
+  checkRc(rc, "removePqNullifier");
   return true;
 }
 

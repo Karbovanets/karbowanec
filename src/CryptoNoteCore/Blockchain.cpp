@@ -35,6 +35,7 @@
 #include "Serialization/BinarySerializationTools.h"
 #include "CryptoNoteTools.h"
 #include "TransactionExtra.h"
+#include "crypto_pq/PqDerive.h"
 
 #include "../crypto/hash.h"
 
@@ -2648,6 +2649,24 @@ void Blockchain::popBlock() {
   m_upgradeDetectorV6.blockPopped();
 }
 
+// Recompute a PQ input's nullifier (= SHA3-256("karbo-pq-nullifier-v1" ||
+// auth_pub || rho_reveal)). Fields are fixed-size after serialization; a
+// malformed input (wrong sizes) yields a zero hash, which validation rejects.
+static Crypto::Hash pqInputNullifier(const PqInput& in) {
+  Crypto::Hash h{};
+  if (in.authPub.size() != CryptoNote::PQ_AUTH_PUB_SIZE ||
+      in.rhoReveal.size() != CryptoNote::PQ_RHO_SIZE) {
+    return h;
+  }
+  CryptoPQ::DsaPublicKey ap;
+  CryptoPQ::Rho rho;
+  std::memcpy(ap.data(), in.authPub.data(), ap.size());
+  std::memcpy(rho.data(), in.rhoReveal.data(), rho.size());
+  CryptoPQ::Hash256 n = CryptoPQ::nullifier(ap, rho);
+  std::memcpy(h.data, n.data(), 32);
+  return h;
+}
+
 bool Blockchain::pushTransaction(BlockEntry& block, const Crypto::Hash& transactionHash,
                                   TransactionIndex transactionIndex) {
   // Check for duplicate
@@ -2676,6 +2695,25 @@ bool Blockchain::pushTransaction(BlockEntry& block, const Crypto::Hash& transact
         return false;
       }
       m_db.putSpentKey(ki, block.height);
+    }
+  }
+
+  // Record PQ nullifiers (v2 TX_PQ); detect double-spends within this write txn.
+  // Intra-tx duplicates are also caught: a put is visible to hasPqNullifier
+  // inside the same write transaction.
+  for (size_t i = 0; i < tx.inputs.size(); ++i) {
+    if (tx.inputs[i].type() == typeid(PqInput)) {
+      Crypto::Hash nf = pqInputNullifier(boost::get<PqInput>(tx.inputs[i]));
+      if (m_db.hasPqNullifier(nf)) {
+        logger(ERROR, BRIGHT_RED) << "PQ double-spending transaction was pushed to blockchain.";
+        for (size_t j = 0; j < i; ++j) {
+          if (tx.inputs[j].type() == typeid(PqInput)) {
+            m_db.removePqNullifier(pqInputNullifier(boost::get<PqInput>(tx.inputs[j])));
+          }
+        }
+        return false;
+      }
+      m_db.putPqNullifier(nf, block.height, transactionHash);
     }
   }
 
@@ -2752,6 +2790,17 @@ void Blockchain::popTransaction(const Transaction& transaction,
       const auto& ki = boost::get<KeyInput>(input).keyImage;
       if (!m_db.removeSpentKey(ki)) {
         logger(ERROR, BRIGHT_RED) << "Blockchain consistency broken - removeSpentKey failed";
+      }
+    }
+  }
+
+  // Remove PQ nullifiers (v2 TX_PQ) — mirrors spent-key rollback. After this the
+  // same (auth_pub, rho_reveal) pair may re-enter on the competing chain.
+  for (const auto& input : transaction.inputs) {
+    if (input.type() == typeid(PqInput)) {
+      Crypto::Hash nf = pqInputNullifier(boost::get<PqInput>(input));
+      if (!m_db.removePqNullifier(nf)) {
+        logger(ERROR, BRIGHT_RED) << "Blockchain consistency broken - removePqNullifier failed";
       }
     }
   }
