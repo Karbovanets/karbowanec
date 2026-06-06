@@ -385,6 +385,10 @@ namespace CryptoNote {
     bool checkTransactionInputs(const Transaction& tx, const Crypto::Hash& tx_prefix_hash,
                                  uint32_t* pmax_used_block_height = nullptr);
     bool checkTransactionInputs(const Transaction& tx, uint32_t* pmax_used_block_height = nullptr);
+    // v2 TX_PQ input validation: resolves referenced outputs from the DB, runs
+    // the context-free PQ checks (PqValidation), and rejects on-chain nullifier
+    // reuse. Height-gated to block major v6.
+    bool checkPqInputs(const Transaction& tx, uint32_t* pmax_used_block_height);
 
     // Returns by value (deserialized from tx_entries)
     TransactionEntry transactionByIndex(TransactionIndex index);

@@ -144,8 +144,12 @@ uint32_t get_block_height(const Block& b) {
 }
 
 bool check_inputs_types_supported(const TransactionPrefix& tx) {
+  // PQ transactions (v2) carry PqInput; legacy (v1) carry KeyInput. The family
+  // must be uniform within a tx — this per-version branch enforces no mixing.
+  const std::type_info& allowed =
+      tx.version >= TRANSACTION_VERSION_PQ ? typeid(PqInput) : typeid(KeyInput);
   for (const auto& in : tx.inputs) {
-    if (in.type() != typeid(KeyInput)) {
+    if (in.type() != allowed) {
       return false;
     }
   }
@@ -154,6 +158,22 @@ bool check_inputs_types_supported(const TransactionPrefix& tx) {
 }
 
 bool check_outs_valid(const TransactionPrefix& tx, std::string* error) {
+  // PQ transactions (v2): outputs must all be PqOutput with a non-zero amount.
+  // Deeper PQ shape (field lengths, limits) is checked by checkPqTransactionSemantic.
+  if (tx.version >= TRANSACTION_VERSION_PQ) {
+    for (const TransactionOutput& out : tx.outputs) {
+      if (out.target.type() != typeid(PqOutput)) {
+        if (error) *error = "PQ tx output is not a PqOutput";
+        return false;
+      }
+      if (out.amount == 0) {
+        if (error) *error = "Zero amount output";
+        return false;
+      }
+    }
+    return true;
+  }
+
   std::unordered_set<PublicKey> keys_seen;
   for (const TransactionOutput& out : tx.outputs) {
     if (out.target.type() == typeid(KeyOutput)) {

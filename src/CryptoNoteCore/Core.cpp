@@ -33,6 +33,7 @@
 #include "../Rpc/CoreRpcServerCommandsDefinitions.h"
 #include "CryptoNoteFormatUtils.h"
 #include "CryptoNoteTools.h"
+#include "PqValidation.h"
 #include "CryptoNoteStatInfo.h"
 #include "Miner.h"
 #include "TransactionExtra.h"
@@ -392,6 +393,16 @@ bool Core::check_tx_unmixable(const Transaction& tx, const Crypto::Hash& txHash,
 }
 
 bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, bool keeped_by_block) {
+  // PQ (v2) transactions have their own context-free semantic pipeline.
+  if (tx.version >= TRANSACTION_VERSION_PQ) {
+    std::string pqErr;
+    if (!checkPqTransactionSemantic(tx, &pqErr)) {
+      logger(ERROR) << "PQ tx semantic check failed (" << pqErr << ") for tx id= " << Common::podToHex(txHash);
+      return false;
+    }
+    return true;
+  }
+
   if (!tx.inputs.size()) {
     logger(ERROR) << "tx with empty inputs, rejected for tx id= " << Common::podToHex(txHash);
     return false;

@@ -35,6 +35,7 @@
 #include "Serialization/BinarySerializationTools.h"
 #include "CryptoNoteTools.h"
 #include "TransactionExtra.h"
+#include "PqValidation.h"
 #include "crypto_pq/PqDerive.h"
 
 #include "../crypto/hash.h"
@@ -2063,6 +2064,12 @@ bool Blockchain::checkTransactionInputs(const Transaction& tx, uint32_t* pmax_us
 
 bool Blockchain::checkTransactionInputs(const Transaction& tx, const Crypto::Hash& tx_prefix_hash,
                                          uint32_t* pmax_used_block_height) {
+  // PQ (v2) transactions carry no legacy signatures and reference outputs by
+  // outpoint, not global index — they have their own input pipeline.
+  if (tx.version >= TRANSACTION_VERSION_PQ) {
+    return checkPqInputs(tx, pmax_used_block_height);
+  }
+
   size_t inputIndex = 0;
   if (pmax_used_block_height) *pmax_used_block_height = 0;
 
@@ -2092,6 +2099,69 @@ bool Blockchain::checkTransactionInputs(const Transaction& tx, const Crypto::Has
       return false;
     }
   }
+  return true;
+}
+
+bool Blockchain::checkPqInputs(const Transaction& tx, uint32_t* pmax_used_block_height) {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  if (pmax_used_block_height) *pmax_used_block_height = 0;
+
+  // Height gate: PQ transactions are only valid once block major v6 is active.
+  uint32_t curHeight = getCurrentBlockchainHeight();
+  if (getBlockMajorVersionForHeight(curHeight) < BLOCK_MAJOR_VERSION_6) {
+    logger(INFO, BRIGHT_WHITE) << "PQ transaction seen before v6 activation, rejected: "
+                               << getObjectHash(tx);
+    return false;
+  }
+
+  // Resolve each PqInput's referenced output from the chain.
+  std::vector<PqResolvedInput> resolved;
+  resolved.reserve(tx.inputs.size());
+  uint32_t maxRefHeight = 0;
+  for (const auto& txin : tx.inputs) {
+    if (txin.type() != typeid(PqInput)) {
+      return false;  // semantic check already guarantees this; defensive
+    }
+    const PqInput& in = boost::get<PqInput>(txin);
+    PqResolvedInput r;
+    uint32_t block; uint16_t slot;
+    if (m_db.getTxIndex(in.prevTxid, block, slot)) {
+      try {
+        TransactionEntry te = transactionByIndex(TransactionIndex{block, slot});
+        if (in.prevOutIndex < te.tx.outputs.size()) {
+          const TransactionOutput& o = te.tx.outputs[in.prevOutIndex];
+          if (o.target.type() == typeid(PqOutput)) {
+            r.exists = true;
+            r.isPqOutput = true;
+            r.isCoinbase = (slot == 0);  // coinbase is always tx slot 0
+            r.amount = o.amount;
+            r.spendCommit = boost::get<PqOutput>(o.target).spendCommit;
+            if (block > maxRefHeight) maxRefHeight = block;
+          }
+        }
+      } catch (const std::exception&) {
+        // leave r.exists == false; checkPqTransactionInputs rejects it
+      }
+    }
+    resolved.push_back(r);
+  }
+
+  std::vector<Crypto::Hash> nullifiers;
+  std::string err;
+  if (!checkPqTransactionInputs(tx, resolved, parameters::MIN_PQ_FEE_PER_BYTE, &nullifiers, &err)) {
+    logger(INFO, BRIGHT_WHITE) << "PQ input check failed (" << err << ") for tx " << getObjectHash(tx);
+    return false;
+  }
+
+  // On-chain double-spend: none of the nullifiers may already be recorded.
+  for (const auto& nf : nullifiers) {
+    if (m_db.hasPqNullifier(nf)) {
+      logger(DEBUGGING) << "PQ nullifier already spent in blockchain: " << Common::podToHex(nf);
+      return false;
+    }
+  }
+
+  if (pmax_used_block_height) *pmax_used_block_height = maxRefHeight;
   return true;
 }
 
