@@ -29,6 +29,10 @@
 #include "CryptoNoteCore/Currency.h"
 #include "CryptoNoteCore/Difficulty.h"
 
+// Forward declaration so test_generator can hold a Blockchain pointer without
+// pulling in the heavy Blockchain.h transitively through TestGenerator.h.
+namespace CryptoNote { class Blockchain; }
+
 
 class test_generator
 {
@@ -67,6 +71,14 @@ public:
     : m_currency(currency), defaultMajorVersion(majorVersion), defaultMinorVersion(minorVersion) {
   }
 
+  // Optional sink for V5+ PoW evaluation. Production V5+ blocks are hashed via
+  // Blockchain::getBlockLongHash (yespower); the standalone get_block_longhash
+  // returns false for V5+. Without setBlockchain(), the PoW search loop for a
+  // V5+ block would spin forever. Wire it once if the test mines past V5:
+  //   test_generator gen(currency);
+  //   gen.setBlockchain(&core.get_blockchain_storage());
+  // For V1–V4 blocks the field is ignored; nullptr is fine.
+  void setBlockchain(CryptoNote::Blockchain* blockchain) { m_blockchain = blockchain; }
 
   uint8_t defaultMajorVersion;
   uint8_t defaultMinorVersion;
@@ -100,11 +112,18 @@ public:
 
 private:
   const CryptoNote::Currency& m_currency;
+  CryptoNote::Blockchain* m_blockchain = nullptr;
   std::unordered_map<Crypto::Hash, BlockInfo> m_blocksInfo;
 };
 
 inline CryptoNote::difficulty_type getTestDifficulty() { return 1; }
+// V1–V4 PoW search via standalone get_block_longhash. For V5+ use the overload.
 void fillNonce(CryptoNote::Block& blk, const CryptoNote::difficulty_type& diffic);
+
+// PoW search that handles V5+ blocks by delegating to Blockchain::getBlockLongHash
+// (yespower). `blockchain` may be null — then V5+ blocks fail to mine (logged once).
+void fillNonce(CryptoNote::Block& blk, const CryptoNote::difficulty_type& diffic,
+               CryptoNote::Blockchain* blockchain);
 
 bool constructMinerTxManually(const CryptoNote::Currency& currency, uint8_t blockMajorVersion, uint32_t height, uint64_t alreadyGeneratedCoins,
   const CryptoNote::AccountPublicAddress& minerAddress, CryptoNote::Transaction& tx, uint64_t fee, CryptoNote::KeyPair* pTxKey = 0);
