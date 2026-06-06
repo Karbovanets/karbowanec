@@ -154,6 +154,7 @@ bool LMDBBlockchainDB::open(const std::string& path) {
     openDb(setupTxn, "hashing_blobs",     0,                         m_dbiHashingBlobs);
     openDb(setupTxn, "spent_keys",        0,                         m_dbiSpentKeys);
     openDb(setupTxn, "pq_nullifiers",     0,                         m_dbiPqNullifiers);
+    openDb(setupTxn, "pq_acct_reg",       0,                         m_dbiPqAcctReg);
     openDb(setupTxn, "tx_indices",        0,                         m_dbiTxIndices);
     openDb(setupTxn, "key_outputs",       0,                         m_dbiKeyOutputs);
     openDb(setupTxn, "key_output_counts", 0,                         m_dbiKeyOutputCounts);
@@ -220,6 +221,7 @@ void LMDBBlockchainDB::clear() {
   dropDb(m_dbiHashingBlobs);
   dropDb(m_dbiSpentKeys);
   dropDb(m_dbiPqNullifiers);
+  dropDb(m_dbiPqAcctReg);
   dropDb(m_dbiTxIndices);
   dropDb(m_dbiKeyOutputs);
   dropDb(m_dbiKeyOutputCounts);
@@ -685,6 +687,53 @@ bool LMDBBlockchainDB::removePqNullifier(const Crypto::Hash& nullifier) {
   int rc = mdb_del(m_writeTxn, m_dbiPqNullifiers, &k, nullptr);
   if (rc == MDB_NOTFOUND) return false;
   checkRc(rc, "removePqNullifier");
+  return true;
+}
+
+// ─── pq_acct_reg ────────────────────────────────────────────────────────────
+
+bool LMDBBlockchainDB::putPqAcctReg(const Crypto::Hash& viewPubHash,
+                                    uint32_t blockHeight, uint32_t txIndex) {
+  assert(m_writeTxn);
+  MDB_val k = {sizeof(viewPubHash), const_cast<Crypto::Hash*>(&viewPubHash)};
+  uint8_t valBuf[8];
+  encBE32(valBuf, blockHeight);
+  encBE32(valBuf + 4, txIndex);
+  MDB_val v = {sizeof(valBuf), valBuf};
+  int rc = mdb_put(m_writeTxn, m_dbiPqAcctReg, &k, &v, 0);
+  checkRc(rc, "putPqAcctReg");
+  return true;
+}
+
+bool LMDBBlockchainDB::hasPqAcctReg(const Crypto::Hash& viewPubHash) const {
+  auto guard = readTxn();
+  MDB_val k = {sizeof(viewPubHash), const_cast<Crypto::Hash*>(&viewPubHash)}, v{};
+  int rc = mdb_get(guard.txn, m_dbiPqAcctReg, &k, &v);
+  if (rc == MDB_NOTFOUND) return false;
+  checkRc(rc, "hasPqAcctReg");
+  return true;
+}
+
+bool LMDBBlockchainDB::getPqAcctReg(const Crypto::Hash& viewPubHash,
+                                    uint32_t& height, uint32_t& txIndex) const {
+  auto guard = readTxn();
+  MDB_val k = {sizeof(viewPubHash), const_cast<Crypto::Hash*>(&viewPubHash)}, v{};
+  int rc = mdb_get(guard.txn, m_dbiPqAcctReg, &k, &v);
+  if (rc == MDB_NOTFOUND) return false;
+  checkRc(rc, "getPqAcctReg");
+  if (v.mv_size != 8) return false;
+  const uint8_t* p = static_cast<const uint8_t*>(v.mv_data);
+  height = decBE32(p);
+  txIndex = decBE32(p + 4);
+  return true;
+}
+
+bool LMDBBlockchainDB::removePqAcctReg(const Crypto::Hash& viewPubHash) {
+  assert(m_writeTxn);
+  MDB_val k = {sizeof(viewPubHash), const_cast<Crypto::Hash*>(&viewPubHash)};
+  int rc = mdb_del(m_writeTxn, m_dbiPqAcctReg, &k, nullptr);
+  if (rc == MDB_NOTFOUND) return false;
+  checkRc(rc, "removePqAcctReg");
   return true;
 }
 

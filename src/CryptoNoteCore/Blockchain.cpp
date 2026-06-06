@@ -2834,6 +2834,25 @@ bool Blockchain::pushTransaction(BlockEntry& block, const Crypto::Hash& transact
     }
   }
 
+  // PQ account registration (tag 0x05) — FIRST-REGISTRATION-WINS. A registration
+  // for an already-registered viewPub invalidates the tx (and the block). On a
+  // failure return the whole block write txn is aborted by the caller, so no
+  // manual rollback is needed here. (Non-coinbase only.)
+  if (transactionIndex.transaction != 0) {
+    TransactionExtraPqAccountRegistration pqReg;
+    if (getPqAccountRegistrationFromExtra(tx.extra, pqReg)) {
+      CryptoPQ::Hash256 h = CryptoPQ::sha3_256(pqReg.viewPub.data(), pqReg.viewPub.size());
+      Crypto::Hash viewPubHash;
+      std::memcpy(viewPubHash.data, h.data(), 32);
+      if (m_db.hasPqAcctReg(viewPubHash)) {
+        logger(INFO, BRIGHT_WHITE) << "PQ account already registered, rejecting tx "
+                                   << transactionHash;
+        return false;
+      }
+      m_db.putPqAcctReg(viewPubHash, block.height, transactionIndex.transaction);
+    }
+  }
+
   // Serialize and store tx entry: [u32 tx_size][tx_blob][u32 num_gidx][u32 gidx...]
   BinaryArray txBlob = toBinaryArray(tx);
   uint32_t txSize  = static_cast<uint32_t>(txBlob.size());
@@ -2905,6 +2924,19 @@ void Blockchain::popTransaction(const Transaction& transaction,
         m_db.removeAccountRegistration(block, txSlot);
         invalidateAccountRegistrationsCountCache();
       }
+    }
+  }
+
+  // Remove PQ account registration — mirrors first-reg-wins rollback: after the
+  // orphaned block is popped, the same viewPub may re-register on the competing
+  // chain.
+  {
+    TransactionExtraPqAccountRegistration pqReg;
+    if (getPqAccountRegistrationFromExtra(transaction.extra, pqReg)) {
+      CryptoPQ::Hash256 h = CryptoPQ::sha3_256(pqReg.viewPub.data(), pqReg.viewPub.size());
+      Crypto::Hash viewPubHash;
+      std::memcpy(viewPubHash.data, h.data(), 32);
+      m_db.removePqAcctReg(viewPubHash);
     }
   }
 

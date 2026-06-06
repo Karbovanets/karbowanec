@@ -135,6 +135,18 @@ public:
                       Crypto::Hash& txid) const;
   bool removePqNullifier(const Crypto::Hash& nullifier);
 
+  // ── pq_acct_reg ───────────────────────────────────────────────────────────
+  // PQ account-number registry (first-registration-wins). Key:
+  // SHA3-256(viewPub) (32B — the full 1184B viewPub stays in the registration
+  // tx, read on demand). Value: BE32(height) || BE32(txIndex). The (height,
+  // txIndex) pair renders to the human account number (H-I-C).
+  bool putPqAcctReg(const Crypto::Hash& viewPubHash, uint32_t blockHeight,
+                    uint32_t txIndex);
+  bool hasPqAcctReg(const Crypto::Hash& viewPubHash) const;
+  bool getPqAcctReg(const Crypto::Hash& viewPubHash, uint32_t& height,
+                    uint32_t& txIndex) const;
+  bool removePqAcctReg(const Crypto::Hash& viewPubHash);
+
   // ── tx_indices ────────────────────────────────────────────────────────────
   bool putTxIndex(const Crypto::Hash& txHash, uint32_t block, uint16_t txSlot);
   bool getTxIndex(const Crypto::Hash& txHash, uint32_t& block, uint16_t& txSlot) const;
@@ -229,6 +241,7 @@ private:
   MDB_dbi m_dbiHashingBlobs;
   MDB_dbi m_dbiSpentKeys;
   MDB_dbi m_dbiPqNullifiers;
+  MDB_dbi m_dbiPqAcctReg;
   MDB_dbi m_dbiTxIndices;
   MDB_dbi m_dbiKeyOutputs;
   MDB_dbi m_dbiKeyOutputCounts;
