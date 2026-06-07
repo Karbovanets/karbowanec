@@ -143,7 +143,13 @@ namespace CryptoNote {
   }
 
   uint32_t Currency::upgradeHeight(uint8_t majorVersion) const {
-    if (majorVersion == BLOCK_MAJOR_VERSION_6) {
+    if (majorVersion == BLOCK_MAJOR_VERSION_8) {
+      return m_upgradeHeightV8;
+    }
+    else if (majorVersion == BLOCK_MAJOR_VERSION_7) {
+      return m_upgradeHeightV7;
+    }
+    else if (majorVersion == BLOCK_MAJOR_VERSION_6) {
       return m_upgradeHeightV6;
     }
     else if (majorVersion == BLOCK_MAJOR_VERSION_5) {
@@ -988,6 +994,8 @@ namespace CryptoNote {
     upgradeHeightV4(parameters::UPGRADE_HEIGHT_V4);
     upgradeHeightV5(parameters::UPGRADE_HEIGHT_V5);
     upgradeHeightV6(parameters::UPGRADE_HEIGHT_V6);
+    upgradeHeightV7(parameters::UPGRADE_HEIGHT_V7);
+    upgradeHeightV8(parameters::UPGRADE_HEIGHT_V8);
     upgradeVotingThreshold(parameters::UPGRADE_VOTING_THRESHOLD);
     upgradeVotingWindow(parameters::UPGRADE_VOTING_WINDOW);
     upgradeWindow(parameters::UPGRADE_WINDOW);

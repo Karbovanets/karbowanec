@@ -127,7 +127,9 @@ const uint32_t UPGRADE_HEIGHT_V4_1                           = 300000; // LWMA3
 const uint32_t UPGRADE_HEIGHT_V4_2                           = 500000; // Fee per-byte for extra, ban unmixable denominations
 const uint32_t UPGRADE_HEIGHT_V4_3                           = 667000; // Fixed min fee + fee per-byte for extra
 const uint32_t UPGRADE_HEIGHT_V5                             = 700000; // Block v5, back to LWMA1+, Alt. Signed Proof-of-Work
-const uint32_t UPGRADE_HEIGHT_V6                             = 4294967294; // Block v6
+const uint32_t UPGRADE_HEIGHT_V6                             = 4294967294; // Block v6, PQ-plain (Phase 1) activation
+const uint32_t UPGRADE_HEIGHT_V7                             = 4294967294; // Block v7, reserved: PQ confidential amounts (Phase 2)
+const uint32_t UPGRADE_HEIGHT_V8                             = 4294967294; // Block v8, reserved: PQ unlinkable (Phase 3)
 
 const unsigned UPGRADE_VOTING_THRESHOLD                      = 90; // percent
 const uint32_t UPGRADE_VOTING_WINDOW                         = EXPECTED_NUMBER_OF_BLOCKS_PER_DAY;  // blocks
@@ -222,7 +224,8 @@ const uint8_t  BLOCK_MAJOR_VERSION_3                         =  3;
 const uint8_t  BLOCK_MAJOR_VERSION_4                         =  4;
 const uint8_t  BLOCK_MAJOR_VERSION_5                         =  5;
 const uint8_t  BLOCK_MAJOR_VERSION_6                         =  6;  // PQ-plain (Phase 1) activation
-const uint8_t  BLOCK_MAJOR_VERSION_7                         =  7;  // reserved for future CPQ (Phase 2)
+const uint8_t  BLOCK_MAJOR_VERSION_7                         =  7;  // reserved: PQ confidential amounts (Phase 2)
+const uint8_t  BLOCK_MAJOR_VERSION_8                         =  8;  // reserved: PQ unlinkable (Phase 3)
 
 // Version-gated extra-size cap. Behaviour-preserving for all historical
 // (< v6) blocks; loosened to MAX_EXTRA_SIZE_PQ only from the PQ fork onward.

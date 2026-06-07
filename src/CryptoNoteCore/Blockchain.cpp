@@ -82,6 +82,8 @@ Blockchain::Blockchain(const Currency& currency, tx_memory_pool& tx_pool,
     m_upgradeDetectorV4(currency, m_blockView, BLOCK_MAJOR_VERSION_4, logger),
     m_upgradeDetectorV5(currency, m_blockView, BLOCK_MAJOR_VERSION_5, logger),
     m_upgradeDetectorV6(currency, m_blockView, BLOCK_MAJOR_VERSION_6, logger),
+    m_upgradeDetectorV7(currency, m_blockView, BLOCK_MAJOR_VERSION_7, logger),
+    m_upgradeDetectorV8(currency, m_blockView, BLOCK_MAJOR_VERSION_8, logger),
     m_checkpoints(logger, rejectDeepReorgDepth),
     m_no_blobs(noBlobs)
 {
@@ -448,7 +450,8 @@ bool Blockchain::init(const std::string& config_folder, bool load_existing) {
   }
 
   if (!m_upgradeDetectorV2.init() || !m_upgradeDetectorV3.init() ||
-      !m_upgradeDetectorV4.init() || !m_upgradeDetectorV5.init() || !m_upgradeDetectorV6.init()) {
+      !m_upgradeDetectorV4.init() || !m_upgradeDetectorV5.init() || !m_upgradeDetectorV6.init() ||
+      !m_upgradeDetectorV7.init() || !m_upgradeDetectorV8.init()) {
     logger(ERROR, BRIGHT_RED) << "Failed to initialize upgrade detector.";
   }
 
@@ -476,10 +479,13 @@ bool Blockchain::init(const std::string& config_folder, bool load_existing) {
   else if (checkAndRollback(m_upgradeDetectorV4)) {}
   else if (checkAndRollback(m_upgradeDetectorV5)) {}
   else if (checkAndRollback(m_upgradeDetectorV6)) {}
+  else if (checkAndRollback(m_upgradeDetectorV7)) {}
+  else if (checkAndRollback(m_upgradeDetectorV8)) {}
 
   if (reinitUpgradeDetectors &&
       (!m_upgradeDetectorV2.init() || !m_upgradeDetectorV3.init() ||
-       !m_upgradeDetectorV4.init() || !m_upgradeDetectorV5.init() || !m_upgradeDetectorV6.init())) {
+       !m_upgradeDetectorV4.init() || !m_upgradeDetectorV5.init() || !m_upgradeDetectorV6.init() ||
+       !m_upgradeDetectorV7.init() || !m_upgradeDetectorV8.init())) {
     logger(ERROR, BRIGHT_RED) << "Failed to initialize upgrade detector";
     return false;
   }
@@ -744,7 +750,11 @@ uint64_t Blockchain::getCoinsInCirculation(uint32_t height) {
 }
 
 uint8_t Blockchain::getBlockMajorVersionForHeight(uint32_t height) const {
-  if (height > m_upgradeDetectorV6.upgradeHeight()) {
+  if (height > m_upgradeDetectorV8.upgradeHeight()) {
+    return m_upgradeDetectorV8.targetVersion();
+  } else if (height > m_upgradeDetectorV7.upgradeHeight()) {
+    return m_upgradeDetectorV7.targetVersion();
+  } else if (height > m_upgradeDetectorV6.upgradeHeight()) {
     return m_upgradeDetectorV6.targetVersion();
   } else if (height > m_upgradeDetectorV5.upgradeHeight()) {
     return m_upgradeDetectorV5.targetVersion();
