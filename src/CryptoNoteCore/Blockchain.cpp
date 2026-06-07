@@ -2081,6 +2081,8 @@ bool Blockchain::checkTransactionInputs(const Transaction& tx, const Crypto::Has
   if (tx.version >= TRANSACTION_VERSION_PQ) {
     if (tx.txType == TX_PQ) {
       return checkPqInputs(tx, pmax_used_block_height);
+    } else if (tx.txType == TX_FREE_REG) {
+      return checkFreeRegInputs(tx, pmax_used_block_height);
     } else if (tx.txType == TX_BRIDGE) {
       if (getBlockMajorVersionForHeight(getCurrentBlockchainHeight()) < BLOCK_MAJOR_VERSION_6) {
         logger(INFO, BRIGHT_WHITE) << "bridge transaction seen before v6 activation, rejected: "
@@ -2185,6 +2187,48 @@ bool Blockchain::checkPqInputs(const Transaction& tx, uint32_t* pmax_used_block_
   }
 
   if (pmax_used_block_height) *pmax_used_block_height = maxRefHeight;
+  return true;
+}
+
+bool Blockchain::checkFreeRegInputs(const Transaction& tx, uint32_t* pmax_used_block_height) {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  if (pmax_used_block_height) *pmax_used_block_height = 0;
+
+  uint32_t curHeight = getCurrentBlockchainHeight();
+  if (getBlockMajorVersionForHeight(curHeight) < BLOCK_MAJOR_VERSION_6) {
+    logger(INFO, BRIGHT_WHITE) << "free-reg transaction before v6 activation, rejected";
+    return false;
+  }
+
+  TransactionExtraPqAccountRegistration reg;
+  TransactionExtraPow pow;
+  if (!getPqAccountRegistrationFromExtra(tx.extra, reg) ||
+      !getPowTagFromExtra(tx.extra, pow)) {
+    return false;  // semantic check should have caught this
+  }
+
+  // refBlockHash must be a main-chain block within the last FREE_REG_REF_WINDOW.
+  uint32_t refHeight = 0;
+  if (!m_db.getHashHeight(pow.refBlockHash, refHeight)) {
+    logger(INFO, BRIGHT_WHITE) << "free-reg refBlockHash not on the main chain, rejected";
+    return false;
+  }
+  if (refHeight >= curHeight ||
+      curHeight - refHeight > parameters::FREE_REG_REF_WINDOW) {
+    logger(INFO, BRIGHT_WHITE) << "free-reg refBlockHash outside the reference window, rejected";
+    return false;
+  }
+
+  // First-registration-wins: reject if the viewPub is already registered.
+  CryptoPQ::Hash256 h = CryptoPQ::sha3_256(reg.viewPub.data(), reg.viewPub.size());
+  Crypto::Hash viewPubHash;
+  std::memcpy(viewPubHash.data, h.data(), 32);
+  if (m_db.hasPqAcctReg(viewPubHash)) {
+    logger(INFO, BRIGHT_WHITE) << "free-reg account already registered, rejected";
+    return false;
+  }
+
+  if (pmax_used_block_height) *pmax_used_block_height = refHeight;
   return true;
 }
 

@@ -13,6 +13,7 @@
 #include "CryptoNoteConfig.h"
 #include "PqTxType.h"
 #include "CryptoNoteCore/PqValidation.h"
+#include "CryptoNoteCore/TransactionExtra.h"
 
 #include "crypto_pq/PqOutputBuilder.h"
 #include "crypto_pq/PqSeed.h"
@@ -339,6 +340,92 @@ TEST(PqValidation, BridgeRejectsZeroAmountOutput) {
     tx.outputs[0].amount = 0;
     std::string err;
     EXPECT_FALSE(checkBridgeTransactionSemantic(tx, &err));
+}
+
+// --- TX_FREE_REG semantic (zero-fee account registration + PoW) -------------
+
+namespace {
+
+std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE> freeRegViewPub() {
+    std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE> vp;
+    for (size_t i = 0; i < vp.size(); ++i) vp[i] = static_cast<uint8_t>(i * 3 + 1);
+    return vp;
+}
+
+Transaction makeFreeRegTx() {
+    Transaction tx;
+    tx.version = TRANSACTION_VERSION_PQ;
+    tx.txType = TX_FREE_REG;
+    tx.unlockTime = 0;
+    // no inputs / outputs / signatures
+    addPqAccountRegistrationToExtra(tx.extra, freeRegViewPub());
+    TransactionExtraPow pow{};
+    pow.refBlockHash = hashPat(1, 1);
+    pow.nonce = 42;
+    appendPowTagToExtra(tx.extra, pow);  // PoW must be the last field
+    return tx;
+}
+
+}  // namespace
+
+TEST(PqValidation, FreeRegAcceptsValid) {
+    // FREE_REG_POW_TARGET is the placeholder max, so any nonce satisfies PoW.
+    Transaction tx = makeFreeRegTx();
+    std::string err;
+    EXPECT_TRUE(checkFreeRegTransactionSemantic(tx, &err)) << err;
+}
+
+TEST(PqValidation, FreeRegRejectsWrongSubtype) {
+    Transaction tx = makeFreeRegTx();
+    tx.txType = TX_PQ;
+    std::string err;
+    EXPECT_FALSE(checkFreeRegTransactionSemantic(tx, &err));
+}
+
+TEST(PqValidation, FreeRegRejectsNonEmptyInputs) {
+    Transaction tx = makeFreeRegTx();
+    KeyInput ki; ki.amount = 1; ki.keyImage = Crypto::KeyImage{};
+    tx.inputs.push_back(ki);
+    std::string err;
+    EXPECT_FALSE(checkFreeRegTransactionSemantic(tx, &err));
+}
+
+TEST(PqValidation, FreeRegRejectsExtraField) {
+    // A registration tx must carry ONLY the reg tag + PoW tag.
+    Transaction tx;
+    tx.version = TRANSACTION_VERSION_PQ;
+    tx.txType = TX_FREE_REG;
+    tx.unlockTime = 0;
+    addPqAccountRegistrationToExtra(tx.extra, freeRegViewPub());
+    Crypto::PublicKey pk{};
+    addTransactionPublicKeyToExtra(tx.extra, pk);  // disallowed extra field
+    TransactionExtraPow pow{}; pow.nonce = 1;
+    appendPowTagToExtra(tx.extra, pow);
+    std::string err;
+    EXPECT_FALSE(checkFreeRegTransactionSemantic(tx, &err));
+}
+
+TEST(PqValidation, FreeRegRejectsPowNotLast) {
+    // Append a registration AFTER the PoW tag so PoW is no longer the last field.
+    Transaction tx;
+    tx.version = TRANSACTION_VERSION_PQ;
+    tx.txType = TX_FREE_REG;
+    tx.unlockTime = 0;
+    TransactionExtraPow pow{}; pow.nonce = 1;
+    appendPowTagToExtra(tx.extra, pow);
+    addPqAccountRegistrationToExtra(tx.extra, freeRegViewPub());
+    std::string err;
+    EXPECT_FALSE(checkFreeRegTransactionSemantic(tx, &err));
+}
+
+TEST(PqValidation, FreeRegRejectsMissingPow) {
+    Transaction tx;
+    tx.version = TRANSACTION_VERSION_PQ;
+    tx.txType = TX_FREE_REG;
+    tx.unlockTime = 0;
+    addPqAccountRegistrationToExtra(tx.extra, freeRegViewPub());  // no PoW tag
+    std::string err;
+    EXPECT_FALSE(checkFreeRegTransactionSemantic(tx, &err));
 }
 
 int main(int argc, char** argv) {

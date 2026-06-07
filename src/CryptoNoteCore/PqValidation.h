@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -65,6 +66,24 @@ bool checkPqTransactionSemantic(const Transaction& tx, std::string* error);
 // Balance, ring signatures, key-image double-spend and fee floor are enforced by
 // the classical pipeline (check_tx_semantic / checkTransactionInputs).
 bool checkBridgeTransactionSemantic(const Transaction& tx, std::string* error);
+
+// Context-free checks for one v2 TX_FREE_REG transaction (zero-fee account
+// registration, spec §11.1):
+//  - subtype == TX_FREE_REG; inputs & outputs empty; no legacy signatures;
+//    unlockTime == 0
+//  - tx_extra carries EXACTLY one PQ account-registration tag (0x05) and EXACTLY
+//    one PoW tag (0x06), and nothing else
+//  - the PoW tag is the last field (so the nonce is the final 8 bytes)
+//  - anti-spam PoW: cn_slow_hash(viewPub || refBlockHash || LE64(nonce)) meets
+//    FREE_REG_POW_TARGET
+// Chain-context rules (refBlockHash recency + main-chain, first-reg-wins,
+// per-block count) are enforced by the Blockchain layer.
+bool checkFreeRegTransactionSemantic(const Transaction& tx, std::string* error);
+
+// The free-reg anti-spam PoW predicate. Reused by wallet nonce grinding. The
+// FREE_REG_POW_TARGET threshold is a placeholder pending calibration.
+bool checkFreeRegPow(const std::array<uint8_t, 1184>& viewPub,
+                     const Crypto::Hash& refBlockHash, uint64_t nonce);
 
 // Context-free input/balance/signature checks given resolved referenced outputs
 // (resolved[i] corresponds to tx.inputs[i]). On success, *outNullifiers (if not

@@ -391,6 +391,9 @@ namespace CryptoNote {
     // the context-free PQ checks (PqValidation), and rejects on-chain nullifier
     // reuse. Height-gated to block major v6.
     bool checkPqInputs(const Transaction& tx, uint32_t* pmax_used_block_height);
+    // v2 TX_FREE_REG chain-context checks: v6 gate, refBlockHash on the main
+    // chain within FREE_REG_REF_WINDOW, and first-registration-wins.
+    bool checkFreeRegInputs(const Transaction& tx, uint32_t* pmax_used_block_height);
 
     // Returns by value (deserialized from tx_entries)
     TransactionEntry transactionByIndex(TransactionIndex index);

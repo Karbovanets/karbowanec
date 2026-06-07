@@ -411,6 +411,12 @@ bool Core::check_tx_semantic(const Transaction& tx, const Crypto::Hash& txHash, 
         return false;
       }
       // fall through to classical checks (classical inputs + ring signatures)
+    } else if (tx.txType == TX_FREE_REG) {
+      if (!checkFreeRegTransactionSemantic(tx, &pqErr)) {
+        logger(ERROR) << "free-reg tx semantic check failed (" << pqErr << ") for tx id= " << Common::podToHex(txHash);
+        return false;
+      }
+      return true;
     } else {
       logger(ERROR) << "unknown PQ tx subtype " << static_cast<int>(tx.txType)
                     << " for tx id= " << Common::podToHex(txHash);

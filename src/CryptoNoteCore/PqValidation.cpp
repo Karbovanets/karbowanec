@@ -23,6 +23,8 @@
 #include "CryptoNoteConfig.h"
 #include "CryptoNoteTools.h"
 #include "PqTxType.h"
+#include "TransactionExtra.h"
+#include "../crypto/hash.h"
 
 #include "crypto_pq/PqDerive.h"
 #include "crypto_pq/PqDsa.h"
@@ -182,6 +184,70 @@ bool checkBridgeTransactionSemantic(const Transaction& tx, std::string* error) {
   }
   if (toBinaryArray(tx).size() > parameters::MAX_PQ_TX_SIZE) {
     return fail(error, "bridge tx exceeds MAX_PQ_TX_SIZE");
+  }
+  return true;
+}
+
+bool checkFreeRegPow(const std::array<uint8_t, 1184>& viewPub,
+                     const Crypto::Hash& refBlockHash, uint64_t nonce) {
+  // PoW preimage: viewPub(1184) || refBlockHash(32) || LE64(nonce).
+  std::vector<uint8_t> buf;
+  buf.reserve(1184 + 32 + 8);
+  buf.insert(buf.end(), viewPub.begin(), viewPub.end());
+  buf.insert(buf.end(), refBlockHash.data, refBlockHash.data + 32);
+  for (int i = 0; i < 8; ++i) buf.push_back(static_cast<uint8_t>((nonce >> (8 * i)) & 0xFF));
+
+  Crypto::cn_context ctx;
+  Crypto::Hash h;
+  Crypto::cn_slow_hash(ctx, buf.data(), buf.size(), h);
+
+  // Placeholder target semantics: leading 8 bytes (big-endian) <= target.
+  // Calibration lowers FREE_REG_POW_TARGET to raise difficulty.
+  uint64_t lead = 0;
+  for (int i = 0; i < 8; ++i) lead = (lead << 8) | static_cast<uint8_t>(h.data[i]);
+  return lead <= parameters::FREE_REG_POW_TARGET;
+}
+
+bool checkFreeRegTransactionSemantic(const Transaction& tx, std::string* error) {
+  if (tx.txType != TX_FREE_REG) {
+    return fail(error, "not a TX_FREE_REG subtype");
+  }
+  if (!tx.inputs.empty() || !tx.outputs.empty()) {
+    return fail(error, "TX_FREE_REG must have no inputs or outputs");
+  }
+  if (!tx.signatures.empty()) {
+    return fail(error, "TX_FREE_REG must not carry signatures");
+  }
+  if (tx.unlockTime != 0) {
+    return fail(error, "TX_FREE_REG must have unlockTime == 0");
+  }
+
+  // tx_extra must contain EXACTLY one PQ registration tag + one PoW tag, nothing else.
+  std::vector<TransactionExtraField> fields;
+  if (!parseTransactionExtra(tx.extra, fields)) {
+    return fail(error, "TX_FREE_REG: malformed tx_extra");
+  }
+  int regCount = 0, powCount = 0;
+  for (const auto& f : fields) {
+    if (f.type() == typeid(TransactionExtraPqAccountRegistration)) ++regCount;
+    else if (f.type() == typeid(TransactionExtraPow)) ++powCount;
+    else return fail(error, "TX_FREE_REG: unexpected tx_extra field");
+  }
+  if (regCount != 1 || powCount != 1) {
+    return fail(error, "TX_FREE_REG must have exactly one registration and one PoW tag");
+  }
+  // PoW tag must be the last field (so the nonce is the final 8 bytes).
+  if (!isPowTagLastField(tx.extra)) {
+    return fail(error, "TX_FREE_REG: PoW tag is not the final tx_extra field");
+  }
+
+  TransactionExtraPqAccountRegistration reg;
+  TransactionExtraPow pow;
+  getPqAccountRegistrationFromExtra(tx.extra, reg);
+  getPowTagFromExtra(tx.extra, pow);
+
+  if (!checkFreeRegPow(reg.viewPub, pow.refBlockHash, pow.nonce)) {
+    return fail(error, "TX_FREE_REG: anti-spam PoW not satisfied");
   }
   return true;
 }
