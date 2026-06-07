@@ -9,8 +9,8 @@
 #include "gtest/gtest.h"
 
 #include "CryptoNoteCore/LMDBBlockchainDB.h"
+#include "CryptoNoteCore/AccountNumber.h"
 #include "CryptoTypes.h"
-#include "crypto_pq/PqAccountNumber.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -105,40 +105,34 @@ TEST(PqAcctReg, ReorgRollbackAllowsReregister) {
     EXPECT_EQ(ti, 3u);
 }
 
-// --- H-I-C account-number rendering ---------------------------------------
+// --- Account-number (H-I-C) rendering: PQ REUSES CryptoNote::AccountNumber ----
+// The account number is just (blockHeight, txIndex) -> "H-I-C" with a luhnMod36
+// check char. It does not encode CN-vs-PQ; resolving it looks up whatever
+// registration sits at that tx slot. So PQ registrations use the SAME format as
+// classical account numbers — no PQ-specific scheme.
 
-TEST(PqAccountNumber, RoundTrip) {
-    std::string hic = CryptoPQ::renderAccountNumber(1234567, 42);
-    uint64_t h = 0; uint32_t ti = 0;
-    ASSERT_TRUE(CryptoPQ::parseAccountNumber(hic, h, ti));
-    EXPECT_EQ(h, 1234567u);
-    EXPECT_EQ(ti, 42u);
-    // shape: "<height>-<txIndex>-<CCC>"
-    EXPECT_EQ(hic.substr(0, 10), "1234567-42");
-    EXPECT_EQ(hic[hic.size() - 4], '-');
+TEST(PqAccountReuse, RoundTrip) {
+    AccountNumber a{1234567, 42};
+    std::string s = a.toString();
+    AccountNumber b{};
+    ASSERT_TRUE(AccountNumber::fromString(s, b));
+    EXPECT_EQ(b.blockHeight, 1234567u);
+    EXPECT_EQ(b.txIndex, 42u);
+    EXPECT_EQ(s.substr(0, 10), "1234567-42");
 }
 
-TEST(PqAccountNumber, ChecksumRejectsTypo) {
-    std::string hic = CryptoPQ::renderAccountNumber(900, 7);
-    // Corrupt the last checksum char.
-    hic[hic.size() - 1] = (hic[hic.size() - 1] == 'A') ? 'B' : 'A';
-    uint64_t h; uint32_t ti;
-    EXPECT_FALSE(CryptoPQ::parseAccountNumber(hic, h, ti));
+TEST(PqAccountReuse, ChecksumRejectsTypo) {
+    std::string s = AccountNumber{900, 7}.toString();
+    s[s.size() - 1] = (s[s.size() - 1] == 'A') ? 'B' : 'A';  // corrupt the check char
+    AccountNumber b{};
+    EXPECT_FALSE(AccountNumber::fromString(s, b));
 }
 
-TEST(PqAccountNumber, ChecksumRejectsWrongHeight) {
-    std::string hic = CryptoPQ::renderAccountNumber(900, 7);
-    // Same shape, different height -> checksum mismatch.
-    std::string tampered = "901" + hic.substr(hic.find('-'));
-    uint64_t h; uint32_t ti;
-    EXPECT_FALSE(CryptoPQ::parseAccountNumber(tampered, h, ti));
-}
-
-TEST(PqAccountNumber, RejectsMalformed) {
-    uint64_t h; uint32_t ti;
-    EXPECT_FALSE(CryptoPQ::parseAccountNumber("not-an-account", h, ti));
-    EXPECT_FALSE(CryptoPQ::parseAccountNumber("123", h, ti));
-    EXPECT_FALSE(CryptoPQ::parseAccountNumber("12-34", h, ti));
+TEST(PqAccountReuse, ChecksumRejectsWrongHeight) {
+    std::string s = AccountNumber{900, 7}.toString();
+    std::string tampered = "901" + s.substr(s.find('-'));
+    AccountNumber b{};
+    EXPECT_FALSE(AccountNumber::fromString(tampered, b));
 }
 
 int main(int argc, char** argv) {
