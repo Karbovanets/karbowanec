@@ -82,4 +82,46 @@ std::vector<PqOwnedOutput> scanPqOutputs(const PqScanKeys& keys,
   return owned;
 }
 
+std::optional<PqAggregateOwned> scanPqOutputAggregate(
+    const KemSecretKey& viewSk,
+    const std::vector<DsaPublicKey>& spendPubs,
+    const Hash256& inputsHash,
+    const PqScanOutput& out) {
+  // 1. The one expensive step: decapsulate with the shared view key.
+  KemShared ss = kem_decaps(viewSk, out.kemCt);
+
+  Hash256 oc = outContext(inputsHash, out.kemCt, out.outputIndex);
+  Hash256 aeadKey = deriveAeadKey(ss, oc);
+
+  AeadNonce nonce{};
+  std::array<uint8_t, 40> aad{};
+  std::memcpy(aad.data(), oc.data(), oc.size());
+  for (int i = 0; i < 8; ++i) {
+    aad[32 + i] = static_cast<uint8_t>((out.amount >> (8 * i)) & 0xFF);
+  }
+
+  std::optional<std::vector<uint8_t>> maybeRho =
+      aead_decrypt(aeadKey, nonce, aad.data(), aad.size(),
+                   out.encPayload.data(), out.encPayload.size());
+  if (!maybeRho || maybeRho->size() != 32) {
+    return std::nullopt;  // not for this service, or tampered
+  }
+  Rho rho{};
+  std::memcpy(rho.data(), maybeRho->data(), 32);
+
+  // 2. Cheap per-deposit-key check (SHA3 only, no further KEM work).
+  for (std::size_t i = 0; i < spendPubs.size(); ++i) {
+    if (spendCommit(spendPubs[i], rho) == out.spendCommit) {
+      PqAggregateOwned res;
+      res.record.outputIndex = out.outputIndex;
+      res.record.amount = out.amount;
+      res.record.rho = rho;
+      res.record.outContext = oc;
+      res.spendPubIndex = i;
+      return res;
+    }
+  }
+  return std::nullopt;
+}
+
 }  // namespace CryptoPQ

@@ -79,4 +79,26 @@ std::vector<PqOwnedOutput> scanPqOutputs(const PqScanKeys& keys,
                                          const Hash256& inputsHash,
                                          const std::vector<PqScanOutput>& outputs);
 
+// --- Aggregated scanning (exchange / service wallets) ----------------------
+// A service issues many deposit addresses sharing ONE ML-KEM view key but with
+// distinct ML-DSA spend keys: addr_i = shared_viewPub || deposit_spendPub_i.
+// The expensive ML-KEM decapsulation is done ONCE per output here; only the
+// cheap spend_commit check is repeated per deposit key. No sender-provided
+// routing hint is used — the sender cannot influence which deposit matched.
+
+struct PqAggregateOwned {
+  PqOwnedOutput record;
+  std::size_t   spendPubIndex = 0;  // index into the supplied spendPubs vector
+};
+
+// Try to recognize ONE output against a set of deposit spend keys sharing viewSk.
+// Decapsulates once, decrypts rho once, then checks spend_commit against each
+// spendPubs[i]; returns the first match (or nullopt). Output amount tampering
+// and non-ownership both yield nullopt (silent), as in the single-key scan.
+std::optional<PqAggregateOwned> scanPqOutputAggregate(
+    const KemSecretKey& viewSk,
+    const std::vector<DsaPublicKey>& spendPubs,
+    const Hash256& inputsHash,
+    const PqScanOutput& out);
+
 }  // namespace CryptoPQ

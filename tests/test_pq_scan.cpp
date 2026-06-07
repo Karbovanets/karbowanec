@@ -152,6 +152,53 @@ TEST(PqScan, MultiOutputSelectsOwned) {
     EXPECT_EQ(ownedA[1].amount, 40u);
 }
 
+// --- Aggregated (exchange) scanning: shared view key, many deposit spend keys -
+
+TEST(PqScan, AggregateRecognizesCorrectDeposit) {
+    // One shared view keypair, three deposit spend keypairs.
+    auto view = deriveViewKeys(pat<32>(2, 7));
+    auto dep0 = deriveSpendKeys(pat<32>(10, 1));
+    auto dep1 = deriveSpendKeys(pat<32>(20, 2));
+    auto dep2 = deriveSpendKeys(pat<32>(30, 3));
+    std::vector<DsaPublicKey> spendPubs = {dep0.first, dep1.first, dep2.first};
+
+    Hash256 ih = inputsHash(fixedInputs());
+    // An output paid to deposit #1 (shared viewPub + dep1 spendPub).
+    PqScanOutput o = buildScanOutput(view.first, dep1.first, ih, 5, 4242);
+
+    auto owned = scanPqOutputAggregate(view.second, spendPubs, ih, o);
+    ASSERT_TRUE(owned.has_value());
+    EXPECT_EQ(owned->spendPubIndex, 1u);
+    EXPECT_EQ(owned->record.amount, 4242u);
+    EXPECT_EQ(owned->record.outputIndex, 5u);
+    EXPECT_EQ(spendCommit(dep1.first, owned->record.rho), o.spendCommit);
+}
+
+TEST(PqScan, AggregateIgnoresOtherService) {
+    auto viewA = deriveViewKeys(pat<32>(2, 7));
+    auto depA  = deriveSpendKeys(pat<32>(10, 1));
+    auto viewB = deriveViewKeys(pat<32>(4, 9));  // different service view key
+    auto depB  = deriveSpendKeys(pat<32>(40, 4));
+
+    Hash256 ih = inputsHash(fixedInputs());
+    PqScanOutput o = buildScanOutput(viewB.first, depB.first, ih, 0, 10);  // B's deposit
+
+    // Service A (its viewSk + its deposit keys) must not recognize it.
+    std::vector<DsaPublicKey> aKeys = {depA.first};
+    EXPECT_FALSE(scanPqOutputAggregate(viewA.second, aKeys, ih, o).has_value());
+}
+
+TEST(PqScan, AggregateAmountTamperNotRecognized) {
+    auto view = deriveViewKeys(pat<32>(2, 7));
+    auto dep = deriveSpendKeys(pat<32>(10, 1));
+    std::vector<DsaPublicKey> spendPubs = {dep.first};
+
+    Hash256 ih = inputsHash(fixedInputs());
+    PqScanOutput o = buildScanOutput(view.first, dep.first, ih, 0, 1000);
+    o.amount += 1;  // attacker edits the on-chain amount
+    EXPECT_FALSE(scanPqOutputAggregate(view.second, spendPubs, ih, o).has_value());
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
