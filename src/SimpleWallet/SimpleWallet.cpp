@@ -83,6 +83,7 @@
 #include "Wallet/WalletRpcServer.h"
 #include "WalletLegacy/WalletLegacy.h"
 #include "Wallet/LegacyKeysImporter.h"
+#include "Wallet/PqWallet.h"
 #include "WalletLegacy/WalletHelper.h"
 #include "ITransfersContainer.h"
 
@@ -726,6 +727,7 @@ simple_wallet::simple_wallet(System::Dispatcher& dispatcher, const CryptoNote::C
   m_consoleHandler.setHandler("sign_message", std::bind(&simple_wallet::sign_message, this, std::placeholders::_1), "Sign the message");
   m_consoleHandler.setHandler("verify_message", std::bind(&simple_wallet::verify_message, this, std::placeholders::_1), "Verify a signature of the message");
   m_consoleHandler.setHandler("register_account", std::bind(&simple_wallet::register_account, this, std::placeholders::_1), "Register an account number for easy payments");
+  m_consoleHandler.setHandler("pq_address", std::bind(&simple_wallet::pq_address, this, std::placeholders::_1), "Show this wallet's post-quantum (PQ) address, derived from the same seed. Add 'bech32' for the QR-friendly encoding.");
   m_consoleHandler.setHandler("help", std::bind(&simple_wallet::help, this, std::placeholders::_1), "Show this help");
   m_consoleHandler.setHandler("exit", std::bind(&simple_wallet::exit, this, std::placeholders::_1), "Close wallet");
 }
@@ -2536,6 +2538,47 @@ bool simple_wallet::register_account(const std::vector<std::string> &args) {
     fail_msg_writer() << "Failed to send registration transaction: " << e.what();
   }
 
+  return true;
+}
+//----------------------------------------------------------------------------------------------------
+bool simple_wallet::pq_address(const std::vector<std::string> &args) {
+  if (m_trackingWallet) {
+    fail_msg_writer() << "This is a tracking wallet; it has no spend key, so a PQ "
+                         "address cannot be derived.";
+    return true;
+  }
+
+  CryptoNote::AccountKeys keys;
+  m_wallet->getAccountKeys(keys);
+  if (keys.spendSecretKey == boost::value_initialized<Crypto::SecretKey>()) {
+    fail_msg_writer() << "Wallet has no spend secret key; cannot derive a PQ address.";
+    return true;
+  }
+
+  // The PQ identity is derived from the same spend secret the 25-word mnemonic
+  // backs up, so no extra seed to store. Network prefix follows the classical
+  // one (mainnet/testnet) until the dedicated PQ network byte is finalized.
+  const uint64_t networkPrefix = m_currency.publicAddressBase58Prefix();
+  CryptoNote::PqAddress addr = CryptoNote::pqWalletAddress(keys.spendSecretKey, networkPrefix);
+
+  bool bech32 = !args.empty() &&
+                (args[0] == "bech32" || args[0] == "bech32m" || args[0] == "qr");
+  CryptoNote::PqAddressEncoding enc =
+      bech32 ? CryptoNote::PqAddressEncoding::Bech32m : CryptoNote::PqAddressEncoding::Base58;
+
+  std::string encoded = CryptoNote::encodePqAddress(addr, enc);
+  if (encoded.empty()) {
+    fail_msg_writer() << "Failed to encode PQ address.";
+    return true;
+  }
+
+  success_msg_writer() << "Post-quantum address (" << (bech32 ? "bech32m" : "base58")
+                       << ", " << encoded.size() << " chars):";
+  success_msg_writer(true) << encoded;
+  if (!bech32) {
+    logger(INFO) << "Tip: 'pq_address bech32' prints the QR-friendlier encoding.";
+  }
+  logger(INFO) << "Anyone can pay this address; only this wallet's seed can spend it.";
   return true;
 }
 //----------------------------------------------------------------------------------------------------
