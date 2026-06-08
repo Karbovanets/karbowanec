@@ -20,9 +20,12 @@
 #include <vector>
 
 #include "CryptoNote.h"
+#include "ITransaction.h"
+#include "CryptoNoteCore/Account.h"
 #include "crypto_pq/PqKem.h"
 #include "crypto_pq/PqDsa.h"
 #include "crypto_pq/PqDerive.h"
+#include "crypto_pq/PqHash.h"
 
 // High-level builders for the PQ transaction family (spec §6/§8, ownership fix
 // in docs/PQ-OWNERSHIP-FIX.md). These assemble a fully-signed CryptoNote::
@@ -51,6 +54,26 @@ struct PqSendOutput {
   uint64_t               amount = 0;
 };
 
+// One classical (legacy) input being migrated by a TX_BRIDGE, plus its resolved
+// ring members. Same shape the legacy builder consumes; the caller resolves the
+// ring from the node before calling.
+struct BridgeLegacyInput {
+  TransactionTypes::InputKeyInfo keyInfo;
+  AccountKeys                    senderKeys;
+};
+
+// The PQ "inputs hash" a wallet binds into every output's out_context. This is a
+// WALLET-SIDE convention (consensus never recomputes out_context); sender and
+// receiver MUST agree on it or outputs become undetectable, so it is part of the
+// recovery contract — cemented, like the seed_master derivation.
+//   * TX_PQ inputs (PqInput): SHA3 over (prevTxid || LE32(prevOutIndex)) — the
+//     outpoint is on the wire.
+//   * TX_BRIDGE inputs (KeyInput): the outpoint is hidden by the ring, so we use
+//     the on-wire key image as the per-input identifier: InputRef{prevTxid=keyImage,
+//     prevOutIndex=0}.
+// Both reuse the cemented CryptoPQ::inputsHash function/domain.
+CryptoPQ::Hash256 pqTransactionInputsHash(const Transaction& tx);
+
 // Build and sign a TX_PQ.
 //
 //   spendPub / spendSk : the spender's long-term ML-DSA keypair (derivePqWalletKeys).
@@ -66,5 +89,14 @@ Transaction buildPqTransaction(const std::vector<PqSpendInput>& inputs,
                                const CryptoPQ::DsaPublicKey& spendPub,
                                const CryptoPQ::DsaSecretKey& spendSk,
                                uint64_t unlockTime = 0);
+
+// Build and sign a TX_BRIDGE (one-way legacy -> PQ migration). Classical inputs
+// are ring-signed exactly as a v1 transaction (the signature covers the prefix,
+// which includes the PQ outputs); outputs are PQ. `inputs` is taken by non-const
+// reference because key-image / ephemeral-key generation is performed per input.
+// Throws std::runtime_error on empty/oversized sets or if outputs exceed inputs.
+Transaction buildBridgeTransaction(std::vector<BridgeLegacyInput>& inputs,
+                                   const std::vector<PqSendOutput>& outputs,
+                                   uint64_t unlockTime = 0);
 
 }  // namespace CryptoNote

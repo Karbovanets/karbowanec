@@ -12,8 +12,11 @@
 #include "Wallet/PqTransactionBuilder.h"
 #include "Wallet/PqWallet.h"
 #include "CryptoNoteCore/PqValidation.h"
+#include "CryptoNoteCore/Account.h"
+#include "CryptoNoteCore/CryptoNoteTools.h"
 #include "crypto_pq/PqOutputBuilder.h"
 #include "crypto_pq/PqDerive.h"
+#include "crypto/crypto.h"
 #include "CryptoNote.h"
 #include "PqTxType.h"
 #include "CryptoNoteConfig.h"
@@ -60,6 +63,32 @@ PqSpendInput fund(const PqWalletKeys& owner, uint64_t amount, uint8_t txidSeed,
     resolvedOut.isPqOutput = true;
     resolvedOut.isCoinbase = false;
     return si;
+}
+
+// Fabricate a classical one-time output owned by `owner` and wrap it as a
+// BridgeLegacyInput (ring size 1). Mirrors how a real source output is formed:
+//   R = r*G ; P = Hs(r*A, idx)*G + B ; the wallet re-derives the same via its
+//   view secret in generate_key_image_helper.
+BridgeLegacyInput legacyInput(const CryptoNote::AccountBase& owner, uint64_t amount,
+                              uint32_t globalIndex) {
+    const CryptoNote::AccountKeys& ak = owner.getAccountKeys();
+    Crypto::PublicKey R; Crypto::SecretKey r;
+    Crypto::generate_keys(R, r);
+
+    const size_t idx = 0;
+    Crypto::KeyDerivation deriv;
+    Crypto::generate_key_derivation(ak.address.viewPublicKey, r, deriv);
+    Crypto::PublicKey P;
+    Crypto::derive_public_key(deriv, idx, ak.address.spendPublicKey, P);
+
+    BridgeLegacyInput bi;
+    bi.senderKeys = ak;
+    bi.keyInfo.amount = amount;
+    bi.keyInfo.outputs.push_back(TransactionTypes::GlobalOutput{P, globalIndex});
+    bi.keyInfo.realOutput.transactionPublicKey = R;
+    bi.keyInfo.realOutput.transactionIndex = 0;   // real member's index in the ring
+    bi.keyInfo.realOutput.outputInTransaction = idx;
+    return bi;
 }
 
 }  // namespace
@@ -192,6 +221,79 @@ TEST(PqTxBuilder, RejectsOverspend) {
 
     EXPECT_THROW(buildPqTransaction({in}, {out}, sender.spendPub, sender.spendSk),
                  std::runtime_error);
+}
+
+// --- TX_BRIDGE (legacy -> PQ) ---------------------------------------------
+
+TEST(PqBridgeBuilder, ShapeAndRingSignaturesValid) {
+    CryptoNote::AccountBase sender; sender.generate();
+    PqWalletKeys recip = derivePqWalletKeys(spendSecret(9, 1));
+
+    std::vector<BridgeLegacyInput> ins{ legacyInput(sender, 1000000, 0) };
+    PqSendOutput out{recip.viewPub, recip.spendPub, 900000};  // 100000 fee
+
+    Transaction tx = buildBridgeTransaction(ins, {out});
+
+    EXPECT_EQ(tx.version, TRANSACTION_VERSION_PQ);
+    EXPECT_EQ(tx.txType, TX_BRIDGE);
+    ASSERT_EQ(tx.inputs.size(), 1u);
+    ASSERT_EQ(tx.signatures.size(), 1u);
+    EXPECT_EQ(tx.inputs[0].type(), typeid(KeyInput));
+    EXPECT_EQ(tx.outputs[0].target.type(), typeid(PqOutput));
+
+    std::string err;
+    EXPECT_TRUE(checkBridgeTransactionSemantic(tx, &err)) << err;
+
+    // Ring signature must verify over the prefix hash (covers the PQ outputs).
+    Crypto::Hash prefixHash =
+        CryptoNote::getObjectHash(static_cast<const CryptoNote::TransactionPrefix&>(tx));
+    const KeyInput& kin = boost::get<KeyInput>(tx.inputs[0]);
+    std::vector<const Crypto::PublicKey*> ring{ &ins[0].keyInfo.outputs[0].targetKey };
+    EXPECT_TRUE(Crypto::check_ring_signature(prefixHash, kin.keyImage, ring,
+                                             tx.signatures[0].data()));
+}
+
+TEST(PqBridgeBuilder, RecipientScansBridgedOutput) {
+    CryptoNote::AccountBase sender; sender.generate();
+    PqWalletKeys recip = derivePqWalletKeys(spendSecret(5, 5));
+
+    std::vector<BridgeLegacyInput> ins{ legacyInput(sender, 2000000, 3) };
+    PqSendOutput out{recip.viewPub, recip.spendPub, 1900000};
+    Transaction tx = buildBridgeTransaction(ins, {out});
+
+    // Receiver recomputes the same wallet-side inputsHash (key-image based).
+    CryptoPQ::Hash256 ih = pqTransactionInputsHash(tx);
+
+    const PqOutput& po = boost::get<PqOutput>(tx.outputs[0].target);
+    CryptoPQ::PqScanOutput so;
+    so.outputIndex = 0;
+    so.amount = tx.outputs[0].amount;
+    std::memcpy(so.kemCt.data(), po.kemCt.data(), so.kemCt.size());
+    so.encPayload = po.encPayload;
+    std::memcpy(so.spendCommit.data(), po.spendCommit.data, 32);
+
+    auto owned = CryptoPQ::scanPqOutput(pqScanKeys(recip), ih, so);
+    ASSERT_TRUE(owned.has_value());
+    EXPECT_EQ(owned->amount, 1900000u);
+}
+
+TEST(PqBridgeBuilder, TamperedOutputBreaksRingSignature) {
+    CryptoNote::AccountBase sender; sender.generate();
+    PqWalletKeys recip = derivePqWalletKeys(spendSecret(9, 1));
+    std::vector<BridgeLegacyInput> ins{ legacyInput(sender, 1000000, 0) };
+    PqSendOutput out{recip.viewPub, recip.spendPub, 900000};
+    Transaction tx = buildBridgeTransaction(ins, {out});
+
+    // Mutate an output byte -> prefix hash changes -> ring signature must fail.
+    PqOutput& po = boost::get<PqOutput>(tx.outputs[0].target);
+    po.spendCommit.data[0] ^= 0xFF;
+
+    Crypto::Hash prefixHash =
+        CryptoNote::getObjectHash(static_cast<const CryptoNote::TransactionPrefix&>(tx));
+    const KeyInput& kin = boost::get<KeyInput>(tx.inputs[0]);
+    std::vector<const Crypto::PublicKey*> ring{ &ins[0].keyInfo.outputs[0].targetKey };
+    EXPECT_FALSE(Crypto::check_ring_signature(prefixHash, kin.keyImage, ring,
+                                              tx.signatures[0].data()));
 }
 
 int main(int argc, char** argv) {
