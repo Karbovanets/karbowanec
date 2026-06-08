@@ -4,15 +4,16 @@ on:
   push:
     branches:
       - '**'
-      - '!android'     # excludes android
+      - '!android' # excludes android
     tags-ignore:
-      - '*'            # We don't want this to run on release
+      - '*' # We don't want this to run on release
   pull_request:
 
 jobs:
   build-windows:
     name: Windows
     runs-on: windows-2022
+
     env:
       BOOST_ROOT: C:\thirdparties\boost-1.86.0
 
@@ -32,9 +33,9 @@ jobs:
       - name: Download and Install Boost 1.86
         run: |
           $Url = "https://sourceforge.net/projects/boost/files/boost-binaries/1.86.0/boost_1_86_0-msvc-14.3-64.exe"
-          $OutputPath = "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\boost-installer.exe"
+          $OutputPath = "C:\Users\runneradmin\AppData\Local\Temp\boost-installer.exe"
           curl -L $Url -o $OutputPath
-          Start-Process -Wait -FilePath $OutputPath "/SILENT","/SP-","/SUPPRESSMSGBOXES","/DIR=C:\\thirdparties\\boost-1.86.0"
+          Start-Process -Wait -FilePath $OutputPath "/SILENT","/SP-","/SUPPRESSMSGBOXES","/DIR=C:\thirdparties\boost-1.86.0"
 
       - name: Build
         shell: powershell
@@ -44,21 +45,27 @@ jobs:
           $sha = "${{ github.sha }}"
           $krb_ver = $sha.SubString(0,7)
           $release_name = "karbo-cli-win64-$krb_ver"
+
           mkdir "$build_folder"
           cd "$build_folder"
+
           cmake -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
             -DBOOST_ROOT="$env:BOOST_ROOT" `
             -DBOOST_INCLUDE_DIRS="$env:BOOST_ROOT/include" `
             ..
+
           msbuild Karbowanec.sln /p:Configuration=Release /m /v:detailed
+
           cd src\Release
           Compress-Archive -Path *.exe -DestinationPath "$release_name.zip"
           $sha256 = (Get-FileHash "$release_name.zip").Hash
           $asset_path = "./$build_folder/src/Release/$release_name.zip"
+
           mkdir "$release_name"
           cp *.exe "$release_name/"
+
           echo "sha256=${sha256}" >> $env:GITHUB_OUTPUT
           echo "release_name=${release_name}.zip" >> $env:GITHUB_OUTPUT
           echo "asset_path=${asset_path}" >> $env:GITHUB_OUTPUT
@@ -75,25 +82,28 @@ jobs:
 
   build-mingw:
     name: MinGW
-    #if: false  # skip the job for now
     runs-on: windows-2022
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
     steps:
-      - uses: msys2/setup-msys2@v2
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
         with:
+          msystem: MINGW64
           update: true
           install: >-
             git
             base-devel
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-ninja
             mingw-w64-x86_64-openssl
-
-      - name: Install dependencies
-        shell: msys2 {0}
-        run: |
-          pacman -U --noconfirm \
-            https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-boost-1.86.0-7-any.pkg.tar.zst \
-            https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-boost-libs-1.86.0-7-any.pkg.tar.zst
+            mingw-w64-x86_64-boost
+            mingw-w64-x86_64-boost-libs
 
       - uses: actions/checkout@master
         with:
@@ -106,27 +116,61 @@ jobs:
         run: |
           $krb_ver="${{ github.sha }}".SubString(0,7)
           $release_name="karbo-cli-win64-mingw-$krb_ver"
+
           echo "release_name=${release_name}" >> $env:GITHUB_OUTPUT
 
+      - name: Check Boost
+        run: |
+          set -e
+
+          echo "MSYSTEM=$MSYSTEM"
+          echo "MINGW_PREFIX=$MINGW_PREFIX"
+          which cmake
+          cmake --version
+
+          pacman -Q | grep boost || true
+
+          echo "Boost regex files:"
+          find /mingw64 -iname "*boost*regex*" || true
+
+          echo "Boost system files:"
+          find /mingw64 -iname "*boost*system*" || true
+
+          test -d /mingw64/include/boost
+          ls /mingw64/lib/libboost_regex* || true
+          ls /mingw64/lib/libboost_system* || true
+
       - name: Build
-        shell: msys2 {0}
         id: build
         run: |
-          ls
-          mkdir build
+          set -e
+
+          mkdir -p build
           cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DSTATIC=ON
-          cmake --build . --config Release
+
+          cmake .. \
+            -G "MinGW Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSTATIC=ON \
+            -DBOOST_ROOT=/mingw64 \
+            -DBoost_INCLUDE_DIR=/mingw64/include \
+            -DBoost_LIBRARY_DIR=/mingw64/lib \
+            -DBoost_USE_STATIC_LIBS=ON \
+            -DBoost_USE_MULTITHREADED=ON \
+            -DBoost_DEBUG=ON
+
+          cmake --build . --config Release -- -j$(nproc)
 
       - name: Prepare release
-        shell: msys2 {0}
         run: |
-          mkdir build/karbo
-          mv build/src/karbowanecd.exe build/karbo
-          mv build/src/simplewallet.exe build/karbo
-          mv build/src/greenwallet.exe build/karbo
-          mv build/src/walletd.exe build/karbo
-          mv build/src/vanitygen.exe build/karbo
+          set -e
+
+          mkdir -p build/karbo
+          mv build/src/karbowanecd.exe build/karbo/
+          mv build/src/simplewallet.exe build/karbo/
+          mv build/src/greenwallet.exe build/karbo/
+          mv build/src/walletd.exe build/karbo/
+          mv build/src/vanitygen.exe build/karbo/
 
       - name: Upload To GH Artifacts
         uses: actions/upload-artifact@v4
@@ -146,7 +190,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.ref }}
 
-      - name: Install Boost (ARM64)
+      - name: Install Boost ARM64
         uses: MarkusJx/install-boost@v2
         id: install-boost
         with:
@@ -193,12 +237,17 @@ jobs:
           make -j$(sysctl -n hw.ncpu)
 
           mkdir "$release_name"
+
           exeFiles=()
           for f in src/*; do
-            [[ -x $f && -f $f ]] && strip "$f" && exeFiles+=( "$f" )
+            if [[ -x "$f" && -f "$f" ]]; then
+              strip "$f"
+              exeFiles+=( "$f" )
+            fi
           done
 
           cp "${exeFiles[@]}" "$release_name/"
+
           zip -r "$release_name.zip" "$release_name"
 
           sha256=$(shasum -a 256 "$release_name.zip" | awk '{print toupper($1)}')
@@ -218,6 +267,7 @@ jobs:
   build-ubuntu24:
     name: Ubuntu 24.04
     runs-on: ubuntu-24.04
+
     steps:
       - uses: actions/checkout@master
         with:
@@ -227,24 +277,38 @@ jobs:
       - name: Build
         id: build
         run: |
-          sudo apt-get update && sudo apt-get install -y libboost-all-dev
+          sudo apt-get update
+          sudo apt-get install -y libboost-all-dev
+
           build_folder="build/release"
           krb_ver=${GITHUB_SHA::7}
           release_name=Karbo-cli-ubuntu24.04-"$krb_ver"
+
           mkdir -p "$build_folder"
           cd "$build_folder"
+
           cmake -D ARCH=default -D CMAKE_BUILD_TYPE=Release \
             -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
             -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG" \
             -D CMAKE_POSITION_INDEPENDENT_CODE:BOOL=true \
             -D BOOST_IGNORE_SYSTEM_PATHS_DEFAULT=ON \
-            -D BOOST_ROOT=/usr ../..
+            -D BOOST_ROOT=/usr \
+            ../..
+
           make
+
           mkdir -p "$release_name"
+
           exeFiles=()
-          for f in src/*; do [[ -x $f && -f $f ]] && exeFiles+=( "$f" ); done
+          for f in src/*; do
+            if [[ -x "$f" && -f "$f" ]]; then
+              exeFiles+=( "$f" )
+            fi
+          done
+
           strip "${exeFiles[@]}"
           cp "${exeFiles[@]}" "$release_name/"
+
           echo "release_name=${release_name}" >> $GITHUB_OUTPUT
           echo "artifact_path=$build_folder/$release_name" >> $GITHUB_OUTPUT
 
@@ -259,6 +323,7 @@ jobs:
   build-linux-static:
     name: Linux universal static
     runs-on: ubuntu-latest
+
     container:
       image: alpine:3.19
       options: --platform linux/amd64
@@ -270,8 +335,10 @@ jobs:
             git \
             build-base \
             cmake \
-            boost-dev boost-static \
-            openssl-dev openssl-libs-static \
+            boost-dev \
+            boost-static \
+            openssl-dev \
+            openssl-libs-static \
             lmdb-dev \
             linux-headers \
             binutils \
@@ -309,6 +376,7 @@ jobs:
           make -j$(nproc)
 
           mkdir -p "$release_name"
+
           for f in src/*; do
             if [ -x "$f" ] && [ -f "$f" ]; then
               strip "$f"
@@ -322,10 +390,12 @@ jobs:
       - name: Verify static linkage
         run: |
           FAILED=0
+
           for f in build/release/src/*; do
             if [ -x "$f" ] && [ -f "$f" ]; then
               echo "=== $f ==="
               file "$f"
+
               if readelf -d "$f" | grep NEEDED; then
                 echo "FAIL: dynamic dependency found"
                 FAILED=1
@@ -334,6 +404,7 @@ jobs:
               fi
             fi
           done
+
           if [ "$FAILED" = "1" ]; then
             exit 1
           fi
