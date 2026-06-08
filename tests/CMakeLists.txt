@@ -48,6 +48,7 @@ add_executable(PqValidationTests test_pq_validation.cpp)
 add_executable(PqChainTests test_pq_chain.cpp)
 add_executable(PqAccountTests test_pq_account.cpp)
 add_executable(PqWalletTests test_pq_wallet.cpp)
+add_executable(PqTxBuilderTests test_pq_tx_builder.cpp)
 
 target_link_libraries(CoreTests TestGenerator Wallet CryptoNoteCore Serialization System Logging Common Crypto BlockchainExplorer Checkpoints ${Boost_LIBRARIES})
 target_link_libraries(CryptoTests Crypto Common ${Boost_LIBRARIES})
@@ -74,6 +75,7 @@ target_link_libraries(PqValidationTests CryptoNoteCore Serialization System Logg
 target_link_libraries(PqChainTests TestGenerator Wallet CryptoNoteCore Serialization System Logging Common Crypto CryptoPq BlockchainExplorer Checkpoints ${Boost_LIBRARIES})
 target_link_libraries(PqAccountTests CryptoNoteCore Serialization System Logging Common Crypto CryptoPq gtest ${Boost_LIBRARIES})
 target_link_libraries(PqWalletTests Wallet CryptoNoteCore Serialization System Logging Common Crypto CryptoPq gtest ${Boost_LIBRARIES})
+target_link_libraries(PqTxBuilderTests Wallet CryptoNoteCore Serialization System Logging Common Crypto CryptoPq gtest ${Boost_LIBRARIES})
 
 if(MSVC)
   target_link_libraries(SystemTests ws2_32)
@@ -96,6 +98,7 @@ if(MSVC)
   target_link_libraries(PqChainTests legacy_stdio_definitions.lib ws2_32)
   target_link_libraries(PqAccountTests legacy_stdio_definitions.lib ws2_32)
   target_link_libraries(PqWalletTests legacy_stdio_definitions.lib ws2_32)
+  target_link_libraries(PqTxBuilderTests legacy_stdio_definitions.lib ws2_32)
 endif()
 
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR APPLE AND NOT ANDROID)
@@ -142,6 +145,7 @@ set_property(TARGET
   PqChainTests
   PqAccountTests
   PqWalletTests
+  PqTxBuilderTests
 PROPERTY FOLDER "tests")
 
 add_dependencies(IntegrationTestLibrary version)
@@ -170,6 +174,7 @@ set_property(TARGET PqValidationTests PROPERTY OUTPUT_NAME "pq_validation_tests"
 set_property(TARGET PqChainTests PROPERTY OUTPUT_NAME "pq_chain_tests")
 set_property(TARGET PqAccountTests PROPERTY OUTPUT_NAME "pq_account_tests")
 set_property(TARGET PqWalletTests PROPERTY OUTPUT_NAME "pq_wallet_tests")
+set_property(TARGET PqTxBuilderTests PROPERTY OUTPUT_NAME "pq_tx_builder_tests")
 
 add_test(CoreTests core_tests --generate_and_play_test_data)
 add_test(CryptoTests crypto_tests ${CMAKE_CURRENT_SOURCE_DIR}/crypto/tests.txt)
@@ -192,4 +197,5 @@ add_test(PqValidationTests pq_validation_tests)
 add_test(PqChainTests pq_chain_tests)
 add_test(PqAccountTests pq_account_tests)
 add_test(PqWalletTests pq_wallet_tests)
+add_test(PqTxBuilderTests pq_tx_builder_tests)
 add_test(LMDBReorgTests lmdb_reorg_tests)
