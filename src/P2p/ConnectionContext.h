@@ -51,6 +51,7 @@ struct CryptoNoteConnectionContext {
   };
 
   state m_state = state_befor_handshake;
+  bool m_peer_counted = false;
   boost::optional<PendingLiteBlock> m_pending_lite_block;
   std::list<Crypto::Hash> m_needed_objects;
   std::unordered_set<Crypto::Hash> m_requested_objects;

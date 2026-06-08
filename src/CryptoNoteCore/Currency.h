@@ -130,6 +130,11 @@ public:
   uint32_t minNumberVotingBlocks() const { return (m_upgradeVotingWindow * m_upgradeVotingThreshold + 99) / 100; }
   uint32_t maxUpgradeDistance() const { return 7 * m_upgradeWindow; }
   uint32_t calculateUpgradeHeight(uint32_t voteCompleteHeight) const { return voteCompleteHeight + m_upgradeWindow; }
+  // Block major v6+ replaces the legacy dual height/timestamp unlock_time
+  // interpretation with a height-only rule capped at
+  // CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6, both for accepting new txs and for
+  // deciding whether referenced outputs from old txs are spendable.
+  bool isUnlockTimeCappedAt(uint32_t height) const { return height >= m_upgradeHeightV6; }
 
   const std::string& blocksFileName() const { return m_blocksFileName; }
   const std::string& blocksCacheFileName() const { return m_blocksCacheFileName; }
