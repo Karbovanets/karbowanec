@@ -149,7 +149,8 @@ void CryptoNoteProtocolHandler::onConnectionClosed(CryptoNoteConnectionContext& 
     m_observerManager.notify(&ICryptoNoteProtocolObserver::lastKnownBlockHeightUpdated, m_observedHeight);
   }
 
-  if (context.m_state != CryptoNoteConnectionContext::state_befor_handshake) {
+  if (context.m_peer_counted) {
+    context.m_peer_counted = false;
     const size_t peersCount = m_peersCount > 0 ? --m_peersCount : 0;
     m_observerManager.notify(&ICryptoNoteProtocolObserver::peerCountUpdated, peersCount);
     if (peersCount == 0) {
@@ -258,9 +259,10 @@ bool CryptoNoteProtocolHandler::process_payload_sync_data(const CORE_SYNC_DATA& 
   updateObservedHeight(hshd.current_height, context);
   context.m_remote_blockchain_height = hshd.current_height;
 
-  if (is_initial) {
-    m_peersCount++;
-    m_observerManager.notify(&ICryptoNoteProtocolObserver::peerCountUpdated, m_peersCount.load());
+  if (is_initial && !context.m_peer_counted) {
+    context.m_peer_counted = true;
+    const size_t peersCount = ++m_peersCount;
+    m_observerManager.notify(&ICryptoNoteProtocolObserver::peerCountUpdated, peersCount);
   }
 
   return true;
