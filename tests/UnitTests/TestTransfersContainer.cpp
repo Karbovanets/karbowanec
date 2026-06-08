@@ -718,6 +718,23 @@ TEST_F(TransfersContainer_balance, handlesLockedByHeightTransferAsLocked) {
   ASSERT_EQ(AMOUNT_1, container.balance(ITransfersContainer::IncludeStateLocked | ITransfersContainer::IncludeTypeAll));
 }
 
+TEST_F(TransfersContainer_balance, treatsAboveV6UnlockCapAsUnlockedAfterV6) {
+  Currency cappedCurrency = CurrencyBuilder(logger).upgradeHeightV6(10).currency();
+  TransfersContainer cappedContainer(cappedCurrency, logger, TEST_TRANSACTION_SPENDABLE_AGE);
+
+  TestTransactionBuilder tx;
+  tx.setUnlockTime(CryptoNote::parameters::CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6 + 1);
+  tx.addTestInput(AMOUNT_1 + 1);
+  auto outInfo = tx.addTestKeyOutput(AMOUNT_1, TEST_TRANSACTION_OUTPUT_GLOBAL_INDEX, account);
+
+  auto txReader = tx.build();
+  ASSERT_TRUE(cappedContainer.addTransaction(blockInfo(TEST_CONTAINER_CURRENT_HEIGHT), *txReader, { outInfo }));
+  ASSERT_TRUE(cappedContainer.advanceHeight(TEST_CONTAINER_CURRENT_HEIGHT + TEST_TRANSACTION_SPENDABLE_AGE));
+
+  ASSERT_EQ(0, cappedContainer.balance(ITransfersContainer::IncludeStateLocked | ITransfersContainer::IncludeTypeAll));
+  ASSERT_EQ(AMOUNT_1, cappedContainer.balance(ITransfersContainer::IncludeStateUnlocked | ITransfersContainer::IncludeTypeAll));
+}
+
 TEST_F(TransfersContainer_balance, handlesTransferStateSoftLocked) {
   auto tx1 = addTransaction(TEST_CONTAINER_CURRENT_HEIGHT - TEST_TRANSACTION_SPENDABLE_AGE, AMOUNT_2);
   auto tx2 = addTransaction(TEST_CONTAINER_CURRENT_HEIGHT, AMOUNT_1);
