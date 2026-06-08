@@ -2214,6 +2214,26 @@ bool Blockchain::checkPqInputs(const Transaction& tx, uint32_t* pmax_used_block_
   return true;
 }
 
+uint64_t Blockchain::pqReferencedInputAmount(const Transaction& tx) {
+  uint64_t sum = 0;
+  for (const auto& txin : tx.inputs) {
+    if (txin.type() != typeid(PqInput)) continue;
+    const PqInput& in = boost::get<PqInput>(txin);
+    uint32_t block; uint16_t slot;
+    if (!m_db.getTxIndex(in.prevTxid, block, slot)) continue;
+    try {
+      TransactionEntry te = transactionByIndex(TransactionIndex{block, slot});
+      if (in.prevOutIndex < te.tx.outputs.size() &&
+          te.tx.outputs[in.prevOutIndex].target.type() == typeid(PqOutput)) {
+        sum += te.tx.outputs[in.prevOutIndex].amount;
+      }
+    } catch (const std::exception&) {
+      // unresolved (checkPqInputs already rejected such a tx); contributes 0
+    }
+  }
+  return sum;
+}
+
 bool Blockchain::checkFreeRegInputs(const Transaction& tx, uint32_t* pmax_used_block_height) {
   std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
   if (pmax_used_block_height) *pmax_used_block_height = 0;
@@ -2640,9 +2660,14 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
       block.transactions.resize(block.transactions.size() + 1);
       block.transactions.back().tx = transactions[i];
 
-      size_t blob_size = toBinaryArray(block.transactions.back().tx).size();
-      uint64_t fee = getInputAmount(block.transactions.back().tx) -
-                     getOutputAmount(block.transactions.back().tx);
+      const Transaction& curTx = block.transactions.back().tx;
+      size_t blob_size = toBinaryArray(curTx).size();
+      // TX_PQ inputs carry no amount (value lives in the referenced outputs), so
+      // getInputAmount would read 0 and the fee would underflow. Resolve the
+      // referenced amounts instead. (TX_BRIDGE has classical inputs -> normal.)
+      const bool pqOnlyInputs = curTx.version >= TRANSACTION_VERSION_PQ && curTx.txType == TX_PQ;
+      uint64_t inAmount = pqOnlyInputs ? pqReferencedInputAmount(curTx) : getInputAmount(curTx);
+      uint64_t fee = inAmount - getOutputAmount(curTx);
 
       // Under a confirmed checkpoint the block hash has already been verified by
       // the network. Skip the expensive per-input validation (key-image domain
