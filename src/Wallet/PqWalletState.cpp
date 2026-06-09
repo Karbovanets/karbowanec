@@ -39,7 +39,7 @@ Crypto::Hash toHash(const CryptoPQ::Hash256& h) {
 PqWalletState::PqWalletState(const PqWalletKeys& keys)
     : m_scanKeys(pqScanKeys(keys)), m_spendPub(keys.spendPub) {}
 
-bool PqWalletState::processTransaction(const Transaction& tx, const Crypto::Hash& txid,
+bool PqWalletState::processTransaction(const TransactionPrefix& tx, const Crypto::Hash& txid,
                                        uint32_t height) {
   // PQ outputs only ever appear in v2 (PQ-family) transactions.
   if (tx.version < TRANSACTION_VERSION_PQ) {

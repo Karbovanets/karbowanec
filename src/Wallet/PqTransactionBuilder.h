@@ -72,7 +72,9 @@ struct BridgeLegacyInput {
 //     the on-wire key image as the per-input identifier: InputRef{prevTxid=keyImage,
 //     prevOutIndex=0}.
 // Both reuse the cemented CryptoPQ::inputsHash function/domain.
-CryptoPQ::Hash256 pqTransactionInputsHash(const Transaction& tx);
+// Takes a TransactionPrefix (Transaction derives from it) because the wallet's
+// scanner only has the prefix available (ITransactionReader::getTransactionData).
+CryptoPQ::Hash256 pqTransactionInputsHash(const TransactionPrefix& tx);
 
 // Build and sign a TX_PQ.
 //

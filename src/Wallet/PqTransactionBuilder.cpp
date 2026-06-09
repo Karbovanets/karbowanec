@@ -30,7 +30,7 @@
 
 namespace CryptoNote {
 
-CryptoPQ::Hash256 pqTransactionInputsHash(const Transaction& tx) {
+CryptoPQ::Hash256 pqTransactionInputsHash(const TransactionPrefix& tx) {
   std::vector<CryptoPQ::InputRef> refs;
   refs.reserve(tx.inputs.size());
   for (const auto& input : tx.inputs) {

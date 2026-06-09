@@ -62,7 +62,9 @@ public:
   // Scan one transaction seen at `height` (use UNCONFIRMED_HEIGHT for mempool).
   // Credits owned PQ outputs and marks owned outputs spent when their nullifier
   // appears among the tx's PQ inputs. Returns true if the wallet was affected.
-  bool processTransaction(const Transaction& tx, const Crypto::Hash& txid, uint32_t height);
+  // Takes a TransactionPrefix: the scanner only has the prefix (PQ input
+  // signatures live inside the inputs, so the prefix carries all PQ data).
+  bool processTransaction(const TransactionPrefix& tx, const Crypto::Hash& txid, uint32_t height);
 
   // Total of unspent owned outputs.
   uint64_t balance() const;
