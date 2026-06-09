@@ -603,6 +603,67 @@ uint32_t WalletLegacy::pqSyncedHeight() const {
   return m_pqConsumer->state().lastScannedHeight();
 }
 
+Transaction WalletLegacy::createBridgeTransaction(const CryptoPQ::KemPublicKey& destViewPub,
+                                                  const CryptoPQ::DsaPublicKey& destSpendPub,
+                                                  uint64_t amount, uint64_t feePerByte,
+                                                  uint64_t& feeOut) {
+  std::unique_lock<std::mutex> lock(m_cacheMutex);
+  throwIfNotInitialised();
+
+  const auto& accKeys = m_account.getAccountKeys();
+  if (accKeys.spendSecretKey == NULL_SECRET_KEY) {
+    throw std::runtime_error("tracking wallet cannot bridge");
+  }
+
+  // Collect unlocked, spendable legacy key outputs.
+  std::vector<TransactionOutputInformation> outs;
+  m_transferDetails->getOutputs(outs, ITransfersContainer::IncludeKeyUnlocked);
+  std::sort(outs.begin(), outs.end(),
+            [](const TransactionOutputInformation& a, const TransactionOutputInformation& b) {
+              return a.amount > b.amount;
+            });
+
+  std::vector<BridgeLegacyInput> selected;
+  uint64_t sumIn = 0;
+  for (const auto& o : outs) {
+    if (o.type != TransactionTypes::OutputType::Key) continue;
+    if (selected.size() >= CryptoNote::parameters::MAX_PQ_OUTPUTS_PER_TX) break;  // conservative cap
+    BridgeLegacyInput bi;
+    bi.senderKeys = accKeys;
+    bi.keyInfo.amount = o.amount;
+    bi.keyInfo.outputs.push_back(TransactionTypes::GlobalOutput{o.outputKey, o.globalOutputIndex});
+    bi.keyInfo.realOutput.transactionPublicKey = o.transactionPublicKey;
+    bi.keyInfo.realOutput.transactionIndex = 0;        // ring size 0: real output is the only member
+    bi.keyInfo.realOutput.outputInTransaction = o.outputInTransaction;
+    selected.push_back(std::move(bi));
+    sumIn += o.amount;
+    if (sumIn >= amount) break;
+  }
+  if (sumIn < amount) {
+    throw std::runtime_error("insufficient unlocked legacy balance to bridge");
+  }
+
+  PqWalletKeys pq = derivePqWalletKeys(accKeys.spendSecretKey);
+
+  auto buildWith = [&](uint64_t change) {
+    std::vector<PqSendOutput> outsPq;
+    outsPq.push_back(PqSendOutput{destViewPub, destSpendPub, amount});
+    if (change > 0) {
+      outsPq.push_back(PqSendOutput{pq.viewPub, pq.spendPub, change});
+    }
+    return buildBridgeTransaction(selected, outsPq);
+  };
+
+  Transaction draft = buildWith(sumIn - amount);
+  uint64_t size = toBinaryArray(draft).size();
+  uint64_t fee = size * (feePerByte == 0 ? 1 : feePerByte) + 1000;  // margin over the floor
+  if (sumIn < amount + fee) {
+    throw std::runtime_error("insufficient unlocked legacy balance to cover the bridge fee");
+  }
+  feeOut = fee;
+  return buildWith(sumIn - amount - fee);
+}
+
 uint64_t WalletLegacy::pendingBalance() {
   std::unique_lock<std::mutex> lock(m_cacheMutex);
   throwIfNotInitialised();
