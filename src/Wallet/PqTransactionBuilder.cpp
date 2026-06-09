@@ -26,6 +26,7 @@
 #include "CryptoNoteCore/PqValidation.h"
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
+#include "CryptoNoteCore/TransactionExtra.h"
 #include "crypto_pq/PqOutputBuilder.h"
 
 namespace CryptoNote {
@@ -162,6 +163,17 @@ Transaction buildBridgeTransaction(std::vector<BridgeLegacyInput>& inputs,
   tx.txType = TX_BRIDGE;
   tx.unlockTime = unlockTime;
   tx.extra.clear();
+
+  // Bridge outputs are all PQ (no stealth tx key is needed to derive them), but
+  // the sender's CLASSICAL wallet detects the spend of its legacy inputs only
+  // for transactions that carry a transaction public key (the classical scanner
+  // skips key-less transactions). So attach a throwaway tx public key in extra
+  // purely so the legacy side marks the migrated outputs as spent.
+  {
+    KeyPair txkey;
+    Crypto::generate_keys(txkey.publicKey, txkey.secretKey);
+    addTransactionPublicKeyToExtra(tx.extra, txkey.publicKey);
+  }
 
   // Classical KeyInputs (one ring each). Generate the key image + ephemeral key
   // for the real output; record the per-input ephemeral secret for signing.
