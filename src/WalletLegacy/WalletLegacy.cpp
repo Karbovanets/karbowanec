@@ -42,6 +42,7 @@
 #include "crypto/crypto.h"
 #include "Common/Base58.h"
 #include "Common/ShuffleGenerator.h"
+#include "Wallet/PqWallet.h"
 #include "Logging/ConsoleLogger.h"
 #include "WalletLegacy/WalletHelper.h"
 #include "WalletLegacy/WalletLegacySerialization.h"
@@ -169,6 +170,9 @@ WalletLegacy::~WalletLegacy() {
 
   m_blockchainSync.removeObserver(this);
   m_blockchainSync.stop();
+  if (m_pqConsumer) {
+    m_blockchainSync.removeConsumer(m_pqConsumer.get());
+  }
   m_asyncContextCounter.waitAsyncContextsFinish();
   m_sender.reset();
 }
@@ -337,8 +341,21 @@ void WalletLegacy::initSync() {
   subObject.addObserver(this);
 
   m_sender.reset(new WalletTransactionSender(m_currency, m_transactionsCache, m_account.getAccountKeys(), *m_transferDetails, m_node));
+
+  // PQ scanning consumer. Requires a spend secret (the PQ identity is derived
+  // from it); tracking wallets have none, so they get no PQ balance.
+  const auto& keys = m_account.getAccountKeys();
+  if (keys.spendSecretKey != NULL_SECRET_KEY) {
+    PqWalletKeys pqKeys = derivePqWalletKeys(keys.spendSecretKey);
+    // TODO(pq): persist the PQ consumer cursor + PqWalletState so the wallet
+    // does not rescan PQ outputs from genesis on each load. Until PQ activates
+    // (block v6) there are no PQ blocks, so the rescan is currently a no-op.
+    m_pqConsumer.reset(new PqConsumer(pqKeys, sub.syncStart, m_logger.getLogger()));
+    m_blockchainSync.addConsumer(m_pqConsumer.get());
+  }
+
   m_state = INITIALIZED;
-  
+
   m_blockchainSync.addObserver(this);
 }
 
@@ -560,6 +577,30 @@ uint64_t WalletLegacy::actualBalance() {
 
   return m_transferDetails->balance(ITransfersContainer::IncludeKeyUnlocked) -
     m_transactionsCache.unconfrimedOutsAmount();
+}
+
+uint64_t WalletLegacy::pqActualBalance() const {
+  std::unique_lock<std::mutex> lock(m_cacheMutex);
+  if (!m_pqConsumer) {
+    return 0;
+  }
+  return m_pqConsumer->state().balance();
+}
+
+std::vector<PqSpendInput> WalletLegacy::pqSpendableInputs() const {
+  std::unique_lock<std::mutex> lock(m_cacheMutex);
+  if (!m_pqConsumer) {
+    return {};
+  }
+  return m_pqConsumer->state().spendableInputs();
+}
+
+uint32_t WalletLegacy::pqSyncedHeight() const {
+  std::unique_lock<std::mutex> lock(m_cacheMutex);
+  if (!m_pqConsumer) {
+    return 0;
+  }
+  return m_pqConsumer->state().lastScannedHeight();
 }
 
 uint64_t WalletLegacy::pendingBalance() {

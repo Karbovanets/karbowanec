@@ -54,6 +54,9 @@
 #include "Transfers/BlockchainSynchronizer.h"
 #include "Transfers/TransfersSynchronizer.h"
 
+#include "Wallet/PqConsumer.h"
+#include "Wallet/PqTransactionBuilder.h"
+
 #include <Logging/LoggerRef.h>
 
 namespace CryptoNote {
@@ -91,6 +94,14 @@ public:
   virtual uint64_t actualBalance() override;
   virtual uint64_t pendingBalance() override;
   virtual uint64_t unmixableBalance() override;
+
+  // --- PQ (post-quantum) balance / spend, concrete (not on IWalletLegacy) ----
+  // Available only for full wallets (a spend secret is required to derive the
+  // PQ identity). Tracking wallets return false / 0 / empty.
+  bool pqEnabled() const { return static_cast<bool>(m_pqConsumer); }
+  uint64_t pqActualBalance() const;
+  std::vector<PqSpendInput> pqSpendableInputs() const;
+  uint32_t pqSyncedHeight() const;
 
   virtual size_t getTransactionCount() override;
   virtual size_t getTransferCount() override;
@@ -166,7 +177,7 @@ private:
   };
 
   WalletState m_state;
-  std::mutex m_cacheMutex;
+  mutable std::mutex m_cacheMutex;
   CryptoNote::AccountBase m_account;
   std::string m_password;
   const CryptoNote::Currency& m_currency;
@@ -181,6 +192,9 @@ private:
   BlockchainSynchronizer m_blockchainSync;
   TransfersSyncronizer m_transfersSync;
   ITransfersContainer* m_transferDetails;
+  // PQ (post-quantum) output scanning runs as a second consumer on the same
+  // synchronizer. Null for tracking wallets (no spend secret -> no PQ identity).
+  std::unique_ptr<PqConsumer> m_pqConsumer;
 
   WalletUserTransactionsCache m_transactionsCache;
   std::unique_ptr<WalletTransactionSender> m_sender;
