@@ -77,3 +77,5 @@ void pqAddress(std::shared_ptr<WalletInfo> walletInfo);
 void pqBalance(std::shared_ptr<WalletInfo> walletInfo);
 
 void pqTransfer(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node);
+
+void bridgeLegacy(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node);

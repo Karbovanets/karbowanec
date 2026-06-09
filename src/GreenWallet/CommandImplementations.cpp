@@ -1273,3 +1273,75 @@ void pqTransfer(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node)
                   << std::endl;
     }
 }
+
+void bridgeLegacy(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node)
+{
+    CryptoNote::WalletGreen &wallet = walletInfo->wallet;
+    if (walletInfo->viewWallet || !wallet.pqEnabled())
+    {
+        std::cout << WarningMsg("Bridging is unavailable for this wallet.") << std::endl;
+        return;
+    }
+
+    std::cout << InformationMsg("PQ recipient address: ");
+    std::string addrStr;
+    std::getline(std::cin, addrStr);
+    CryptoNote::PqAddress dest;
+    if (!CryptoNote::parsePqAddress(addrStr, dest))
+    {
+        std::cout << WarningMsg("Invalid PQ address.") << std::endl;
+        return;
+    }
+
+    std::cout << InformationMsg("Amount of LEGACY funds to migrate: ");
+    std::string amountStr;
+    std::getline(std::cin, amountStr);
+    uint64_t amount = 0;
+    if (!parseAmount(amountStr, amount) || amount == 0)
+    {
+        std::cout << WarningMsg("Invalid amount.") << std::endl;
+        return;
+    }
+
+    std::cout << WarningMsg("This is ONE-WAY: migrated funds can only be spent as PQ funds. "
+                            "Type 'yes' to continue: ");
+    std::string confirm;
+    std::getline(std::cin, confirm);
+    if (confirm != "yes" && confirm != "y" && confirm != "Y")
+    {
+        std::cout << InformationMsg("Cancelled.") << std::endl;
+        return;
+    }
+
+    try
+    {
+        uint64_t fee = 0;
+        CryptoNote::Transaction tx = wallet.createBridgeTransaction(
+            dest.viewPub, dest.spendPub, amount,
+            CryptoNote::parameters::MIN_PQ_FEE_PER_BYTE, fee);
+
+        std::cout << InformationMsg("Built bridge transaction (fee " + formatAmount(fee)
+                                    + "). Relaying...")
+                  << std::endl;
+
+        std::promise<std::error_code> promise;
+        auto future = promise.get_future();
+        node.relayTransaction(tx, [&promise](std::error_code ec) { promise.set_value(ec); });
+        std::error_code ec = future.get();
+        if (ec)
+        {
+            std::cout << WarningMsg("Failed to relay bridge transaction: " + ec.message())
+                      << std::endl;
+            return;
+        }
+        std::cout << SuccessMsg("Bridge transaction sent. Hash: "
+                                + Common::podToHex(CryptoNote::getObjectHash(tx)))
+                  << std::endl
+                  << InformationMsg("Migrated funds will appear in your PQ balance once confirmed.")
+                  << std::endl;
+    }
+    catch (const std::exception &e)
+    {
+        std::cout << WarningMsg(std::string("Bridge failed: ") + e.what()) << std::endl;
+    }
+}

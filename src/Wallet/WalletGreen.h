@@ -55,6 +55,14 @@ public:
   uint64_t pqActualBalance() const;
   std::vector<PqSpendInput> pqSpendableInputs() const;
   uint32_t pqSyncedHeight() const;
+  // Build a signed TX_BRIDGE migrating `amount` of the LEGACY balance (across all
+  // of this wallet's addresses) to the given PQ recipient, PQ change to this
+  // wallet's own PQ address. Ring size 0 (no decoys) for now. Throws on
+  // insufficient unlocked funds.
+  Transaction createBridgeTransaction(const CryptoPQ::KemPublicKey& destViewPub,
+                                      const CryptoPQ::DsaPublicKey& destSpendPub,
+                                      uint64_t amount, uint64_t feePerByte,
+                                      uint64_t& feeOut);
 
   virtual void initialize(const std::string& path, const std::string& password) override;
   virtual void initializeWithViewKey(const std::string& path, const std::string& password, const Crypto::SecretKey& viewSecretKey) override;

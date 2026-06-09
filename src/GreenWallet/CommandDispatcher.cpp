@@ -152,6 +152,10 @@ bool handleCommand(const std::string command,
     {
         pqTransfer(walletInfo, node);
     }
+    else if (command == "bridge_legacy")
+    {
+        bridgeLegacy(walletInfo, node);
+    }
     /* This should never happen */
     else
     {

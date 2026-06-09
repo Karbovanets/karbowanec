@@ -3410,6 +3410,85 @@ uint32_t WalletGreen::pqSyncedHeight() const {
   return m_pqConsumer ? m_pqConsumer->state().lastScannedHeight() : 0;
 }
 
+Transaction WalletGreen::createBridgeTransaction(const CryptoPQ::KemPublicKey& destViewPub,
+                                                 const CryptoPQ::DsaPublicKey& destSpendPub,
+                                                 uint64_t amount, uint64_t feePerByte,
+                                                 uint64_t& feeOut) {
+  throwIfNotInitialized();
+  throwIfStopped();
+  throwIfTrackingMode();
+
+  // Collect unlocked legacy key outputs across all addresses, each paired with
+  // the owning address's keys; select largest-first to cover amount + fee.
+  struct Candidate { TransactionOutputInformation out; AccountKeys keys; };
+  std::vector<Candidate> candidates;
+  const auto& index = m_walletsContainer.get<RandomAccessIndex>();
+  if (index.empty()) {
+    throw std::runtime_error("wallet has no addresses");
+  }
+  Crypto::SecretKey primarySpend = index[0].spendSecretKey;
+  for (const auto& rec : index) {
+    if (rec.container == nullptr || rec.spendSecretKey == NULL_SECRET_KEY) {
+      continue;
+    }
+    AccountKeys ak;
+    ak.address.spendPublicKey = rec.spendPublicKey;
+    ak.address.viewPublicKey = m_viewPublicKey;
+    ak.spendSecretKey = rec.spendSecretKey;
+    ak.viewSecretKey = m_viewSecretKey;
+
+    std::vector<TransactionOutputInformation> outs;
+    rec.container->getOutputs(outs, ITransfersContainer::IncludeKeyUnlocked);
+    for (const auto& o : outs) {
+      if (o.type == TransactionTypes::OutputType::Key) {
+        candidates.push_back(Candidate{o, ak});
+      }
+    }
+  }
+  std::sort(candidates.begin(), candidates.end(),
+            [](const Candidate& a, const Candidate& b) { return a.out.amount > b.out.amount; });
+
+  // Cap input count so the bridge tx stays well under MAX_PQ_TX_SIZE.
+  const size_t kMaxBridgeInputs = 50;
+  std::vector<BridgeLegacyInput> selected;
+  uint64_t sumIn = 0;
+  for (const auto& c : candidates) {
+    if (selected.size() >= kMaxBridgeInputs) break;
+    BridgeLegacyInput bi;
+    bi.senderKeys = c.keys;
+    bi.keyInfo.amount = c.out.amount;
+    bi.keyInfo.outputs.push_back(TransactionTypes::GlobalOutput{c.out.outputKey, c.out.globalOutputIndex});
+    bi.keyInfo.realOutput.transactionPublicKey = c.out.transactionPublicKey;
+    bi.keyInfo.realOutput.transactionIndex = 0;
+    bi.keyInfo.realOutput.outputInTransaction = c.out.outputInTransaction;
+    selected.push_back(std::move(bi));
+    sumIn += c.out.amount;
+    if (sumIn >= amount) break;
+  }
+  if (sumIn < amount) {
+    throw std::runtime_error("insufficient unlocked legacy balance to bridge");
+  }
+
+  PqWalletKeys pq = derivePqWalletKeys(primarySpend);
+  auto buildWith = [&](uint64_t change) {
+    std::vector<PqSendOutput> outsPq;
+    outsPq.push_back(PqSendOutput{destViewPub, destSpendPub, amount});
+    if (change > 0) {
+      outsPq.push_back(PqSendOutput{pq.viewPub, pq.spendPub, change});
+    }
+    return buildBridgeTransaction(selected, outsPq);
+  };
+
+  Transaction draft = buildWith(sumIn - amount);
+  uint64_t size = toBinaryArray(draft).size();
+  uint64_t fee = size * (feePerByte == 0 ? 1 : feePerByte) + 1000;
+  if (sumIn < amount + fee) {
+    throw std::runtime_error("insufficient unlocked legacy balance to cover the bridge fee");
+  }
+  feeOut = fee;
+  return buildWith(sumIn - amount - fee);
+}
+
 void WalletGreen::startBlockchainSynchronizer() {
   if (!m_walletsContainer.empty() && !m_blockchainSynchronizerStarted) {
     m_logger(DEBUGGING) << "Starting BlockchainSynchronizer";
