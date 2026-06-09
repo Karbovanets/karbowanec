@@ -31,6 +31,7 @@
 #include "WalletLegacy.h"
 
 #include <algorithm>
+#include <future>
 #include <numeric>
 #include <crypto/random.h>
 #include <set>
@@ -670,7 +671,7 @@ uint32_t WalletLegacy::pqSyncedHeight() const {
 Transaction WalletLegacy::createBridgeTransaction(const CryptoPQ::KemPublicKey& destViewPub,
                                                   const CryptoPQ::DsaPublicKey& destSpendPub,
                                                   uint64_t amount, uint64_t feePerByte,
-                                                  uint64_t& feeOut) {
+                                                  uint64_t mixin, uint64_t& feeOut) {
   std::unique_lock<std::mutex> lock(m_cacheMutex);
   throwIfNotInitialised();
 
@@ -679,7 +680,7 @@ Transaction WalletLegacy::createBridgeTransaction(const CryptoPQ::KemPublicKey& 
     throw std::runtime_error("tracking wallet cannot bridge");
   }
 
-  // Collect unlocked, spendable legacy key outputs.
+  // Collect unlocked, spendable legacy key outputs, largest first.
   std::vector<TransactionOutputInformation> outs;
   m_transferDetails->getOutputs(outs, ITransfersContainer::IncludeKeyUnlocked);
   std::sort(outs.begin(), outs.end(),
@@ -687,24 +688,69 @@ Transaction WalletLegacy::createBridgeTransaction(const CryptoPQ::KemPublicKey& 
               return a.amount > b.amount;
             });
 
-  std::vector<BridgeLegacyInput> selected;
+  std::vector<TransactionOutputInformation> chosen;
   uint64_t sumIn = 0;
   for (const auto& o : outs) {
     if (o.type != TransactionTypes::OutputType::Key) continue;
-    if (selected.size() >= CryptoNote::parameters::MAX_PQ_OUTPUTS_PER_TX) break;  // conservative cap
-    BridgeLegacyInput bi;
-    bi.senderKeys = accKeys;
-    bi.keyInfo.amount = o.amount;
-    bi.keyInfo.outputs.push_back(TransactionTypes::GlobalOutput{o.outputKey, o.globalOutputIndex});
-    bi.keyInfo.realOutput.transactionPublicKey = o.transactionPublicKey;
-    bi.keyInfo.realOutput.transactionIndex = 0;        // ring size 0: real output is the only member
-    bi.keyInfo.realOutput.outputInTransaction = o.outputInTransaction;
-    selected.push_back(std::move(bi));
+    if (chosen.size() >= 50) break;  // bound tx size
+    chosen.push_back(o);
     sumIn += o.amount;
     if (sumIn >= amount) break;
   }
   if (sumIn < amount) {
     throw std::runtime_error("insufficient unlocked legacy balance to bridge");
+  }
+
+  // Resolve ring decoys for privacy (mixin>0). Mirrors the classical send path:
+  // request mixin+1 random outs per input amount, drop the real one, splice the
+  // real output in at its sorted position. On a sparse chain we use whatever
+  // decoys the node returns rather than failing the bridge.
+  std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount> mixOuts;
+  if (mixin > 0) {
+    std::vector<uint64_t> amounts;
+    amounts.reserve(chosen.size());
+    for (const auto& o : chosen) amounts.push_back(o.amount);
+    std::promise<std::error_code> promise;
+    auto future = promise.get_future();
+    m_node.getRandomOutsByAmounts(std::move(amounts), mixin + 1, mixOuts,
+                                  [&promise](std::error_code ec) { promise.set_value(ec); });
+    if (future.get()) {
+      mixOuts.clear();  // fall back to no decoys on RPC failure
+    }
+  }
+
+  std::vector<BridgeLegacyInput> selected;
+  for (size_t i = 0; i < chosen.size(); ++i) {
+    const TransactionOutputInformation& td = chosen[i];
+    BridgeLegacyInput bi;
+    bi.senderKeys = accKeys;
+    bi.keyInfo.amount = td.amount;
+
+    if (i < mixOuts.size()) {
+      std::sort(mixOuts[i].outs.begin(), mixOuts[i].outs.end(),
+                [](const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& a,
+                   const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& b) {
+                  return a.global_amount_index < b.global_amount_index;
+                });
+      for (auto& oe : mixOuts[i].outs) {
+        if (oe.global_amount_index == td.globalOutputIndex) continue;
+        bi.keyInfo.outputs.push_back(
+            TransactionTypes::GlobalOutput{oe.out_key, static_cast<uint32_t>(oe.global_amount_index)});
+        if (bi.keyInfo.outputs.size() >= mixin) break;
+      }
+    }
+    // Splice the real output in at its sorted position.
+    auto it = std::find_if(bi.keyInfo.outputs.begin(), bi.keyInfo.outputs.end(),
+                           [&](const TransactionTypes::GlobalOutput& g) {
+                             return g.outputIndex >= td.globalOutputIndex;
+                           });
+    auto realIt = bi.keyInfo.outputs.insert(
+        it, TransactionTypes::GlobalOutput{td.outputKey, td.globalOutputIndex});
+    bi.keyInfo.realOutput.transactionPublicKey = td.transactionPublicKey;
+    bi.keyInfo.realOutput.transactionIndex =
+        static_cast<size_t>(realIt - bi.keyInfo.outputs.begin());
+    bi.keyInfo.realOutput.outputInTransaction = td.outputInTransaction;
+    selected.push_back(std::move(bi));
   }
 
   PqWalletKeys pq = derivePqWalletKeys(accKeys.spendSecretKey);

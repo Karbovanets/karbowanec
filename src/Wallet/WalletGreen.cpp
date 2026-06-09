@@ -3413,7 +3413,7 @@ uint32_t WalletGreen::pqSyncedHeight() const {
 Transaction WalletGreen::createBridgeTransaction(const CryptoPQ::KemPublicKey& destViewPub,
                                                  const CryptoPQ::DsaPublicKey& destSpendPub,
                                                  uint64_t amount, uint64_t feePerByte,
-                                                 uint64_t& feeOut) {
+                                                 uint64_t mixin, uint64_t& feeOut) {
   throwIfNotInitialized();
   throwIfStopped();
   throwIfTrackingMode();
@@ -3448,25 +3448,66 @@ Transaction WalletGreen::createBridgeTransaction(const CryptoPQ::KemPublicKey& d
   std::sort(candidates.begin(), candidates.end(),
             [](const Candidate& a, const Candidate& b) { return a.out.amount > b.out.amount; });
 
-  // Cap input count so the bridge tx stays well under MAX_PQ_TX_SIZE.
+  // Select candidates (largest first), capping count to bound tx size.
   const size_t kMaxBridgeInputs = 50;
-  std::vector<BridgeLegacyInput> selected;
+  std::vector<Candidate> chosen;
   uint64_t sumIn = 0;
   for (const auto& c : candidates) {
-    if (selected.size() >= kMaxBridgeInputs) break;
-    BridgeLegacyInput bi;
-    bi.senderKeys = c.keys;
-    bi.keyInfo.amount = c.out.amount;
-    bi.keyInfo.outputs.push_back(TransactionTypes::GlobalOutput{c.out.outputKey, c.out.globalOutputIndex});
-    bi.keyInfo.realOutput.transactionPublicKey = c.out.transactionPublicKey;
-    bi.keyInfo.realOutput.transactionIndex = 0;
-    bi.keyInfo.realOutput.outputInTransaction = c.out.outputInTransaction;
-    selected.push_back(std::move(bi));
+    if (chosen.size() >= kMaxBridgeInputs) break;
+    chosen.push_back(c);
     sumIn += c.out.amount;
     if (sumIn >= amount) break;
   }
   if (sumIn < amount) {
     throw std::runtime_error("insufficient unlocked legacy balance to bridge");
+  }
+
+  // Resolve ring decoys (mixin>0). Same scheme as the classical send path; on a
+  // sparse chain we use whatever decoys the node returns rather than failing.
+  std::vector<COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::outs_for_amount> mixOuts;
+  if (mixin > 0) {
+    std::vector<uint64_t> amounts;
+    amounts.reserve(chosen.size());
+    for (const auto& c : chosen) amounts.push_back(c.out.amount);
+    std::promise<std::error_code> promise;
+    auto future = promise.get_future();
+    m_node.getRandomOutsByAmounts(std::move(amounts), mixin + 1, mixOuts,
+                                  [&promise](std::error_code ec) { promise.set_value(ec); });
+    if (future.get()) {
+      mixOuts.clear();
+    }
+  }
+
+  std::vector<BridgeLegacyInput> selected;
+  for (size_t i = 0; i < chosen.size(); ++i) {
+    const TransactionOutputInformation& td = chosen[i].out;
+    BridgeLegacyInput bi;
+    bi.senderKeys = chosen[i].keys;
+    bi.keyInfo.amount = td.amount;
+    if (i < mixOuts.size()) {
+      std::sort(mixOuts[i].outs.begin(), mixOuts[i].outs.end(),
+                [](const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& a,
+                   const COMMAND_RPC_GET_RANDOM_OUTPUTS_FOR_AMOUNTS::out_entry& b) {
+                  return a.global_amount_index < b.global_amount_index;
+                });
+      for (auto& oe : mixOuts[i].outs) {
+        if (oe.global_amount_index == td.globalOutputIndex) continue;
+        bi.keyInfo.outputs.push_back(
+            TransactionTypes::GlobalOutput{oe.out_key, static_cast<uint32_t>(oe.global_amount_index)});
+        if (bi.keyInfo.outputs.size() >= mixin) break;
+      }
+    }
+    auto it = std::find_if(bi.keyInfo.outputs.begin(), bi.keyInfo.outputs.end(),
+                           [&](const TransactionTypes::GlobalOutput& g) {
+                             return g.outputIndex >= td.globalOutputIndex;
+                           });
+    auto realIt = bi.keyInfo.outputs.insert(
+        it, TransactionTypes::GlobalOutput{td.outputKey, td.globalOutputIndex});
+    bi.keyInfo.realOutput.transactionPublicKey = td.transactionPublicKey;
+    bi.keyInfo.realOutput.transactionIndex =
+        static_cast<size_t>(realIt - bi.keyInfo.outputs.begin());
+    bi.keyInfo.realOutput.outputInTransaction = td.outputInTransaction;
+    selected.push_back(std::move(bi));
   }
 
   PqWalletKeys pq = derivePqWalletKeys(primarySpend);

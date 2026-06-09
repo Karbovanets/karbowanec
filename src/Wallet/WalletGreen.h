@@ -62,7 +62,7 @@ public:
   Transaction createBridgeTransaction(const CryptoPQ::KemPublicKey& destViewPub,
                                       const CryptoPQ::DsaPublicKey& destSpendPub,
                                       uint64_t amount, uint64_t feePerByte,
-                                      uint64_t& feeOut);
+                                      uint64_t mixin, uint64_t& feeOut);
 
   virtual void initialize(const std::string& path, const std::string& password) override;
   virtual void initializeWithViewKey(const std::string& path, const std::string& password, const Crypto::SecretKey& viewSecretKey) override;

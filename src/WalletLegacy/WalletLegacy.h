@@ -110,7 +110,7 @@ public:
   Transaction createBridgeTransaction(const CryptoPQ::KemPublicKey& destViewPub,
                                       const CryptoPQ::DsaPublicKey& destSpendPub,
                                       uint64_t amount, uint64_t feePerByte,
-                                      uint64_t& feeOut);
+                                      uint64_t mixin, uint64_t& feeOut);
 
   virtual size_t getTransactionCount() override;
   virtual size_t getTransferCount() override;
