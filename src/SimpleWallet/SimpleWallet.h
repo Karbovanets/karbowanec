@@ -132,6 +132,8 @@ namespace CryptoNote
     bool verify_message(const std::vector<std::string> &args);
     bool register_account(const std::vector<std::string> &args);
     bool pq_address(const std::vector<std::string> &args = std::vector<std::string>());
+    bool pq_balance(const std::vector<std::string> &args = std::vector<std::string>());
+    bool pq_transfer(const std::vector<std::string> &args);
 
     std::string get_formatted_wallet_keys();
 

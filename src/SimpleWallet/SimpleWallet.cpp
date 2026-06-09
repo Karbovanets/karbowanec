@@ -84,6 +84,9 @@
 #include "WalletLegacy/WalletLegacy.h"
 #include "Wallet/LegacyKeysImporter.h"
 #include "Wallet/PqWallet.h"
+#include "Wallet/PqTransactionBuilder.h"
+#include "WalletLegacy/WalletLegacy.h"
+#include "CryptoNoteCore/CryptoNoteTools.h"
 #include "WalletLegacy/WalletHelper.h"
 #include "ITransfersContainer.h"
 
@@ -728,6 +731,8 @@ simple_wallet::simple_wallet(System::Dispatcher& dispatcher, const CryptoNote::C
   m_consoleHandler.setHandler("verify_message", std::bind(&simple_wallet::verify_message, this, std::placeholders::_1), "Verify a signature of the message");
   m_consoleHandler.setHandler("register_account", std::bind(&simple_wallet::register_account, this, std::placeholders::_1), "Register an account number for easy payments");
   m_consoleHandler.setHandler("pq_address", std::bind(&simple_wallet::pq_address, this, std::placeholders::_1), "Show this wallet's post-quantum (PQ) address, derived from the same seed. Add 'bech32' for the QR-friendly encoding.");
+  m_consoleHandler.setHandler("pq_balance", std::bind(&simple_wallet::pq_balance, this, std::placeholders::_1), "Show the separate post-quantum (PQ) balance");
+  m_consoleHandler.setHandler("pq_transfer", std::bind(&simple_wallet::pq_transfer, this, std::placeholders::_1), "pq_transfer <pq_address> <amount> - Send PQ funds to a PQ address");
   m_consoleHandler.setHandler("help", std::bind(&simple_wallet::help, this, std::placeholders::_1), "Show this help");
   m_consoleHandler.setHandler("exit", std::bind(&simple_wallet::exit, this, std::placeholders::_1), "Close wallet");
 }
@@ -2579,6 +2584,113 @@ bool simple_wallet::pq_address(const std::vector<std::string> &args) {
     logger(INFO) << "Tip: 'pq_address bech32' prints the QR-friendlier encoding.";
   }
   logger(INFO) << "Anyone can pay this address; only this wallet's seed can spend it.";
+  return true;
+}
+//----------------------------------------------------------------------------------------------------
+bool simple_wallet::pq_balance(const std::vector<std::string> &args) {
+  auto* wl = dynamic_cast<CryptoNote::WalletLegacy*>(m_wallet.get());
+  if (!wl || !wl->pqEnabled()) {
+    fail_msg_writer() << "PQ balance is unavailable for this wallet (tracking wallet or no spend key).";
+    return true;
+  }
+  success_msg_writer() << "PQ available balance: " << m_currency.formatAmount(wl->pqActualBalance());
+  success_msg_writer() << "PQ scanned to height:  " << wl->pqSyncedHeight();
+  logger(INFO) << "Note: PQ and legacy balances are separate and are never combined.";
+  return true;
+}
+//----------------------------------------------------------------------------------------------------
+bool simple_wallet::pq_transfer(const std::vector<std::string> &args) {
+  if (args.size() != 2) {
+    fail_msg_writer() << "usage: pq_transfer <pq_address> <amount>";
+    return true;
+  }
+  if (m_trackingWallet) {
+    fail_msg_writer() << "This is a tracking wallet and cannot spend.";
+    return true;
+  }
+  auto* wl = dynamic_cast<CryptoNote::WalletLegacy*>(m_wallet.get());
+  if (!wl || !wl->pqEnabled()) {
+    fail_msg_writer() << "PQ spending is unavailable for this wallet.";
+    return true;
+  }
+
+  CryptoNote::PqAddress dest;
+  if (!CryptoNote::parsePqAddress(args[0], dest)) {
+    fail_msg_writer() << "Invalid PQ address.";
+    return true;
+  }
+
+  uint64_t amount = 0;
+  if (!m_currency.parseAmount(args[1], amount) || amount == 0) {
+    fail_msg_writer() << "Invalid amount.";
+    return true;
+  }
+
+  CryptoNote::AccountKeys keys;
+  m_wallet->getAccountKeys(keys);
+  CryptoNote::PqWalletKeys pq = CryptoNote::derivePqWalletKeys(keys.spendSecretKey);
+
+  // Select spendable PQ inputs (largest first) to cover amount + fee.
+  std::vector<CryptoNote::PqSpendInput> available = wl->pqSpendableInputs();
+  std::sort(available.begin(), available.end(),
+            [](const CryptoNote::PqSpendInput& a, const CryptoNote::PqSpendInput& b) {
+              return a.amount > b.amount;
+            });
+
+  std::vector<CryptoNote::PqSpendInput> selected;
+  uint64_t sumIn = 0;
+  for (const auto& in : available) {
+    if (selected.size() >= CryptoNote::parameters::MAX_PQ_INPUTS_PER_TX) break;
+    selected.push_back(in);
+    sumIn += in.amount;
+    if (sumIn >= amount) break;
+  }
+  if (sumIn < amount) {
+    fail_msg_writer() << "Insufficient PQ balance: have " << m_currency.formatAmount(wl->pqActualBalance())
+                      << ", need at least " << m_currency.formatAmount(amount) << " plus fee.";
+    return true;
+  }
+
+  // Two-pass fee: PQ output/input sizes are fixed, so the draft size equals the
+  // final size whenever a change output is present; fee = size * MIN_PQ_FEE_PER_BYTE.
+  auto buildWith = [&](uint64_t change) {
+    std::vector<CryptoNote::PqSendOutput> outs;
+    outs.push_back(CryptoNote::PqSendOutput{dest.viewPub, dest.spendPub, amount});
+    if (change > 0) {
+      outs.push_back(CryptoNote::PqSendOutput{pq.viewPub, pq.spendPub, change});
+    }
+    return CryptoNote::buildPqTransaction(selected, outs, pq.spendPub, pq.spendSk);
+  };
+
+  try {
+    CryptoNote::Transaction draft = buildWith(sumIn - amount);
+    uint64_t size = CryptoNote::toBinaryArray(draft).size();
+    uint64_t fee = size * CryptoNote::parameters::MIN_PQ_FEE_PER_BYTE + 1000;  // small margin over floor
+    if (sumIn < amount + fee) {
+      fail_msg_writer() << "Insufficient PQ balance to cover the " << m_currency.formatAmount(fee)
+                        << " fee.";
+      return true;
+    }
+    uint64_t change = sumIn - amount - fee;
+    CryptoNote::Transaction tx = buildWith(change);
+
+    success_msg_writer() << "Sending " << m_currency.formatAmount(amount) << " (fee "
+                         << m_currency.formatAmount(fee) << ", "
+                         << selected.size() << " input(s)) to PQ address...";
+
+    std::promise<std::error_code> promise;
+    auto future = promise.get_future();
+    m_node->relayTransaction(tx, [&promise](std::error_code ec) { promise.set_value(ec); });
+    std::error_code ec = future.get();
+    if (ec) {
+      fail_msg_writer() << "Failed to relay PQ transaction: " << ec.message();
+      return true;
+    }
+    success_msg_writer(true) << "PQ transaction sent. Hash: "
+                             << Common::podToHex(CryptoNote::getObjectHash(tx));
+  } catch (const std::exception& e) {
+    fail_msg_writer() << "Failed to build PQ transaction: " << e.what();
+  }
   return true;
 }
 //----------------------------------------------------------------------------------------------------
