@@ -18,6 +18,8 @@
 #include "PqWalletState.h"
 
 #include <cstring>
+#include <istream>
+#include <ostream>
 
 #include "CryptoNoteConfig.h"
 #include "PqTxType.h"
@@ -33,6 +35,17 @@ Crypto::Hash toHash(const CryptoPQ::Hash256& h) {
   std::memcpy(out.data, h.data(), 32);
   return out;
 }
+
+template <typename T>
+void writePod(std::ostream& os, const T& v) {
+  os.write(reinterpret_cast<const char*>(&v), sizeof(T));
+}
+template <typename T>
+void readPod(std::istream& is, T& v) {
+  is.read(reinterpret_cast<char*>(&v), sizeof(T));
+}
+
+constexpr uint8_t kPqStateFormatVersion = 1;
 
 }  // namespace
 
@@ -183,6 +196,59 @@ void PqWalletState::rollbackToHeight(uint32_t h) {
   }
   if (m_lastScannedHeight >= h && h > 0) {
     m_lastScannedHeight = h - 1;
+  }
+}
+
+void PqWalletState::save(std::ostream& os) const {
+  writePod(os, kPqStateFormatVersion);
+  writePod(os, m_lastScannedHeight);
+  uint64_t count = m_outputs.size();
+  writePod(os, count);
+  for (const auto& o : m_outputs) {
+    os.write(reinterpret_cast<const char*>(o.txid.data), 32);
+    writePod(os, o.outputIndex);
+    writePod(os, o.amount);
+    os.write(reinterpret_cast<const char*>(o.rho.data()), 32);
+    os.write(reinterpret_cast<const char*>(o.nullifier.data), 32);
+    writePod(os, o.height);
+    uint8_t spent = o.spent ? 1 : 0;
+    writePod(os, spent);
+    writePod(os, o.spentHeight);
+  }
+}
+
+void PqWalletState::load(std::istream& is) {
+  m_outputs.clear();
+  m_byNullifier.clear();
+  m_lastScannedHeight = 0;
+
+  uint8_t version = 0;
+  readPod(is, version);
+  if (!is || version != kPqStateFormatVersion) {
+    // Unknown/absent format -> start empty; the consumer will rescan.
+    m_outputs.clear();
+    m_byNullifier.clear();
+    m_lastScannedHeight = 0;
+    return;
+  }
+  readPod(is, m_lastScannedHeight);
+  uint64_t count = 0;
+  readPod(is, count);
+  for (uint64_t i = 0; i < count && is; ++i) {
+    PqWalletOutput o;
+    is.read(reinterpret_cast<char*>(o.txid.data), 32);
+    readPod(is, o.outputIndex);
+    readPod(is, o.amount);
+    is.read(reinterpret_cast<char*>(o.rho.data()), 32);
+    is.read(reinterpret_cast<char*>(o.nullifier.data), 32);
+    readPod(is, o.height);
+    uint8_t spent = 0;
+    readPod(is, spent);
+    o.spent = spent != 0;
+    readPod(is, o.spentHeight);
+    if (!is) break;
+    m_byNullifier.emplace(o.nullifier, m_outputs.size());
+    m_outputs.push_back(o);
   }
 }
 

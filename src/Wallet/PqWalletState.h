@@ -18,6 +18,7 @@
 #pragma once
 
 #include <cstdint>
+#include <iosfwd>
 #include <unordered_map>
 #include <vector>
 
@@ -82,6 +83,11 @@ public:
 
   uint32_t lastScannedHeight() const { return m_lastScannedHeight; }
   void setLastScannedHeight(uint32_t h) { m_lastScannedHeight = h; }
+
+  // Binary persistence of the owned-output set + scan cursor. The keys are NOT
+  // stored (they are re-supplied at construction from the wallet seed).
+  void save(std::ostream& os) const;
+  void load(std::istream& is);
 
   static constexpr uint32_t UNCONFIRMED_HEIGHT = 0xFFFFFFFFu;
 

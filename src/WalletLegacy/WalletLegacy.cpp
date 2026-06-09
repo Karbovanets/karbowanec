@@ -64,6 +64,11 @@ namespace {
 
 const uint64_t ACCOUNT_CREATE_TIME_ACCURACY = 24 * 60 * 60;
 
+// Header on the wallet cache blob once it carries PQ sections. Absent on legacy
+// (pre-PQ) caches, which were a bare transfers-sync blob.
+constexpr char PQ_CACHE_MAGIC[] = {'K', 'P', 'Q', 'C', 'A', 'C', 'H', '1'};
+constexpr int  PQ_CACHE_MAGIC_LEN = 8;
+
 void throwNotDefined() {
   throw std::runtime_error("The behavior is not defined!");
 }
@@ -373,7 +378,36 @@ void WalletLegacy::doLoad(std::istream& source) {
     try {
       if (!cache.empty()) {
         std::stringstream stream(cache);
-        m_transfersSync.load(stream);
+        char magic[PQ_CACHE_MAGIC_LEN] = {0};
+        stream.read(magic, PQ_CACHE_MAGIC_LEN);
+        if (stream.gcount() == PQ_CACHE_MAGIC_LEN &&
+            std::memcmp(magic, PQ_CACHE_MAGIC, PQ_CACHE_MAGIC_LEN) == 0) {
+          auto readSection = [&stream](std::string& out) -> bool {
+            uint64_t len = 0;
+            stream.read(reinterpret_cast<char*>(&len), sizeof(len));
+            if (!stream) return false;
+            out.resize(len);
+            if (len) stream.read(&out[0], static_cast<std::streamsize>(len));
+            return static_cast<bool>(stream);
+          };
+          std::string transfersCache, consumerState, pqState;
+          if (readSection(transfersCache)) {
+            std::stringstream ts(transfersCache);
+            m_transfersSync.load(ts);
+          }
+          if (readSection(consumerState) && m_pqConsumer && !consumerState.empty()) {
+            std::stringstream cs(consumerState);
+            m_blockchainSync.getConsumerState(m_pqConsumer.get())->load(cs);
+          }
+          if (readSection(pqState) && m_pqConsumer && !pqState.empty()) {
+            std::stringstream ps(pqState);
+            m_pqConsumer->state().load(ps);
+          }
+        } else {
+          // Legacy (pre-PQ) cache: the whole blob is the transfers cache.
+          std::stringstream legacy(cache);
+          m_transfersSync.load(legacy);
+        }
       }
     } catch (const std::exception&) {
       // ignore cache loading errors
@@ -501,9 +535,34 @@ void WalletLegacy::doSave(std::ostream& destination, bool saveDetailed, bool sav
     std::string cache;
 
     if (saveCache) {
-      std::stringstream stream;
-      m_transfersSync.save(stream);
-      cache = stream.str();
+      std::stringstream transfersStream;
+      m_transfersSync.save(transfersStream);
+      std::string transfersCache = transfersStream.str();
+
+      // Framed cache: magic || [u64 len || bytes] x3 (transfers, PQ consumer
+      // cursor, PQ wallet state). The magic lets older/legacy caches (which were
+      // a bare transfers blob) be detected and loaded on the fallback path.
+      std::stringstream combined;
+      combined.write(PQ_CACHE_MAGIC, PQ_CACHE_MAGIC_LEN);
+      auto writeSection = [&combined](const std::string& s) {
+        uint64_t len = s.size();
+        combined.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        if (len) combined.write(s.data(), s.size());
+      };
+      writeSection(transfersCache);
+
+      std::string consumerState, pqState;
+      if (m_pqConsumer) {
+        std::stringstream cs;
+        m_blockchainSync.getConsumerState(m_pqConsumer.get())->save(cs);
+        consumerState = cs.str();
+        std::stringstream ps;
+        m_pqConsumer->state().save(ps);
+        pqState = ps.str();
+      }
+      writeSection(consumerState);
+      writeSection(pqState);
+      cache = combined.str();
     }
 
     serializer.serialize(destination, m_password, saveDetailed, cache);

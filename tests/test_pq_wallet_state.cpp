@@ -18,6 +18,7 @@
 #include "CryptoNote.h"
 
 #include <cstring>
+#include <sstream>
 #include <vector>
 
 using namespace CryptoNote;
@@ -164,6 +165,59 @@ TEST(PqWalletState, SpendableInputsCarryRho) {
     bool nonZero = false;
     for (auto x : ins[0].rho) if (x) { nonZero = true; break; }
     EXPECT_TRUE(nonZero);
+}
+
+TEST(PqWalletState, SaveLoadRoundTrip) {
+    PqWalletKeys me   = derivePqWalletKeys(spendSecret(9, 1));
+    PqWalletKeys them = derivePqWalletKeys(spendSecret(7, 3));
+    PqWalletKeys dest = derivePqWalletKeys(spendSecret(4, 4));
+
+    PqWalletState st(me);
+    Funded a = payTo(them, me, 1000000, 500000, 0x70);  // received @100
+    Funded b = payTo(them, me, 1000000, 300000, 0x80);  // received @110
+    ASSERT_TRUE(st.processTransaction(a.tx, a.txid, 100));
+    ASSERT_TRUE(st.processTransaction(b.tx, b.txid, 110));
+
+    // Spend output `a`.
+    std::vector<PqSpendInput> ins;
+    for (const auto& o : st.outputs())
+        if (o.amount == 500000) ins.push_back(PqSpendInput{o.txid, o.outputIndex, o.amount, o.rho});
+    Transaction spend = buildPqTransaction(ins, {PqSendOutput{dest.viewPub, dest.spendPub, 450000}},
+                                           me.spendPub, me.spendSk);
+    ASSERT_TRUE(st.processTransaction(spend, getObjectHash(spend), 112));
+    st.setLastScannedHeight(120);
+    ASSERT_EQ(st.balance(), 300000u);
+
+    std::stringstream ss;
+    st.save(ss);
+
+    PqWalletState restored(me);
+    restored.load(ss);
+
+    EXPECT_EQ(restored.balance(), 300000u);
+    EXPECT_EQ(restored.ownedCount(), 2u);
+    EXPECT_EQ(restored.unspentCount(), 1u);
+    EXPECT_EQ(restored.lastScannedHeight(), 120u);
+
+    // The spend-tracking index survives: re-feeding the spend is idempotent and
+    // the spent output stays spent.
+    EXPECT_FALSE(restored.processTransaction(spend, getObjectHash(spend), 112));
+    EXPECT_EQ(restored.balance(), 300000u);
+
+    // And a fresh receive is still recognized after a reload.
+    Funded c = payTo(them, me, 1000000, 200000, 0x90);
+    EXPECT_TRUE(restored.processTransaction(c.tx, c.txid, 130));
+    EXPECT_EQ(restored.balance(), 500000u);
+}
+
+TEST(PqWalletState, LoadGarbageYieldsEmpty) {
+    PqWalletKeys me = derivePqWalletKeys(spendSecret(9, 1));
+    PqWalletState st(me);
+    std::stringstream ss;
+    ss << "not a valid pq state blob";
+    st.load(ss);
+    EXPECT_EQ(st.balance(), 0u);
+    EXPECT_EQ(st.ownedCount(), 0u);
 }
 
 int main(int argc, char** argv) {
