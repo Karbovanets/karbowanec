@@ -135,6 +135,7 @@ namespace CryptoNote
     bool pq_balance(const std::vector<std::string> &args = std::vector<std::string>());
     bool pq_transfer(const std::vector<std::string> &args);
     bool bridge_legacy(const std::vector<std::string> &args);
+    bool pq_register(const std::vector<std::string> &args = std::vector<std::string>());
 
     std::string get_formatted_wallet_keys();
 

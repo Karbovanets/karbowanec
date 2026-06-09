@@ -296,6 +296,28 @@ TEST(PqBridgeBuilder, TamperedOutputBreaksRingSignature) {
                                               tx.signatures[0].data()));
 }
 
+// --- TX_FREE_REG (zero-fee account registration) ---------------------------
+
+TEST(PqFreeReg, BuildsValidRegistration) {
+    PqWalletKeys me = derivePqWalletKeys(spendSecret(5, 5));
+    Crypto::Hash ref;
+    for (int i = 0; i < 32; ++i) ref.data[i] = static_cast<uint8_t>(i + 1);
+
+    // Grind the anti-spam PoW (instant under the current max-target placeholder).
+    uint64_t nonce = 0;
+    while (!CryptoNote::checkFreeRegPow(me.viewPub, ref, nonce)) ++nonce;
+
+    Transaction tx = buildFreeRegTransaction(me.viewPub, ref, nonce);
+    EXPECT_EQ(tx.version, TRANSACTION_VERSION_PQ);
+    EXPECT_EQ(tx.txType, TX_FREE_REG);
+    EXPECT_TRUE(tx.inputs.empty());
+    EXPECT_TRUE(tx.outputs.empty());
+    EXPECT_TRUE(tx.signatures.empty());
+
+    std::string err;
+    EXPECT_TRUE(checkFreeRegTransactionSemantic(tx, &err)) << err;
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

@@ -18,6 +18,7 @@
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "Wallet/PqWallet.h"
 #include "Wallet/PqTransactionBuilder.h"
+#include "CryptoNoteCore/PqValidation.h"
 #include <GreenWallet/Transfer.h>
 
 #ifndef MSVC
@@ -1343,5 +1344,58 @@ void bridgeLegacy(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &nod
     catch (const std::exception &e)
     {
         std::cout << WarningMsg(std::string("Bridge failed: ") + e.what()) << std::endl;
+    }
+}
+
+void pqRegister(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node)
+{
+    CryptoNote::WalletGreen &wallet = walletInfo->wallet;
+    if (walletInfo->viewWallet)
+    {
+        std::cout << WarningMsg("View-only wallets cannot register a PQ account.") << std::endl;
+        return;
+    }
+
+    Crypto::SecretKey spendSecret = wallet.getAddressSpendKey(0).secretKey;
+    CryptoNote::PqWalletKeys pq = CryptoNote::derivePqWalletKeys(spendSecret);
+
+    Crypto::Hash refBlockHash = node.getLastLocalBlockHeaderInfo().hash;
+    if (refBlockHash == boost::value_initialized<Crypto::Hash>())
+    {
+        std::cout << WarningMsg("Node has no known block yet; try again once synced.") << std::endl;
+        return;
+    }
+
+    std::cout << InformationMsg("Assigning your PQ account number (solving anti-spam PoW)...")
+              << std::endl;
+    uint64_t nonce = 0;
+    while (!CryptoNote::checkFreeRegPow(pq.viewPub, refBlockHash, nonce))
+    {
+        ++nonce;
+    }
+
+    try
+    {
+        CryptoNote::Transaction tx =
+            CryptoNote::buildFreeRegTransaction(pq.viewPub, refBlockHash, nonce);
+
+        std::promise<std::error_code> promise;
+        auto future = promise.get_future();
+        node.relayTransaction(tx, [&promise](std::error_code ec) { promise.set_value(ec); });
+        std::error_code ec = future.get();
+        if (ec)
+        {
+            std::cout << WarningMsg("Failed to relay registration: " + ec.message()) << std::endl;
+            return;
+        }
+        std::cout << SuccessMsg("PQ registration submitted. Tx hash: "
+                                + Common::podToHex(CryptoNote::getObjectHash(tx)))
+                  << std::endl
+                  << InformationMsg("Your account number is assigned once confirmed.") << std::endl;
+    }
+    catch (const std::exception &e)
+    {
+        std::cout << WarningMsg(std::string("Failed to build registration: ") + e.what())
+                  << std::endl;
     }
 }

@@ -101,4 +101,14 @@ Transaction buildBridgeTransaction(std::vector<BridgeLegacyInput>& inputs,
                                    const std::vector<PqSendOutput>& outputs,
                                    uint64_t unlockTime = 0);
 
+// Assemble a TX_FREE_REG (zero-fee account-number registration) given a PoW
+// solution: an empty-input/output v2 tx whose tx_extra is exactly the PQ
+// account-registration tag (viewPub) followed by the anti-spam PoW tag (which
+// must be last). The caller finds `nonce` such that checkFreeRegPow(viewPub,
+// refBlockHash, nonce) holds (see PqValidation.h). No signing — the PoW is the
+// only authorization.
+Transaction buildFreeRegTransaction(const CryptoPQ::KemPublicKey& viewPub,
+                                    const Crypto::Hash& refBlockHash,
+                                    uint64_t nonce);
+
 }  // namespace CryptoNote

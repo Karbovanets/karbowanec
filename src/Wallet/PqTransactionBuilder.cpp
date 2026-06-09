@@ -256,4 +256,22 @@ Transaction buildBridgeTransaction(std::vector<BridgeLegacyInput>& inputs,
   return tx;
 }
 
+Transaction buildFreeRegTransaction(const CryptoPQ::KemPublicKey& viewPub,
+                                    const Crypto::Hash& refBlockHash,
+                                    uint64_t nonce) {
+  Transaction tx;
+  tx.version = TRANSACTION_VERSION_PQ;
+  tx.txType = TX_FREE_REG;
+  tx.unlockTime = 0;
+  tx.extra.clear();
+  // tx_extra = PQ account-registration tag, then the PoW tag LAST (so its nonce
+  // occupies the final 8 bytes — required by consensus and by nonce grinding).
+  addPqAccountRegistrationToExtra(tx.extra, viewPub);
+  TransactionExtraPow pow;
+  pow.refBlockHash = refBlockHash;
+  pow.nonce = nonce;
+  appendPowTagToExtra(tx.extra, pow);
+  return tx;
+}
+
 }  // namespace CryptoNote
