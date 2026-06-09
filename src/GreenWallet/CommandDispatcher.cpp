@@ -140,6 +140,18 @@ bool handleCommand(const std::string command,
     {
         registerAccountNumber(walletInfo, node);
     }
+    else if (command == "pq_address")
+    {
+        pqAddress(walletInfo);
+    }
+    else if (command == "pq_balance")
+    {
+        pqBalance(walletInfo);
+    }
+    else if (command == "pq_transfer")
+    {
+        pqTransfer(walletInfo, node);
+    }
     /* This should never happen */
     else
     {

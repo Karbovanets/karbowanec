@@ -53,6 +53,7 @@
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "CryptoNoteCore/CryptoNoteSerialization.h"
 #include "Wallet/TransactionBuilder.h"
+#include "Wallet/PqWallet.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "CryptoNoteCore/TransactionApi.h"
 #include "CryptoNoteCore/TransactionExtra.h"
@@ -281,6 +282,11 @@ void WalletGreen::clearCaches(bool clearTransactions, bool clearCachedData) {
     std::vector<AccountPublicAddress> subscriptions;
     m_synchronizer.getSubscriptions(subscriptions);
     std::for_each(subscriptions.begin(), subscriptions.end(), [this](const AccountPublicAddress& address) { m_synchronizer.removeSubscription(address); });
+
+    if (m_pqConsumer) {
+      m_blockchainSynchronizer.removeConsumer(m_pqConsumer.get());
+      m_pqConsumer.reset();
+    }
 
     m_uncommitedTransactions.clear();
     m_unlockTransactionsJob.clear();
@@ -1394,6 +1400,8 @@ std::string WalletGreen::addWallet(const Crypto::PublicKey& spendPublicKey, cons
     if (index.size() == 1) {
       m_synchronizer.subscribeConsumerNotifications(m_viewPublicKey, this);
       initBlockchain(m_viewPublicKey);
+      // The PQ identity derives from the primary address's spend secret.
+      initPqConsumer(spendSecretKey, sub.syncStart);
     }
 
     auto address = m_currency.accountAddressAsString({ spendPublicKey, m_viewPublicKey });
@@ -3370,6 +3378,36 @@ void WalletGreen::insertUnlockTransactionJob(const Hash& transactionHash, uint32
 void WalletGreen::deleteUnlockTransactionJob(const Hash& transactionHash) {
   auto& index = m_unlockTransactionsJob.get<TransactionHashIndex>();
   index.erase(transactionHash);
+}
+
+void WalletGreen::initPqConsumer(const Crypto::SecretKey& spendSecretKey,
+                                 const SynchronizationStart& syncStart) {
+  if (m_pqConsumer) {
+    return;  // already created
+  }
+  if (spendSecretKey == NULL_SECRET_KEY) {
+    return;  // tracking wallet: no PQ identity
+  }
+  // Gate on PQ activation being scheduled (v6 height != never-activate
+  // placeholder), so the extra consumer adds zero sync overhead pre-activation.
+  if (m_currency.upgradeHeight(BLOCK_MAJOR_VERSION_6) == CryptoNote::parameters::UPGRADE_HEIGHT_V6) {
+    return;
+  }
+  PqWalletKeys pqKeys = derivePqWalletKeys(spendSecretKey);
+  m_pqConsumer.reset(new PqConsumer(pqKeys, syncStart, m_logger.getLogger()));
+  m_blockchainSynchronizer.addConsumer(m_pqConsumer.get());
+}
+
+uint64_t WalletGreen::pqActualBalance() const {
+  return m_pqConsumer ? m_pqConsumer->state().balance() : 0;
+}
+
+std::vector<PqSpendInput> WalletGreen::pqSpendableInputs() const {
+  return m_pqConsumer ? m_pqConsumer->state().spendableInputs() : std::vector<PqSpendInput>{};
+}
+
+uint32_t WalletGreen::pqSyncedHeight() const {
+  return m_pqConsumer ? m_pqConsumer->state().lastScannedHeight() : 0;
 }
 
 void WalletGreen::startBlockchainSynchronizer() {

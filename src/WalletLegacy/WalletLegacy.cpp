@@ -348,9 +348,14 @@ void WalletLegacy::initSync() {
   m_sender.reset(new WalletTransactionSender(m_currency, m_transactionsCache, m_account.getAccountKeys(), *m_transferDetails, m_node));
 
   // PQ scanning consumer. Requires a spend secret (the PQ identity is derived
-  // from it); tracking wallets have none, so they get no PQ balance.
+  // from it); tracking wallets have none, so they get no PQ balance. Also gated
+  // on PQ activation being SCHEDULED (v6 upgrade height set to something other
+  // than the never-activate placeholder) so the second consumer adds zero sync
+  // overhead on chains where PQ is not yet enabled.
   const auto& keys = m_account.getAccountKeys();
-  if (keys.spendSecretKey != NULL_SECRET_KEY) {
+  const bool pqScheduled =
+      m_currency.upgradeHeight(BLOCK_MAJOR_VERSION_6) != CryptoNote::parameters::UPGRADE_HEIGHT_V6;
+  if (pqScheduled && keys.spendSecretKey != NULL_SECRET_KEY) {
     PqWalletKeys pqKeys = derivePqWalletKeys(keys.spendSecretKey);
     // TODO(pq): persist the PQ consumer cursor + PqWalletState so the wallet
     // does not rescan PQ outputs from genesis on each load. Until PQ activates

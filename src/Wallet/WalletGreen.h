@@ -30,6 +30,8 @@
 #include <System/Event.h>
 #include "Transfers/TransfersSynchronizer.h"
 #include "Transfers/BlockchainSynchronizer.h"
+#include "Wallet/PqConsumer.h"
+#include "Wallet/PqTransactionBuilder.h"
 #include "../CryptoNoteConfig.h"
 
 namespace CryptoNote {
@@ -43,6 +45,16 @@ public:
   virtual ~WalletGreen();
 
   INode& getNode() { return m_node; }
+
+  // --- PQ (post-quantum) balance / spend (concrete; not on IWallet) ----------
+  // Mirrors WalletLegacy. Available only when PQ activation is scheduled and the
+  // wallet holds a spend secret (the PQ identity derives from the primary
+  // address's spend key). Tracking wallets / pre-activation chains return
+  // false / 0 / empty.
+  bool pqEnabled() const { return static_cast<bool>(m_pqConsumer); }
+  uint64_t pqActualBalance() const;
+  std::vector<PqSpendInput> pqSpendableInputs() const;
+  uint32_t pqSyncedHeight() const;
 
   virtual void initialize(const std::string& path, const std::string& password) override;
   virtual void initializeWithViewKey(const std::string& path, const std::string& password, const Crypto::SecretKey& viewSecretKey) override;
@@ -332,6 +344,10 @@ protected:
   void deleteUnlockTransactionJob(const Crypto::Hash& transactionHash);
   void startBlockchainSynchronizer();
   void stopBlockchainSynchronizer();
+  // Create + register the PQ scanning consumer for the primary address, gated on
+  // a spend secret being present and PQ activation being scheduled. No-op if
+  // already created or gates fail.
+  void initPqConsumer(const Crypto::SecretKey& spendSecretKey, const SynchronizationStart& syncStart);
   void addUnconfirmedTransaction(const ITransactionReader& transaction);
   void removeUnconfirmedTransaction(const Crypto::Hash& transactionHash);
 
@@ -389,6 +405,9 @@ protected:
   bool m_blockchainSynchronizerStarted;
   BlockchainSynchronizer m_blockchainSynchronizer;
   TransfersSyncronizer m_synchronizer;
+  // PQ output scanning consumer (created lazily for the primary address when PQ
+  // activation is scheduled). Null otherwise. See initPqConsumer.
+  std::unique_ptr<PqConsumer> m_pqConsumer;
 
   System::Event m_eventOccurred;
   std::queue<WalletEvent> m_events;
