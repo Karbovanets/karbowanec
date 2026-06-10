@@ -20,6 +20,7 @@
 #include "TransactionPool.h"
 
 #include <algorithm>
+#include <cstring>
 #include <ctime>
 #include <set>
 #include <vector>
@@ -39,12 +40,26 @@
 #include "CryptoNoteTools.h"
 #include "CryptoNoteConfig.h"
 #include "PqTxType.h"
+#include "PqValidation.h"
 
 using namespace Logging;
 
 #undef ERROR
 
 namespace CryptoNote {
+
+namespace {
+// A PQ input's nullifier is a 32-byte anti-double-spend tag. The mempool tracks
+// it in the same type-agnostic spent-image set as classical key images (raw 32
+// bytes), mirroring the consensus design, so an in-pool double-spend of a PQ
+// output is rejected just like a classical one.
+Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
+  Crypto::Hash nf = pqNullifier(in);
+  Crypto::KeyImage ki;
+  std::memcpy(&ki, &nf, sizeof(ki));
+  return ki;
+}
+}  // namespace
 
   //---------------------------------------------------------------------------------
   // BlockTemplate
@@ -60,6 +75,10 @@ namespace CryptoNote {
         if (in.type() == typeid(KeyInput)) {
           auto r = m_keyImages.insert(boost::get<KeyInput>(in).keyImage);
           (void)r; //just to make compiler to shut up
+          assert(r.second);
+        } else if (in.type() == typeid(PqInput)) {
+          auto r = m_keyImages.insert(pqInputNullifierAsKeyImage(boost::get<PqInput>(in)));
+          (void)r;
           assert(r.second);
         }
       }
@@ -78,6 +97,10 @@ namespace CryptoNote {
       for (const auto& in : tx.inputs) {
         if (in.type() == typeid(KeyInput)) {
           if (m_keyImages.count(boost::get<KeyInput>(in).keyImage)) {
+            return false;
+          }
+        } else if (in.type() == typeid(PqInput)) {
+          if (m_keyImages.count(pqInputNullifierAsKeyImage(boost::get<PqInput>(in)))) {
             return false;
           }
         }
@@ -605,17 +628,25 @@ namespace CryptoNote {
 
   bool tx_memory_pool::removeTransactionInputs(const Crypto::Hash& tx_id, const Transaction& tx, bool keptByBlock) {
     for (const auto& in : tx.inputs) {
+      Crypto::KeyImage image;
       if (in.type() == typeid(KeyInput)) {
-        const auto& txin = boost::get<KeyInput>(in);
-        auto it = m_spent_key_images.find(txin.keyImage);
-        if (!(it != m_spent_key_images.end())) { logger(ERROR, BRIGHT_RED) << "failed to find transaction input in key images. img=" << txin.keyImage << std::endl
+        image = boost::get<KeyInput>(in).keyImage;
+      } else if (in.type() == typeid(PqInput)) {
+        image = pqInputNullifierAsKeyImage(boost::get<PqInput>(in));
+      } else {
+        continue;
+      }
+      {
+        const Crypto::KeyImage& txinImage = image;
+        auto it = m_spent_key_images.find(txinImage);
+        if (!(it != m_spent_key_images.end())) { logger(ERROR, BRIGHT_RED) << "failed to find transaction input in key images. img=" << txinImage << std::endl
           << "transaction id = " << tx_id; return false; }
         std::unordered_set<Crypto::Hash>& key_image_set = it->second;
-        if (!(!key_image_set.empty())) { logger(ERROR, BRIGHT_RED) << "empty key_image set, img=" << txin.keyImage << std::endl
+        if (!(!key_image_set.empty())) { logger(ERROR, BRIGHT_RED) << "empty key_image set, img=" << txinImage << std::endl
           << "transaction id = " << tx_id; return false; }
 
         auto it_in_set = key_image_set.find(tx_id);
-        if (!(it_in_set != key_image_set.end())) { logger(ERROR, BRIGHT_RED) << "transaction id not found in key_image set, img=" << txin.keyImage << std::endl
+        if (!(it_in_set != key_image_set.end())) { logger(ERROR, BRIGHT_RED) << "transaction id not found in key_image set, img=" << txinImage << std::endl
           << "transaction id = " << tx_id; return false; }
         key_image_set.erase(it_in_set);
         if (key_image_set.empty()) {
@@ -632,21 +663,26 @@ namespace CryptoNote {
   bool tx_memory_pool::addTransactionInputs(const Crypto::Hash& id, const Transaction& tx, bool keptByBlock) {
     // should not fail
     for (const auto& in : tx.inputs) {
+      Crypto::KeyImage image;
       if (in.type() == typeid(KeyInput)) {
-        const auto& txin = boost::get<KeyInput>(in);
-        std::unordered_set<Crypto::Hash>& kei_image_set = m_spent_key_images[txin.keyImage];
-        if (!(keptByBlock || kei_image_set.size() == 0)) {
-          logger(ERROR, BRIGHT_RED)
-              << "internal error: keptByBlock=" << keptByBlock
-              << ",  kei_image_set.size()=" << kei_image_set.size() << ENDL
-              << "txin.keyImage=" << txin.keyImage << ENDL << "tx_id=" << id;
-          return false;
-        }
-        auto ins_res = kei_image_set.insert(id);
-        if (!(ins_res.second)) {
-          logger(ERROR, BRIGHT_RED) << "internal error: try to insert duplicate iterator in key_image set";
-          return false;
-        }
+        image = boost::get<KeyInput>(in).keyImage;
+      } else if (in.type() == typeid(PqInput)) {
+        image = pqInputNullifierAsKeyImage(boost::get<PqInput>(in));
+      } else {
+        continue;
+      }
+      std::unordered_set<Crypto::Hash>& kei_image_set = m_spent_key_images[image];
+      if (!(keptByBlock || kei_image_set.size() == 0)) {
+        logger(ERROR, BRIGHT_RED)
+            << "internal error: keptByBlock=" << keptByBlock
+            << ",  kei_image_set.size()=" << kei_image_set.size() << ENDL
+            << "image=" << image << ENDL << "tx_id=" << id;
+        return false;
+      }
+      auto ins_res = kei_image_set.insert(id);
+      if (!(ins_res.second)) {
+        logger(ERROR, BRIGHT_RED) << "internal error: try to insert duplicate iterator in key_image set";
+        return false;
       }
     }
 
@@ -659,6 +695,10 @@ namespace CryptoNote {
       if (in.type() == typeid(KeyInput)) {
         const auto& tokey_in = boost::get<KeyInput>(in);
         if (m_spent_key_images.count(tokey_in.keyImage)) {
+          return true;
+        }
+      } else if (in.type() == typeid(PqInput)) {
+        if (m_spent_key_images.count(pqInputNullifierAsKeyImage(boost::get<PqInput>(in)))) {
           return true;
         }
       }
