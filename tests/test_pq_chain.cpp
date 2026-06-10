@@ -26,6 +26,10 @@
 #include "TestGenerator/TestGenerator.h"
 
 #include "PqTxType.h"
+#include "CryptoNoteCore/TransactionExtra.h"
+#include "Wallet/PqWallet.h"
+#include "Wallet/PqTransactionBuilder.h"
+#include "Wallet/PqWalletState.h"
 #include "crypto_pq/PqOutputBuilder.h"
 #include "crypto_pq/PqSeed.h"
 #include "crypto_pq/PqDerive.h"
@@ -86,6 +90,34 @@ bool mineBlock(CryptoNote::Core& core, const CryptoNote::Currency& currency,
   return bvc.m_added_to_main_chain && !bvc.m_verification_failed;
 }
 
+// Mine a block that includes the given transactions (test_generator accounts
+// their fees via get_tx_fee — works for bridge KeyInputs which carry amounts).
+bool mineBlockWithTxs(CryptoNote::Core& core, const CryptoNote::Currency& currency,
+                      test_generator& gen, const CryptoNote::AccountBase& miner,
+                      uint64_t timestamp, const std::list<CryptoNote::Transaction>& txs) {
+  uint32_t height = core.getCurrentBlockchainHeight();
+  Crypto::Hash tail = core.get_tail_id();
+  uint64_t generated = 0;
+  if (!core.getAlreadyGeneratedCoins(tail, generated)) return false;
+  std::vector<size_t> sizes;
+  if (!core.getBackwardBlocksSizes(height - 1, sizes, currency.rewardBlocksWindow())) return false;
+
+  gen.defaultMajorVersion = core.getBlockMajorVersionForHeight(height);
+
+  CryptoNote::Block blk;
+  if (!gen.constructBlock(blk, height, tail, miner, timestamp, generated, sizes, txs)) return false;
+
+  CryptoNote::difficulty_type diff = core.getNextBlockDifficulty();
+  if (diff > 1) {
+    fillNonce(blk, diff, &core.get_blockchain_storage());
+  }
+  gen.addBlock(blk, 0, 0, sizes, generated);
+
+  CryptoNote::block_verification_context bvc{};
+  core.handle_incoming_block(blk, bvc, false, false);
+  return bvc.m_added_to_main_chain && !bvc.m_verification_failed;
+}
+
 // An unfunded, well-formed, ML-DSA-signed TX_PQ that references a non-existent
 // output (so it must be rejected at input resolution, not at shape).
 CryptoNote::Transaction makeUnfundedPqTx() {
@@ -135,9 +167,14 @@ bool run() {
   Logging::ConsoleLogger logger(Logging::ERROR);
   // Jump v1 -> v6 cleanly: all upgrade heights equal, so heights <= 5 are v1 and
   // heights >= 6 are v6 (the PQ activation version).
+  // The v5+ PoW (getBlockLongHash) samples prior blocks up to
+  // (height - 1 - minedMoneyUnlockWindow). With the default window (10) that is
+  // only valid once height >= 12, so the first v5/v6 block must sit at height
+  // >= 12 (we cannot shrink the unlock window — genesis bakes in window=10).
   const CryptoNote::Currency currency = CryptoNote::CurrencyBuilder(logger)
-      .upgradeHeightV2(5).upgradeHeightV3(5).upgradeHeightV4(5)
-      .upgradeHeightV5(5).upgradeHeightV6(5)
+      .testnet(true)  // skips the mainnet-only V5 difficulty reset that spikes diff at low heights
+      .upgradeHeightV2(1).upgradeHeightV3(1).upgradeHeightV4(1)
+      .upgradeHeightV5(11).upgradeHeightV6(12)
       .currency();
 
   std::filesystem::path dataDir("pq_chain_test_data");
@@ -163,18 +200,21 @@ bool run() {
   std::vector<size_t> emptySizes;
   gen.addBlock(genesis, 0, 0, emptySizes, 0);
 
-  // Mine across the v6 activation boundary (heights 1..10).
+  // Mine to height 13 (v6 active at 13). v5 lands at height 12, v6 at 13 — both
+  // >= 12, so getBlockLongHash's prior-block sampling is valid. Wide block
+  // spacing keeps difficulty at the floor (single hash per block, no search).
   uint64_t ts = static_cast<uint64_t>(std::time(nullptr)) - 24 * 60 * 60;
-  for (int i = 0; i < 10; ++i) {
+  const uint64_t step = currency.difficultyTarget() * 10;
+  for (int i = 0; i < 13; ++i) {
     if (!expect(mineBlock(core, currency, gen, miner, ts), "mine block " + std::to_string(i + 1))) {
       core.deinit(); std::filesystem::remove_all(dataDir, ec); return false;
     }
-    ts += currency.difficultyTarget();
+    ts += step;
   }
 
   bool ok = true;
   uint32_t top = core.getCurrentBlockchainHeight() - 1;
-  ok &= expect(core.getCurrentBlockchainHeight() == 11, "chain height == 11 (genesis + 10)");
+  ok &= expect(core.getCurrentBlockchainHeight() == 14, "chain height == 14 (genesis + 13)");
   ok &= expect(core.getBlockMajorVersionForHeight(top) == CryptoNote::BLOCK_MAJOR_VERSION_6,
                "top block is v6 (PQ era active)");
 
@@ -193,11 +233,164 @@ bool run() {
   return ok;
 }
 
+CryptoNote::PqWalletKeys pqKeysFromPattern(uint8_t a, uint8_t b) {
+  Crypto::SecretKey s;
+  for (std::size_t i = 0; i < sizeof(s.data); ++i) s.data[i] = static_cast<uint8_t>(i * a + b);
+  return CryptoNote::derivePqWalletKeys(s);
+}
+
+// Funded happy-path lifecycle through the LIVE Core:
+//   coinbase --TX_BRIDGE--> PQ output (mined) --scan--> PQ balance
+//   --TX_PQ--> accepted by consensus; a second spend of the same output (same
+//   nullifier) is rejected.
+bool runFunded() {
+  using namespace CryptoNote;
+  Logging::ConsoleLogger logger(Logging::ERROR);
+  // v5/v6 must sit at height >= 12 (see run() — getBlockLongHash sampling needs
+  // height - 1 - unlockWindow(10) >= 1). Default unlock window (10) is kept, so
+  // the block-1 coinbase matures at height 11.
+  const Currency currency = CurrencyBuilder(logger)
+      .testnet(true)
+      .upgradeHeightV2(1).upgradeHeightV3(1).upgradeHeightV4(1)
+      .upgradeHeightV5(11).upgradeHeightV6(12)
+      .currency();
+
+  std::filesystem::path dataDir("pq_funded_test_data");
+  std::error_code ec;
+  std::filesystem::remove_all(dataDir, ec);
+  std::filesystem::create_directories(dataDir, ec);
+
+  System::Dispatcher dispatcher;
+  Core core(currency, nullptr, logger, dispatcher, 0, false);
+  CoreConfig coreConfig; coreConfig.configFolder = dataDir.string();
+  MinerConfig minerConfig;
+  if (!expect(core.init(coreConfig, minerConfig, false), "funded: core.init")) return false;
+
+  test_generator gen(currency);
+  gen.setBlockchain(&core.get_blockchain_storage());
+  AccountBase miner; miner.generate();
+
+  Crypto::Hash genesisHash = core.getBlockIdByHeight(0);
+  Block genesis;
+  if (!expect(core.getBlockByHash(genesisHash, genesis), "funded: load genesis")) { core.deinit(); return false; }
+  std::vector<size_t> emptySizes;
+  gen.addBlock(genesis, 0, 0, emptySizes, 0);
+
+  uint64_t ts = static_cast<uint64_t>(std::time(nullptr)) - 24 * 60 * 60;
+  const uint64_t step = currency.difficultyTarget() * 10;  // hold difficulty at floor
+  // Mine to height 13 (v6 active at 13); the bridge block then lands at height 14
+  // (v6, valid getBlockLongHash sampling). The block-1 coinbase matured at 11.
+  for (int i = 0; i < 13; ++i) {
+    if (!expect(mineBlock(core, currency, gen, miner, ts), "funded: mine " + std::to_string(i + 1))) {
+      core.deinit(); std::filesystem::remove_all(dataDir, ec); return false;
+    }
+    ts += step;
+  }
+
+  bool ok = true;
+
+  // Pull block-1's coinbase and pick its largest output to bridge.
+  Block blk1;
+  ok &= expect(core.getBlockByHash(core.getBlockIdByHeight(1), blk1), "funded: load block 1");
+  const Transaction& cb = blk1.baseTransaction;
+  Crypto::Hash cbHash = getObjectHash(cb);
+  std::vector<uint32_t> gidx;
+  ok &= expect(core.get_tx_outputs_gindexs(cbHash, gidx), "funded: coinbase gindexs");
+  ok &= expect(gidx.size() == cb.outputs.size(), "funded: gindex count matches outputs");
+  if (!ok) { core.deinit(); std::filesystem::remove_all(dataDir, ec); return false; }
+
+  size_t best = 0;
+  for (size_t i = 1; i < cb.outputs.size(); ++i) {
+    if (cb.outputs[i].amount > cb.outputs[best].amount) best = i;
+  }
+  uint64_t inAmount = cb.outputs[best].amount;
+  Crypto::PublicKey oneTimeKey = boost::get<KeyOutput>(cb.outputs[best].target).key;
+  Crypto::PublicKey cbTxPub = getTransactionPublicKeyFromExtra(cb.extra);
+
+  // Bridge that coinbase output to a PQ recipient (ring size 0).
+  PqWalletKeys recip = pqKeysFromPattern(7, 3);
+  std::vector<BridgeLegacyInput> bins(1);
+  bins[0].senderKeys = miner.getAccountKeys();
+  bins[0].keyInfo.amount = inAmount;
+  bins[0].keyInfo.outputs.push_back(TransactionTypes::GlobalOutput{oneTimeKey, gidx[best]});
+  bins[0].keyInfo.realOutput.transactionPublicKey = cbTxPub;
+  bins[0].keyInfo.realOutput.transactionIndex = 0;
+  bins[0].keyInfo.realOutput.outputInTransaction = best;
+
+  // Bridge has classical inputs, so it must clear the legacy minimum fee
+  // (getMinimalFee), not the tiny PQ feerate.
+  uint64_t bridgeFee = currency.getMinimalFee(core.getCurrentBlockchainHeight()) * 2 + 1000000;
+  uint64_t bridgeOut = inAmount - bridgeFee;
+  Transaction bridgeTx = buildBridgeTransaction(
+      bins, {PqSendOutput{recip.viewPub, recip.spendPub, bridgeOut}});
+
+  ok &= expect(checkBridgeTransactionSemantic(bridgeTx, nullptr), "funded: bridge shape valid");
+
+  // Relay the bridge into the mempool first: a block carries only tx hashes, so
+  // the node validates the block by pulling the tx body from the pool.
+  Crypto::Hash bridgeHash = getObjectHash(bridgeTx);
+  {
+    BinaryArray blob = toBinaryArray(bridgeTx);
+    tx_verification_context btvc{};
+    core.handleIncomingTransaction(bridgeTx, bridgeHash, blob.size(), btvc, false,
+                                   core.getCurrentBlockchainHeight());
+    ok &= expect(btvc.m_added_to_pool && !btvc.m_verification_failed,
+                 "funded: bridge accepted to mempool");
+  }
+  ok &= expect(mineBlockWithTxs(core, currency, gen, miner, ts, {bridgeTx}),
+               "funded: bridge tx mined into a block");
+  ts += currency.difficultyTarget();
+
+  // Scan the bridged output -> PQ balance credited.
+  PqWalletState st(recip);
+  bool credited = st.processTransaction(bridgeTx, bridgeHash, core.getCurrentBlockchainHeight() - 1);
+  ok &= expect(credited && st.balance() == bridgeOut, "funded: PQ balance credited from bridge");
+
+  // Spend the bridged PQ output via TX_PQ through the live consensus dispatch.
+  std::vector<PqSpendInput> spendIns = st.spendableInputs();
+  ok &= expect(spendIns.size() == 1, "funded: one spendable PQ input");
+  if (ok) {
+    PqWalletKeys recip2 = pqKeysFromPattern(9, 2);
+    uint64_t pqFee = 1000000;
+    Transaction spend = buildPqTransaction(
+        spendIns, {PqSendOutput{recip2.viewPub, recip2.spendPub, bridgeOut - pqFee}},
+        recip.spendPub, recip.spendSk);
+
+    Crypto::Hash spendHash = getObjectHash(spend);
+    BinaryArray spendBlob = toBinaryArray(spend);
+    tx_verification_context tvc{};
+    core.handleIncomingTransaction(spend, spendHash, spendBlob.size(), tvc, false,
+                                   core.getCurrentBlockchainHeight());
+    ok &= expect(tvc.m_added_to_pool && !tvc.m_verification_failed,
+                 "funded: TX_PQ spending the bridged output accepted by consensus");
+
+    // Double-spend: a second TX_PQ over the same output (same nullifier) rejected.
+    PqWalletKeys recip3 = pqKeysFromPattern(4, 4);
+    Transaction spend2 = buildPqTransaction(
+        spendIns, {PqSendOutput{recip3.viewPub, recip3.spendPub, bridgeOut - pqFee}},
+        recip.spendPub, recip.spendSk);
+    Crypto::Hash spend2Hash = getObjectHash(spend2);
+    BinaryArray spend2Blob = toBinaryArray(spend2);
+    tx_verification_context tvc2{};
+    core.handleIncomingTransaction(spend2, spend2Hash, spend2Blob.size(), tvc2, false,
+                                   core.getCurrentBlockchainHeight());
+    ok &= expect(!tvc2.m_added_to_pool, "funded: double-spend of PQ output rejected");
+  }
+
+  core.deinit();
+  std::filesystem::remove_all(dataDir, ec);
+  return ok;
+}
+
 }  // namespace
 
 int main() {
   if (!run()) {
     std::cerr << "[FAIL] PQ chain integration test" << std::endl;
+    return 1;
+  }
+  if (!runFunded()) {
+    std::cerr << "[FAIL] PQ funded lifecycle test" << std::endl;
     return 1;
   }
   std::cout << "[PASS] PQ chain integration test" << std::endl;
