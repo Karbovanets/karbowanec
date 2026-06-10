@@ -2202,9 +2202,13 @@ bool Blockchain::checkPqInputs(const Transaction& tx, uint32_t* pmax_used_block_
     return false;
   }
 
-  // On-chain double-spend: none of the nullifiers may already be recorded.
+  // On-chain double-spend: none of the nullifiers may already be recorded. A PQ
+  // nullifier is a 32-byte spend tag; it shares the single type-agnostic
+  // spent-key set with classical/CT key images (they cannot collide).
   for (const auto& nf : nullifiers) {
-    if (m_db.hasPqNullifier(nf)) {
+    Crypto::KeyImage img;
+    std::memcpy(&img, &nf, sizeof(img));
+    if (m_db.hasSpentKey(img)) {
       logger(DEBUGGING) << "PQ nullifier already spent in blockchain: " << Common::podToHex(nf);
       return false;
     }
@@ -2868,6 +2872,23 @@ static Crypto::Hash pqInputNullifier(const PqInput& in) {
   return h;
 }
 
+// Map any spendable input to its 32-byte double-spend tag for the single
+// type-agnostic spent-key set: a KeyInput's key image, or a PqInput's nullifier
+// (reinterpreted as a key image — the two value spaces cannot collide). Returns
+// false for inputs that carry no spend tag (e.g. BaseInput).
+static bool spendImageForInput(const TransactionInput& in, Crypto::KeyImage& out) {
+  if (in.type() == typeid(KeyInput)) {
+    out = boost::get<KeyInput>(in).keyImage;
+    return true;
+  }
+  if (in.type() == typeid(PqInput)) {
+    Crypto::Hash nf = pqInputNullifier(boost::get<PqInput>(in));
+    std::memcpy(&out, &nf, sizeof(out));
+    return true;
+  }
+  return false;
+}
+
 bool Blockchain::pushTransaction(BlockEntry& block, const Crypto::Hash& transactionHash,
                                   TransactionIndex transactionIndex) {
   // Check for duplicate
@@ -2881,41 +2902,27 @@ bool Blockchain::pushTransaction(BlockEntry& block, const Crypto::Hash& transact
 
   Transaction& tx = block.transactions[transactionIndex.transaction].tx;
 
-  // Record spent key images; detect double-spends within this write txn
+  // Record spent images for BOTH classical KeyInput key images and v2 PqInput
+  // nullifiers in the one type-agnostic spent-key set (they are 32-byte spend
+  // tags that cannot collide). Detect double-spends within this write txn; an
+  // intra-tx duplicate is caught because a put is visible to the next has-check.
   for (size_t i = 0; i < tx.inputs.size(); ++i) {
-    if (tx.inputs[i].type() == typeid(KeyInput)) {
-      const auto& ki = boost::get<KeyInput>(tx.inputs[i]).keyImage;
-      if (m_db.hasSpentKey(ki)) {
-        logger(ERROR, BRIGHT_RED) << "Double spending transaction was pushed to blockchain.";
-        // Roll back keys already written in this tx
-        for (size_t j = 0; j < i; ++j) {
-          if (tx.inputs[j].type() == typeid(KeyInput)) {
-            m_db.removeSpentKey(boost::get<KeyInput>(tx.inputs[j]).keyImage);
-          }
-        }
-        return false;
-      }
-      m_db.putSpentKey(ki, block.height);
+    Crypto::KeyImage img;
+    if (!spendImageForInput(tx.inputs[i], img)) {
+      continue;
     }
-  }
-
-  // Record PQ nullifiers (v2 TX_PQ); detect double-spends within this write txn.
-  // Intra-tx duplicates are also caught: a put is visible to hasPqNullifier
-  // inside the same write transaction.
-  for (size_t i = 0; i < tx.inputs.size(); ++i) {
-    if (tx.inputs[i].type() == typeid(PqInput)) {
-      Crypto::Hash nf = pqInputNullifier(boost::get<PqInput>(tx.inputs[i]));
-      if (m_db.hasPqNullifier(nf)) {
-        logger(ERROR, BRIGHT_RED) << "PQ double-spending transaction was pushed to blockchain.";
-        for (size_t j = 0; j < i; ++j) {
-          if (tx.inputs[j].type() == typeid(PqInput)) {
-            m_db.removePqNullifier(pqInputNullifier(boost::get<PqInput>(tx.inputs[j])));
-          }
+    if (m_db.hasSpentKey(img)) {
+      logger(ERROR, BRIGHT_RED) << "Double spending transaction was pushed to blockchain.";
+      // Roll back images already written for this tx.
+      for (size_t j = 0; j < i; ++j) {
+        Crypto::KeyImage prev;
+        if (spendImageForInput(tx.inputs[j], prev)) {
+          m_db.removeSpentKey(prev);
         }
-        return false;
       }
-      m_db.putPqNullifier(nf, block.height, transactionHash);
+      return false;
     }
+    m_db.putSpentKey(img, block.height);
   }
 
   // Record key outputs and fill global output indexes
@@ -3004,23 +3011,14 @@ void Blockchain::popTransaction(const Transaction& transaction,
     }
   }
 
-  // Remove spent keys
+  // Remove spent tags (classical key images AND PQ nullifiers) from the single
+  // spent-key set. After this a rolled-back KeyInput's key image or a PqInput's
+  // (auth_pub, rho_reveal) pair may re-enter on the competing chain.
   for (const auto& input : transaction.inputs) {
-    if (input.type() == typeid(KeyInput)) {
-      const auto& ki = boost::get<KeyInput>(input).keyImage;
-      if (!m_db.removeSpentKey(ki)) {
+    Crypto::KeyImage img;
+    if (spendImageForInput(input, img)) {
+      if (!m_db.removeSpentKey(img)) {
         logger(ERROR, BRIGHT_RED) << "Blockchain consistency broken - removeSpentKey failed";
-      }
-    }
-  }
-
-  // Remove PQ nullifiers (v2 TX_PQ) — mirrors spent-key rollback. After this the
-  // same (auth_pub, rho_reveal) pair may re-enter on the competing chain.
-  for (const auto& input : transaction.inputs) {
-    if (input.type() == typeid(PqInput)) {
-      Crypto::Hash nf = pqInputNullifier(boost::get<PqInput>(input));
-      if (!m_db.removePqNullifier(nf)) {
-        logger(ERROR, BRIGHT_RED) << "Blockchain consistency broken - removePqNullifier failed";
       }
     }
   }

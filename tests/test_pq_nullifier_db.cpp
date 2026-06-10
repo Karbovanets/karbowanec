@@ -2,10 +2,14 @@
 //
 // This file is part of Karbo.
 //
-// Unit tests for the LMDB pq_nullifiers consensus-state table (spec §8):
-// insert / lookup / remove round trips, and the reorg property that removing a
-// nullifier (block pop) lets the same nullifier be re-inserted on a competing
-// chain.
+// PQ (v2 TX_PQ) nullifiers are stored in the SAME type-agnostic spent-key set as
+// classical/CT key images: a nullifier is just a 32-byte spend tag, and the two
+// value spaces cannot collide (SHA3 hash vs EC-point key image, neither
+// attacker-chosen). Blockchain routes both KeyInput key images and PqInput
+// nullifiers through putSpentKey/hasSpentKey/removeSpentKey. These tests
+// exercise that unified set with nullifier-shaped keys: insert / lookup /
+// remove, and the reorg property that removing a tag (block pop) lets the same
+// tag be re-inserted on a competing chain.
 
 #include "gtest/gtest.h"
 
@@ -21,10 +25,11 @@ using namespace CryptoNote;
 
 namespace {
 
-Crypto::Hash hashPat(uint8_t a, uint8_t b) {
-    Crypto::Hash h;
-    for (size_t i = 0; i < sizeof(h.data); ++i) h.data[i] = static_cast<uint8_t>(i * a + b);
-    return h;
+// A 32-byte spend tag (shaped like a PQ nullifier) keyed into the spent-key set.
+Crypto::KeyImage tagPat(uint8_t a, uint8_t b) {
+    Crypto::KeyImage k;
+    for (size_t i = 0; i < sizeof(k.data); ++i) k.data[i] = static_cast<uint8_t>(i * a + b);
+    return k;
 }
 
 struct TempDb {
@@ -46,89 +51,78 @@ struct TempDb {
 
 }  // namespace
 
-TEST(PqNullifierDb, PutHasGetRemove) {
+TEST(PqNullifierSet, PutHasGetRemove) {
     TempDb t;
-    Crypto::Hash nf = hashPat(7, 1);
-    Crypto::Hash txid = hashPat(3, 9);
+    Crypto::KeyImage nf = tagPat(7, 1);
 
-    EXPECT_FALSE(t.db.hasPqNullifier(nf));
-
+    EXPECT_FALSE(t.db.hasSpentKey(nf));
     t.db.beginWriteTxn();
-    EXPECT_TRUE(t.db.putPqNullifier(nf, 12345, txid));
+    EXPECT_TRUE(t.db.putSpentKey(nf, 12345));
     t.db.commitTxn();
+    EXPECT_TRUE(t.db.hasSpentKey(nf));
 
-    EXPECT_TRUE(t.db.hasPqNullifier(nf));
-
-    uint32_t h = 0; Crypto::Hash gotTxid{};
-    ASSERT_TRUE(t.db.getPqNullifier(nf, h, gotTxid));
+    uint32_t h = 0;
+    ASSERT_TRUE(t.db.getSpentKeyHeight(nf, h));
     EXPECT_EQ(h, 12345u);
-    EXPECT_EQ(0, std::memcmp(gotTxid.data, txid.data, 32));
 
     t.db.beginWriteTxn();
-    EXPECT_TRUE(t.db.removePqNullifier(nf));
+    EXPECT_TRUE(t.db.removeSpentKey(nf));
     t.db.commitTxn();
-
-    EXPECT_FALSE(t.db.hasPqNullifier(nf));
+    EXPECT_FALSE(t.db.hasSpentKey(nf));
 }
 
-TEST(PqNullifierDb, AbsentNullifier) {
+TEST(PqNullifierSet, AbsentNullifier) {
     TempDb t;
-    EXPECT_FALSE(t.db.hasPqNullifier(hashPat(1, 2)));
-    uint32_t h; Crypto::Hash txid;
-    EXPECT_FALSE(t.db.getPqNullifier(hashPat(1, 2), h, txid));
+    EXPECT_FALSE(t.db.hasSpentKey(tagPat(1, 2)));
+    uint32_t h = 0;
+    EXPECT_FALSE(t.db.getSpentKeyHeight(tagPat(1, 2), h));
 }
 
-TEST(PqNullifierDb, ReorgRemoveAllowsReinsert) {
+TEST(PqNullifierSet, ReorgRemoveAllowsReinsert) {
     TempDb t;
-    Crypto::Hash nf = hashPat(5, 5);
-    Crypto::Hash txidA = hashPat(1, 0);
-    Crypto::Hash txidB = hashPat(2, 0);
+    Crypto::KeyImage nf = tagPat(3, 9);
 
-    // Inserted on chain A at height 100.
     t.db.beginWriteTxn();
-    t.db.putPqNullifier(nf, 100, txidA);
+    EXPECT_TRUE(t.db.putSpentKey(nf, 100));
     t.db.commitTxn();
-    EXPECT_TRUE(t.db.hasPqNullifier(nf));
+    EXPECT_TRUE(t.db.hasSpentKey(nf));
 
-    // Block 100 is orphaned by a reorg -> the nullifier is removed.
+    // Block pop on reorg removes the tag.
     t.db.beginWriteTxn();
-    EXPECT_TRUE(t.db.removePqNullifier(nf));
+    EXPECT_TRUE(t.db.removeSpentKey(nf));
     t.db.commitTxn();
-    EXPECT_FALSE(t.db.hasPqNullifier(nf));
+    EXPECT_FALSE(t.db.hasSpentKey(nf));
 
-    // The same (auth_pub, rho) may now re-enter on competing chain B.
+    // The same (auth_pub, rho_reveal) -> same nullifier may re-enter on the
+    // competing chain at a new height.
     t.db.beginWriteTxn();
-    EXPECT_TRUE(t.db.putPqNullifier(nf, 101, txidB));
+    EXPECT_TRUE(t.db.putSpentKey(nf, 101));
     t.db.commitTxn();
-
-    uint32_t h = 0; Crypto::Hash gotTxid{};
-    ASSERT_TRUE(t.db.getPqNullifier(nf, h, gotTxid));
+    uint32_t h = 0;
+    ASSERT_TRUE(t.db.getSpentKeyHeight(nf, h));
     EXPECT_EQ(h, 101u);
-    EXPECT_EQ(0, std::memcmp(gotTxid.data, txidB.data, 32));
 }
 
-TEST(PqNullifierDb, MultipleDistinct) {
+TEST(PqNullifierSet, MultipleDistinct) {
     TempDb t;
-    Crypto::Hash a = hashPat(1, 1), b = hashPat(2, 2), c = hashPat(3, 3);
-    Crypto::Hash txid = hashPat(9, 9);
+    Crypto::KeyImage a = tagPat(2, 1), b = tagPat(2, 2), c = tagPat(2, 3);
 
     t.db.beginWriteTxn();
-    t.db.putPqNullifier(a, 1, txid);
-    t.db.putPqNullifier(b, 2, txid);
-    t.db.putPqNullifier(c, 3, txid);
+    EXPECT_TRUE(t.db.putSpentKey(a, 1));
+    EXPECT_TRUE(t.db.putSpentKey(b, 2));
+    EXPECT_TRUE(t.db.putSpentKey(c, 3));
     t.db.commitTxn();
 
-    EXPECT_TRUE(t.db.hasPqNullifier(a));
-    EXPECT_TRUE(t.db.hasPqNullifier(b));
-    EXPECT_TRUE(t.db.hasPqNullifier(c));
+    EXPECT_TRUE(t.db.hasSpentKey(a));
+    EXPECT_TRUE(t.db.hasSpentKey(b));
+    EXPECT_TRUE(t.db.hasSpentKey(c));
 
     t.db.beginWriteTxn();
-    t.db.removePqNullifier(b);
+    EXPECT_TRUE(t.db.removeSpentKey(b));
     t.db.commitTxn();
-
-    EXPECT_TRUE(t.db.hasPqNullifier(a));
-    EXPECT_FALSE(t.db.hasPqNullifier(b));
-    EXPECT_TRUE(t.db.hasPqNullifier(c));
+    EXPECT_TRUE(t.db.hasSpentKey(a));
+    EXPECT_FALSE(t.db.hasSpentKey(b));
+    EXPECT_TRUE(t.db.hasSpentKey(c));
 }
 
 int main(int argc, char** argv) {

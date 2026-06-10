@@ -153,7 +153,6 @@ bool LMDBBlockchainDB::open(const std::string& path) {
     openDb(setupTxn, "hash_to_height",    0,                         m_dbiHashToHeight);
     openDb(setupTxn, "hashing_blobs",     0,                         m_dbiHashingBlobs);
     openDb(setupTxn, "spent_keys",        0,                         m_dbiSpentKeys);
-    openDb(setupTxn, "pq_nullifiers",     0,                         m_dbiPqNullifiers);
     openDb(setupTxn, "pq_acct_reg",       0,                         m_dbiPqAcctReg);
     openDb(setupTxn, "tx_indices",        0,                         m_dbiTxIndices);
     openDb(setupTxn, "key_outputs",       0,                         m_dbiKeyOutputs);
@@ -220,7 +219,6 @@ void LMDBBlockchainDB::clear() {
   dropDb(m_dbiHashToHeight);
   dropDb(m_dbiHashingBlobs);
   dropDb(m_dbiSpentKeys);
-  dropDb(m_dbiPqNullifiers);
   dropDb(m_dbiPqAcctReg);
   dropDb(m_dbiTxIndices);
   dropDb(m_dbiKeyOutputs);
@@ -672,53 +670,10 @@ bool LMDBBlockchainDB::removeSpentKey(const Crypto::KeyImage& ki) {
   return true;
 }
 
-// ─── pq_nullifiers ──────────────────────────────────────────────────────────
-
-bool LMDBBlockchainDB::putPqNullifier(const Crypto::Hash& nullifier,
-                                      uint32_t blockHeight,
-                                      const Crypto::Hash& txid) {
-  assert(m_writeTxn);
-  MDB_val k = {sizeof(nullifier), const_cast<Crypto::Hash*>(&nullifier)};
-  uint8_t valBuf[4 + 32];
-  encBE32(valBuf, blockHeight);
-  memcpy(valBuf + 4, txid.data, 32);
-  MDB_val v = {sizeof(valBuf), valBuf};
-  int rc = mdb_put(m_writeTxn, m_dbiPqNullifiers, &k, &v, 0);
-  checkRc(rc, "putPqNullifier");
-  return true;
-}
-
-bool LMDBBlockchainDB::hasPqNullifier(const Crypto::Hash& nullifier) const {
-  auto guard = readTxn();
-  MDB_val k = {sizeof(nullifier), const_cast<Crypto::Hash*>(&nullifier)}, v{};
-  int rc = mdb_get(guard.txn, m_dbiPqNullifiers, &k, &v);
-  if (rc == MDB_NOTFOUND) return false;
-  checkRc(rc, "hasPqNullifier");
-  return true;
-}
-
-bool LMDBBlockchainDB::getPqNullifier(const Crypto::Hash& nullifier,
-                                      uint32_t& height, Crypto::Hash& txid) const {
-  auto guard = readTxn();
-  MDB_val k = {sizeof(nullifier), const_cast<Crypto::Hash*>(&nullifier)}, v{};
-  int rc = mdb_get(guard.txn, m_dbiPqNullifiers, &k, &v);
-  if (rc == MDB_NOTFOUND) return false;
-  checkRc(rc, "getPqNullifier");
-  if (v.mv_size != 4 + 32) return false;
-  const uint8_t* p = static_cast<const uint8_t*>(v.mv_data);
-  height = decBE32(p);
-  memcpy(txid.data, p + 4, 32);
-  return true;
-}
-
-bool LMDBBlockchainDB::removePqNullifier(const Crypto::Hash& nullifier) {
-  assert(m_writeTxn);
-  MDB_val k = {sizeof(nullifier), const_cast<Crypto::Hash*>(&nullifier)};
-  int rc = mdb_del(m_writeTxn, m_dbiPqNullifiers, &k, nullptr);
-  if (rc == MDB_NOTFOUND) return false;
-  checkRc(rc, "removePqNullifier");
-  return true;
-}
+// ─── pq_nullifiers: unified into spent_keys ─────────────────────────────────
+// A PQ nullifier is a 32-byte spend tag stored in the spent_keys set via
+// putSpentKey/hasSpentKey/removeSpentKey (see Blockchain::spendImageForInput).
+// There is no separate pq_nullifiers table.
 
 // ─── pq_acct_reg ────────────────────────────────────────────────────────────
 

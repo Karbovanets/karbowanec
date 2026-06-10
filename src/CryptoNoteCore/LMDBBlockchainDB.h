@@ -126,18 +126,11 @@ public:
   bool getSpentKeyHeight(const Crypto::KeyImage& ki, uint32_t& height) const;
   bool removeSpentKey(const Crypto::KeyImage& ki);
 
-  // ── pq_nullifiers ─────────────────────────────────────────────────────────
-  // PQ (v2 TX_PQ) double-spend set. Key: 32-byte nullifier
-  // (= SHA3-256("karbo-pq-nullifier-v1" || auth_pub || rho_reveal), recomputed
-  // by the node — never serialized on the wire). Value: BE32(height) || txid(32).
-  // Rollback re-derives nullifiers from the popped block's txs (mirrors
-  // spent_keys), so no height index is needed.
-  bool putPqNullifier(const Crypto::Hash& nullifier, uint32_t blockHeight,
-                      const Crypto::Hash& txid);
-  bool hasPqNullifier(const Crypto::Hash& nullifier) const;
-  bool getPqNullifier(const Crypto::Hash& nullifier, uint32_t& height,
-                      Crypto::Hash& txid) const;
-  bool removePqNullifier(const Crypto::Hash& nullifier);
+  // NOTE: PQ (v2 TX_PQ) nullifiers are NOT a separate table. A nullifier is a
+  // 32-byte spend tag stored in the spent_keys set above (reinterpreted as a key
+  // image); the classical and PQ value spaces cannot collide. The unified set is
+  // managed via putSpentKey/hasSpentKey/removeSpentKey — see Blockchain's
+  // spendImageForInput().
 
   // ── pq_acct_reg ───────────────────────────────────────────────────────────
   // PQ account-number registry (first-registration-wins). Key:
@@ -244,7 +237,6 @@ private:
   MDB_dbi m_dbiHashToHeight;
   MDB_dbi m_dbiHashingBlobs;
   MDB_dbi m_dbiSpentKeys;
-  MDB_dbi m_dbiPqNullifiers;
   MDB_dbi m_dbiPqAcctReg;
   MDB_dbi m_dbiTxIndices;
   MDB_dbi m_dbiKeyOutputs;
