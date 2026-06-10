@@ -2566,7 +2566,7 @@ bool simple_wallet::pq_address(const std::vector<std::string> &args) {
   // The PQ identity is derived from the same spend secret the 25-word mnemonic
   // backs up, so no extra seed to store. Network prefix follows the classical
   // one (mainnet/testnet) until the dedicated PQ network byte is finalized.
-  const uint64_t networkPrefix = m_currency.publicAddressBase58Prefix();
+  const uint64_t networkPrefix = CryptoNote::parameters::CRYPTONOTE_PUBLIC_PQ_ADDRESS_BASE58_PREFIX;
   CryptoNote::PqAddress addr = CryptoNote::pqWalletAddress(keys.spendSecretKey, networkPrefix);
 
   bool bech32 = !args.empty() &&

@@ -42,6 +42,7 @@ const uint64_t CRYPTONOTE_MAX_UNLOCK_HEIGHT_V6               = UINT64_C(10000000
 const size_t   CRYPTONOTE_MAX_BLOCK_BLOB_SIZE                = 500000000;
 const size_t   CRYPTONOTE_MAX_TX_SIZE                        = 1000000000;
 const uint64_t CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX       = 111; // addresses start with "K"
+const uint64_t CRYPTONOTE_PUBLIC_PQ_ADDRESS_BASE58_PREFIX    = 0x8f; // PQ addresses start with "Q"
 const uint64_t CRYPTONOTE_TX_PROOF_BASE58_PREFIX             = 3576968; // (0x369488), starts with "Proof..."
 const uint64_t CRYPTONOTE_RESERVE_PROOF_BASE58_PREFIX        = 44907175188; // (0xa74ad1d14), starts with "RsrvPrf..."
 const uint64_t CRYPTONOTE_KEYS_SIGNATURE_BASE58_PREFIX       = 176103705; // (0xa7f2119), starts with "SigV1..."
