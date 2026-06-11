@@ -140,7 +140,8 @@ WalletSerializerV2::WalletSerializerV2(
   WalletTransfers& transfers,
   UncommitedTransactions& uncommitedTransactions,
   std::string& extra,
-  uint32_t transactionSoftLockTime
+  uint32_t transactionSoftLockTime,
+  std::string& pqState
 ) :
   m_transfersObserver(transfersObserver),
   m_addressGenerationMode(addressGenerationMode),
@@ -155,7 +156,8 @@ WalletSerializerV2::WalletSerializerV2(
   m_transfers(transfers),
   m_uncommitedTransactions(uncommitedTransactions),
   m_extra(extra),
-  m_transactionSoftLockTime(transactionSoftLockTime)
+  m_transactionSoftLockTime(transactionSoftLockTime),
+  m_pqState(pqState)
 {
 }
 
@@ -179,6 +181,7 @@ void WalletSerializerV2::load(Common::IInputStream& source, uint8_t version) {
     loadTransfersSynchronizer(s);
     loadUnlockTransactionsJobs(s);
     s(m_uncommitedTransactions, "uncommitedTransactions");
+    loadPqState(s);
   }
 
   s(m_extra, "extra");
@@ -202,9 +205,20 @@ void WalletSerializerV2::save(Common::IOutputStream& destination, WalletSaveLeve
     saveTransfersSynchronizer(s);
     saveUnlockTransactionsJobs(s);
     s(m_uncommitedTransactions, "uncommitedTransactions");
+    savePqState(s);
   }
 
   s(m_extra, "extra");
+}
+
+void WalletSerializerV2::loadPqState(CryptoNote::ISerializer& serializer) {
+  // Optional field: pre-PQ wallet files omit it, leaving m_pqState as the empty
+  // blob WalletGreen initialised (which triggers a normal PQ rescan).
+  serializer(m_pqState, "pqState");
+}
+
+void WalletSerializerV2::savePqState(CryptoNote::ISerializer& serializer) {
+  serializer(m_pqState, "pqState");
 }
 
 std::unordered_set<Crypto::PublicKey>& WalletSerializerV2::addedKeys() {

@@ -43,7 +43,8 @@ public:
     WalletTransfers& transfers,
     UncommitedTransactions& uncommitedTransactions,
     std::string& extra,
-    uint32_t transactionSoftLockTime
+    uint32_t transactionSoftLockTime,
+    std::string& pqState
   );
 
   void load(Common::IInputStream& source, uint8_t version);
@@ -75,6 +76,12 @@ private:
   void loadUnlockTransactionsJobs(CryptoNote::ISerializer& serializer);
   void saveUnlockTransactionsJobs(CryptoNote::ISerializer& serializer);
 
+  // Opaque PQ-wallet state blob (PqConsumer sync cursor + PqWalletState),
+  // produced/consumed by WalletGreen. Optional field: absent in pre-PQ wallet
+  // files, which load as an empty blob (no version bump needed).
+  void loadPqState(CryptoNote::ISerializer& serializer);
+  void savePqState(CryptoNote::ISerializer& serializer);
+
   ITransfersObserver& m_transfersObserver;
   AddressGenerationMode& m_addressGenerationMode;
   Crypto::SecretKey& m_deterministicSeed;
@@ -89,6 +96,7 @@ private:
   UncommitedTransactions& m_uncommitedTransactions;
   std::string& m_extra;
   uint32_t m_transactionSoftLockTime;
+  std::string& m_pqState;
 
   std::unordered_set<Crypto::PublicKey> m_addedKeys;
   std::unordered_set<Crypto::PublicKey> m_deletedKeys;

@@ -633,13 +633,19 @@ void WalletGreen::loadWalletCache(std::unordered_set<Crypto::PublicKey>& addedKe
     m_transfers,
     m_uncommitedTransactions,
     extra,
-    m_transactionSoftLockTime
+    m_transactionSoftLockTime,
+    m_pqState
   );
 
   Common::MemoryInputStream containerStream(contanerData.data(), contanerData.size());
   s.load(containerStream, reinterpret_cast<const ContainerStoragePrefix*>(m_containerStorage.prefix())->version);
   addedKeys = std::move(s.addedKeys());
   deletedKeys = std::move(s.deletedKeys());
+
+  // The PQ consumer was (re)created during key/balance load; restore its sync
+  // cursor + owned outputs from the persisted blob so it resumes instead of
+  // rescanning from genesis. No-op when there is no PQ state or no consumer.
+  restorePqStateBlob();
 
   m_logger(DEBUGGING) << "Container cache loaded";
 }
@@ -667,6 +673,9 @@ void WalletGreen::saveWalletCache(ContainerStorage& storage, const Crypto::chach
     });
   }
 
+  // Capture the current PQ consumer cursor + owned outputs so they persist.
+  buildPqStateBlob();
+
   std::string containerData;
   Common::StringOutputStream containerStream(containerData);
 
@@ -686,7 +695,8 @@ void WalletGreen::saveWalletCache(ContainerStorage& storage, const Crypto::chach
     transfers,
     m_uncommitedTransactions,
     const_cast<std::string&>(extra),
-    m_transactionSoftLockTime
+    m_transactionSoftLockTime,
+    m_pqState
   );
 
   s.save(containerStream, saveLevel);
@@ -3396,6 +3406,59 @@ void WalletGreen::initPqConsumer(const Crypto::SecretKey& spendSecretKey,
   PqWalletKeys pqKeys = derivePqWalletKeys(spendSecretKey);
   m_pqConsumer.reset(new PqConsumer(pqKeys, syncStart, m_logger.getLogger()));
   m_blockchainSynchronizer.addConsumer(m_pqConsumer.get());
+}
+
+void WalletGreen::buildPqStateBlob() {
+  m_pqState.clear();
+  if (!m_pqConsumer) {
+    return;
+  }
+  std::stringstream consumerStream;
+  m_blockchainSynchronizer.getConsumerState(m_pqConsumer.get())->save(consumerStream);
+  std::string consumerBlob = consumerStream.str();
+
+  std::stringstream stateStream;
+  m_pqConsumer->state().save(stateStream);
+  std::string stateBlob = stateStream.str();
+
+  // Frame: [u64 len || bytes] x2 (consumer sync cursor, then PqWalletState).
+  std::stringstream out;
+  auto writeSection = [&out](const std::string& s) {
+    uint64_t len = s.size();
+    out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+    if (len) out.write(s.data(), static_cast<std::streamsize>(s.size()));
+  };
+  writeSection(consumerBlob);
+  writeSection(stateBlob);
+  m_pqState = out.str();
+}
+
+void WalletGreen::restorePqStateBlob() {
+  if (!m_pqConsumer || m_pqState.empty()) {
+    return;
+  }
+  std::stringstream in(m_pqState);
+  auto readSection = [&in](std::string& s) -> bool {
+    uint64_t len = 0;
+    in.read(reinterpret_cast<char*>(&len), sizeof(len));
+    if (!in) return false;
+    s.resize(len);
+    if (len) in.read(&s[0], static_cast<std::streamsize>(len));
+    return static_cast<bool>(in);
+  };
+  std::string consumerBlob, stateBlob;
+  try {
+    if (readSection(consumerBlob) && !consumerBlob.empty()) {
+      std::stringstream cs(consumerBlob);
+      m_blockchainSynchronizer.getConsumerState(m_pqConsumer.get())->load(cs);
+    }
+    if (readSection(stateBlob) && !stateBlob.empty()) {
+      std::stringstream ss(stateBlob);
+      m_pqConsumer->state().load(ss);
+    }
+  } catch (const std::exception& e) {
+    m_logger(WARNING) << "Failed to restore PQ state (" << e.what() << "); will rescan.";
+  }
 }
 
 uint64_t WalletGreen::pqActualBalance() const {

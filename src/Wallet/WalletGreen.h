@@ -356,6 +356,10 @@ protected:
   // a spend secret being present and PQ activation being scheduled. No-op if
   // already created or gates fail.
   void initPqConsumer(const Crypto::SecretKey& spendSecretKey, const SynchronizationStart& syncStart);
+  // Serialize the PQ consumer's sync cursor + PqWalletState into m_pqState (for
+  // save), and restore them from m_pqState into a live consumer (after load).
+  void buildPqStateBlob();
+  void restorePqStateBlob();
   void addUnconfirmedTransaction(const ITransactionReader& transaction);
   void removeUnconfirmedTransaction(const Crypto::Hash& transactionHash);
 
@@ -427,6 +431,7 @@ protected:
   Crypto::chacha8_key m_key;
   std::string m_path;
   std::string m_extra; // workaround for wallet reset
+  std::string m_pqState; // persisted PQ consumer cursor + PqWalletState (see save/loadPqState)
 
   Crypto::PublicKey m_viewPublicKey;
   Crypto::SecretKey m_viewSecretKey;
