@@ -307,7 +307,7 @@ TEST(PqFreeReg, BuildsValidRegistration) {
     uint64_t nonce = 0;
     while (!CryptoNote::checkFreeRegPow(me.viewPub, ref, nonce)) ++nonce;
 
-    Transaction tx = buildFreeRegTransaction(me.viewPub, ref, nonce);
+    Transaction tx = buildFreeRegTransaction(me.viewPub, me.spendPub, ref, nonce);
     EXPECT_EQ(tx.version, TRANSACTION_VERSION_PQ);
     EXPECT_EQ(tx.txType, TX_FREE_REG);
     EXPECT_TRUE(tx.inputs.empty());

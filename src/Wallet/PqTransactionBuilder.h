@@ -108,6 +108,7 @@ Transaction buildBridgeTransaction(std::vector<BridgeLegacyInput>& inputs,
 // refBlockHash, nonce) holds (see PqValidation.h). No signing — the PoW is the
 // only authorization.
 Transaction buildFreeRegTransaction(const CryptoPQ::KemPublicKey& viewPub,
+                                    const CryptoPQ::DsaPublicKey& spendPub,
                                     const Crypto::Hash& refBlockHash,
                                     uint64_t nonce);
 

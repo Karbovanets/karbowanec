@@ -42,6 +42,10 @@
 
 // ML-KEM-768 public (view) key length carried by a PQ account registration.
 #define TX_EXTRA_PQ_VIEW_PUBKEY_SIZE          1184
+// ML-DSA-65 public (spend) key length. A registration carries BOTH keys so an
+// account number resolves to a full, payable PqAddress (the ownership fix binds
+// spend_commit to the recipient's spend pubkey — see docs/PQ-OWNERSHIP-FIX.md).
+#define TX_EXTRA_PQ_SPEND_PUBKEY_SIZE         1952
 
 namespace CryptoNote {
 
@@ -67,9 +71,12 @@ struct TransactionExtraAccountRegistration {
   Crypto::PublicKey viewPublicKey;
 };
 
-// PQ account registration: a single ML-KEM-768 view public key (spec §4).
+// PQ account registration: the identity's ML-KEM-768 view key + ML-DSA-65 spend
+// key (spec §4, amended by the ownership fix). On the wire: tag(1) ||
+// viewPub(1184) || spendPub(1952).
 struct TransactionExtraPqAccountRegistration {
-  std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE> viewPub;
+  std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>  viewPub;
+  std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE> spendPub;
 };
 
 // Anti-spam PoW for free-fee registration (spec §11.2). On the wire this tag is
@@ -122,7 +129,9 @@ bool getAccountRegistrationFromExtra(const std::vector<uint8_t>& tx_extra, Trans
 bool isWellFormedAccountRegistration(const std::vector<uint8_t>& tx_extra);
 
 // PQ account registration (tag 0x05).
-bool addPqAccountRegistrationToExtra(std::vector<uint8_t>& tx_extra, const std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>& viewPub);
+bool addPqAccountRegistrationToExtra(std::vector<uint8_t>& tx_extra,
+                                     const std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>& viewPub,
+                                     const std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE>& spendPub);
 bool getPqAccountRegistrationFromExtra(const std::vector<uint8_t>& tx_extra, TransactionExtraPqAccountRegistration& reg);
 
 // PQ anti-spam PoW tag (tag 0x06). appendPowTagToExtra MUST be the final write

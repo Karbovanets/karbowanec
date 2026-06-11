@@ -99,6 +99,7 @@ bool parseTransactionExtra(const std::vector<uint8_t> &transactionExtra, std::ve
       case TX_EXTRA_TAG_PQ_ACCOUNT_REGISTRATION: {
         TransactionExtraPqAccountRegistration reg;
         read(iss, reg.viewPub.data(), reg.viewPub.size());
+        read(iss, reg.spendPub.data(), reg.spendPub.size());
         transactionExtraFields.push_back(reg);
         break;
       }
@@ -155,7 +156,7 @@ struct ExtraSerializerVisitor : public boost::static_visitor<bool> {
   }
 
   bool operator()(const TransactionExtraPqAccountRegistration& t) {
-    return addPqAccountRegistrationToExtra(extra, t.viewPub);
+    return addPqAccountRegistrationToExtra(extra, t.viewPub, t.spendPub);
   }
 
   bool operator()(const TransactionExtraPow& t) {
@@ -342,11 +343,14 @@ bool isWellFormedAccountRegistration(const std::vector<uint8_t>& tx_extra) {
   return true;
 }
 
-bool addPqAccountRegistrationToExtra(std::vector<uint8_t>& tx_extra, const std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>& viewPub) {
+bool addPqAccountRegistrationToExtra(std::vector<uint8_t>& tx_extra,
+                                     const std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>& viewPub,
+                                     const std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE>& spendPub) {
   size_t start = tx_extra.size();
-  tx_extra.resize(start + 1 + viewPub.size());
+  tx_extra.resize(start + 1 + viewPub.size() + spendPub.size());
   tx_extra[start] = TX_EXTRA_TAG_PQ_ACCOUNT_REGISTRATION;
   memcpy(&tx_extra[start + 1], viewPub.data(), viewPub.size());
+  memcpy(&tx_extra[start + 1 + viewPub.size()], spendPub.data(), spendPub.size());
   return true;
 }
 

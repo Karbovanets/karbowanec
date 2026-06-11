@@ -47,14 +47,17 @@ TEST(PqTaxonomy, SubtypeEnumValues) {
 TEST(PqExtra, PqAccountRegistrationRoundTrip) {
     std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE> viewPub;
     for (size_t i = 0; i < viewPub.size(); ++i) viewPub[i] = static_cast<uint8_t>(i * 7 + 1);
+    std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE> spendPub;
+    for (size_t i = 0; i < spendPub.size(); ++i) spendPub[i] = static_cast<uint8_t>(i * 3 + 5);
 
     std::vector<uint8_t> extra;
-    ASSERT_TRUE(addPqAccountRegistrationToExtra(extra, viewPub));
-    EXPECT_EQ(extra.size(), 1u + viewPub.size());
+    ASSERT_TRUE(addPqAccountRegistrationToExtra(extra, viewPub, spendPub));
+    EXPECT_EQ(extra.size(), 1u + viewPub.size() + spendPub.size());
 
     TransactionExtraPqAccountRegistration reg;
     ASSERT_TRUE(getPqAccountRegistrationFromExtra(extra, reg));
     EXPECT_EQ(reg.viewPub, viewPub);
+    EXPECT_EQ(reg.spendPub, spendPub);
 }
 
 TEST(PqExtra, PowTagRoundTripLittleEndianNonce) {
@@ -78,11 +81,12 @@ TEST(PqExtra, PowTagRoundTripLittleEndianNonce) {
 
 TEST(PqExtra, PowTagLastFieldDetection) {
     std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE> viewPub{};
+    std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE> spendPub{};
 
     // registration then PoW last -> ok.
     {
         std::vector<uint8_t> extra;
-        addPqAccountRegistrationToExtra(extra, viewPub);
+        addPqAccountRegistrationToExtra(extra, viewPub, spendPub);
         TransactionExtraPow pow{}; pow.nonce = 42;
         appendPowTagToExtra(extra, pow);
         EXPECT_TRUE(isPowTagLastField(extra));
@@ -99,7 +103,7 @@ TEST(PqExtra, PowTagLastFieldDetection) {
     // No PoW tag at all -> false.
     {
         std::vector<uint8_t> extra;
-        addPqAccountRegistrationToExtra(extra, viewPub);
+        addPqAccountRegistrationToExtra(extra, viewPub, spendPub);
         EXPECT_FALSE(isPowTagLastField(extra));
     }
 }

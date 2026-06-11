@@ -2727,7 +2727,7 @@ bool simple_wallet::pq_register(const std::vector<std::string> &args) {
   }
 
   try {
-    CryptoNote::Transaction tx = CryptoNote::buildFreeRegTransaction(pq.viewPub, refBlockHash, nonce);
+    CryptoNote::Transaction tx = CryptoNote::buildFreeRegTransaction(pq.viewPub, pq.spendPub, refBlockHash, nonce);
 
     std::promise<std::error_code> promise;
     auto future = promise.get_future();

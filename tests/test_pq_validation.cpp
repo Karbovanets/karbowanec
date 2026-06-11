@@ -351,6 +351,11 @@ std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE> freeRegViewPub() {
     for (size_t i = 0; i < vp.size(); ++i) vp[i] = static_cast<uint8_t>(i * 3 + 1);
     return vp;
 }
+std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE> freeRegSpendPub() {
+    std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE> sp;
+    for (size_t i = 0; i < sp.size(); ++i) sp[i] = static_cast<uint8_t>(i * 5 + 2);
+    return sp;
+}
 
 Transaction makeFreeRegTx() {
     Transaction tx;
@@ -358,7 +363,7 @@ Transaction makeFreeRegTx() {
     tx.txType = TX_FREE_REG;
     tx.unlockTime = 0;
     // no inputs / outputs / signatures
-    addPqAccountRegistrationToExtra(tx.extra, freeRegViewPub());
+    addPqAccountRegistrationToExtra(tx.extra, freeRegViewPub(), freeRegSpendPub());
     TransactionExtraPow pow{};
     pow.refBlockHash = hashPat(1, 1);
     pow.nonce = 42;
@@ -396,7 +401,7 @@ TEST(PqValidation, FreeRegRejectsExtraField) {
     tx.version = TRANSACTION_VERSION_PQ;
     tx.txType = TX_FREE_REG;
     tx.unlockTime = 0;
-    addPqAccountRegistrationToExtra(tx.extra, freeRegViewPub());
+    addPqAccountRegistrationToExtra(tx.extra, freeRegViewPub(), freeRegSpendPub());
     Crypto::PublicKey pk{};
     addTransactionPublicKeyToExtra(tx.extra, pk);  // disallowed extra field
     TransactionExtraPow pow{}; pow.nonce = 1;
@@ -413,7 +418,7 @@ TEST(PqValidation, FreeRegRejectsPowNotLast) {
     tx.unlockTime = 0;
     TransactionExtraPow pow{}; pow.nonce = 1;
     appendPowTagToExtra(tx.extra, pow);
-    addPqAccountRegistrationToExtra(tx.extra, freeRegViewPub());
+    addPqAccountRegistrationToExtra(tx.extra, freeRegViewPub(), freeRegSpendPub());
     std::string err;
     EXPECT_FALSE(checkFreeRegTransactionSemantic(tx, &err));
 }
@@ -423,7 +428,7 @@ TEST(PqValidation, FreeRegRejectsMissingPow) {
     tx.version = TRANSACTION_VERSION_PQ;
     tx.txType = TX_FREE_REG;
     tx.unlockTime = 0;
-    addPqAccountRegistrationToExtra(tx.extra, freeRegViewPub());  // no PoW tag
+    addPqAccountRegistrationToExtra(tx.extra, freeRegViewPub(), freeRegSpendPub());  // no PoW tag
     std::string err;
     EXPECT_FALSE(checkFreeRegTransactionSemantic(tx, &err));
 }

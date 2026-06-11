@@ -1377,7 +1377,7 @@ void pqRegister(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node)
     try
     {
         CryptoNote::Transaction tx =
-            CryptoNote::buildFreeRegTransaction(pq.viewPub, refBlockHash, nonce);
+            CryptoNote::buildFreeRegTransaction(pq.viewPub, pq.spendPub, refBlockHash, nonce);
 
         std::promise<std::error_code> promise;
         auto future = promise.get_future();
