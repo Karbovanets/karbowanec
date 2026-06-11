@@ -89,4 +89,18 @@ bool isPqAddressString(const std::string& s);
 // populated and `encoding` (if non-null) reports which encoding matched.
 bool parsePqAddress(const std::string& s, PqAddress& out, PqAddressEncoding* encoding = nullptr);
 
+// --- H-I-C account numbers (wallet-layer rendering of a PQ registration) -----
+// A registered PQ account is addressed by its on-chain registration coordinates
+// (block height, in-block tx index). The human-readable form is
+//   "<height>-<txIndex>-<CHK>"  e.g. "1234567-42-A7B"
+// where CHK is the first 3 base36 chars of SHA3-256(LE64(height)||LE32(txIndex)),
+// uppercased — a typo guard, not a security feature. Consensus only stores the
+// raw (height, txIndex) pair; this rendering is purely wallet-side.
+
+std::string pqAccountNumber(uint32_t height, uint32_t txIndex);
+
+// Parse "<height>-<txIndex>-<CHK>"; returns false on malformed input or a
+// checksum mismatch. Leading/trailing whitespace is ignored.
+bool parsePqAccountNumber(const std::string& s, uint32_t& height, uint32_t& txIndex);
+
 }  // namespace CryptoNote
