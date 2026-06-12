@@ -81,7 +81,7 @@ bool checkBridgeTransactionSemantic(const Transaction& tx, std::string* error);
 bool checkFreeRegTransactionSemantic(const Transaction& tx, std::string* error);
 
 // The free-reg anti-spam PoW predicate. Reused by wallet nonce grinding. The
-// FREE_REG_POW_TARGET threshold is a placeholder pending calibration.
+// FREE_REG_POW_TARGET threshold must still be calibrated before activation.
 bool checkFreeRegPow(const std::array<uint8_t, 1184>& viewPub,
                      const Crypto::Hash& refBlockHash, uint64_t nonce);
 

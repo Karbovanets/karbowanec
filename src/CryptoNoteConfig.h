@@ -93,11 +93,11 @@ const uint64_t MAX_PQ_TX_SIZE                                = 48 * 1024;
 const uint64_t MIN_PQ_FEE_PER_BYTE                           = 1;
 
 // Free-fee account registration (spec §11). FREE_REG_POW_TARGET is a
-// placeholder; calibrate on 2020-era mid-range Android (~3 s) before any
-// production fork-height commitment.
+// initial low difficulty (~1/256 trials); calibrate on target mobile hardware
+// before any production fork-height commitment.
 const uint64_t FREE_REG_REF_WINDOW                          = 60;
 const uint64_t FREE_REG_PER_BLOCK                           = 100;
-const uint64_t FREE_REG_POW_TARGET                          = UINT64_C(0xFFFFFFFFFFFFFFFF);
+const uint64_t FREE_REG_POW_TARGET                          = UINT64_C(0x00FFFFFFFFFFFFFF);
 
 const uint64_t MAX_TRANSACTION_SIZE_LIMIT                    = CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE_CURRENT / 4 - CRYPTONOTE_COINBASE_BLOB_RESERVED_SIZE;
 

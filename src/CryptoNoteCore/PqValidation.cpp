@@ -201,8 +201,7 @@ bool checkFreeRegPow(const std::array<uint8_t, 1184>& viewPub,
   Crypto::Hash h;
   Crypto::cn_slow_hash(ctx, buf.data(), buf.size(), h);
 
-  // Placeholder target semantics: leading 8 bytes (big-endian) <= target.
-  // Calibration lowers FREE_REG_POW_TARGET to raise difficulty.
+  // Target semantics: leading 8 bytes (big-endian) <= target.
   uint64_t lead = 0;
   for (int i = 0; i < 8; ++i) lead = (lead << 8) | static_cast<uint8_t>(h.data[i]);
   return lead <= parameters::FREE_REG_POW_TARGET;

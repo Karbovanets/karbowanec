@@ -193,6 +193,7 @@ namespace CryptoNote {
     // double spending checking
     bool addTransactionInputs(const Crypto::Hash& id, const Transaction& tx, bool keptByBlock);
     bool haveSpentInputs(const Transaction& tx) const;
+    bool havePqAccountRegistration(const Transaction& tx) const;
     bool removeTransactionInputs(const Crypto::Hash& id, const Transaction& tx, bool keptByBlock);
 
     tx_container_t::iterator removeTransaction(tx_container_t::iterator i);
@@ -207,6 +208,7 @@ namespace CryptoNote {
     OnceInTimeInterval m_txCheckInterval;
     mutable std::recursive_mutex m_transactions_lock;
     key_images_container m_spent_key_images;
+    std::unordered_map<Crypto::Hash, std::unordered_set<Crypto::Hash>> m_pq_account_registrations;
 
     std::string m_config_folder;
     CryptoNote::ITransactionValidator& m_validator;

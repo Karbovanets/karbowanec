@@ -18,6 +18,7 @@
 #include "gtest/gtest.h"
 
 #include <algorithm>
+#include <array>
 
 #include <boost/filesystem/operations.hpp>
 
@@ -30,6 +31,7 @@
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "CryptoNoteCore/TransactionPool.h"
 #include "ICoreStub.h"
+#include "PqTxType.h"
 #include <Logging/ConsoleLogger.h>
 #include <Logging/LoggerGroup.h>
 
@@ -223,6 +225,27 @@ namespace
     bl.previousBlockHash = NULL_HASH;
   }
 
+  Transaction makeFreeRegPoolTx(uint64_t nonce) {
+    Transaction tx;
+    tx.version = TRANSACTION_VERSION_PQ;
+    tx.txType = TX_FREE_REG;
+    tx.unlockTime = 0;
+
+    std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE> viewPub{};
+    std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE> spendPub{};
+    for (size_t i = 0; i < viewPub.size(); ++i) {
+      viewPub[i] = static_cast<uint8_t>(i * 3 + 1);
+    }
+    for (size_t i = 0; i < spendPub.size(); ++i) {
+      spendPub[i] = static_cast<uint8_t>(i * 5 + 2);
+    }
+    addPqAccountRegistrationToExtra(tx.extra, viewPub, spendPub);
+    TransactionExtraPow pow{};
+    pow.nonce = nonce;
+    appendPowTagToExtra(tx.extra, pow);
+    return tx;
+  }
+
 }
 
 TEST_F(tx_pool, add_one_tx)
@@ -281,6 +304,23 @@ TEST_F(tx_pool, double_spend_tx)
   ASSERT_TRUE(tvc.m_verification_failed);
 }
 
+TEST_F(tx_pool, duplicate_pq_registration_rejected)
+{
+  TestPool<TransactionValidator, RealTimeProvider> pool(currency, logger);
+
+  Transaction tx1 = makeFreeRegPoolTx(1);
+  Transaction tx2 = makeFreeRegPoolTx(2);
+
+  tx_verification_context tvc1 = boost::value_initialized<tx_verification_context>();
+  ASSERT_TRUE(pool.add_tx(tx1, tvc1, false));
+  ASSERT_TRUE(tvc1.m_added_to_pool);
+  ASSERT_FALSE(tvc1.m_verification_failed);
+
+  tx_verification_context tvc2 = boost::value_initialized<tx_verification_context>();
+  ASSERT_FALSE(pool.add_tx(tx2, tvc2, false));
+  ASSERT_FALSE(tvc2.m_added_to_pool);
+  ASSERT_TRUE(tvc2.m_verification_failed);
+}
 
 TEST_F(tx_pool, fillblock_same_fee)
 {

@@ -39,6 +39,7 @@
 #include "CryptoNoteFormatUtils.h"
 #include "CryptoNoteTools.h"
 #include "CryptoNoteConfig.h"
+#include "TransactionExtra.h"
 #include "PqTxType.h"
 #include "PqValidation.h"
 
@@ -58,6 +59,15 @@ Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
   Crypto::KeyImage ki;
   std::memcpy(&ki, &nf, sizeof(ki));
   return ki;
+}
+
+bool getPqAccountRegistrationId(const Transaction& tx, Crypto::Hash& accountId) {
+  TransactionExtraPqAccountRegistration reg;
+  if (!getPqAccountRegistrationFromExtra(tx.extra, reg)) {
+    return false;
+  }
+  accountId = getPqAccountIdentityHash(reg);
+  return true;
 }
 }  // namespace
 
@@ -83,6 +93,16 @@ Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
         }
       }
 
+      Crypto::Hash accountId;
+      if (getPqAccountRegistrationId(tx, accountId)) {
+        auto r = m_pqAccountRegistrations.insert(accountId);
+        (void)r;
+        assert(r.second);
+      }
+      if (tx.version >= TRANSACTION_VERSION_PQ && tx.txType == TX_FREE_REG) {
+        ++m_freeRegCount;
+      }
+
       m_txHashes.push_back(txid);
       return true;
     }
@@ -105,10 +125,21 @@ Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
           }
         }
       }
+      Crypto::Hash accountId;
+      if (getPqAccountRegistrationId(tx, accountId) &&
+          m_pqAccountRegistrations.count(accountId)) {
+        return false;
+      }
+      if (tx.version >= TRANSACTION_VERSION_PQ && tx.txType == TX_FREE_REG &&
+          m_freeRegCount >= parameters::FREE_REG_PER_BLOCK) {
+        return false;
+      }
       return true;
     }
     
     std::unordered_set<Crypto::KeyImage> m_keyImages;
+    std::unordered_set<Crypto::Hash> m_pqAccountRegistrations;
+    size_t m_freeRegCount = 0;
     std::set<std::pair<uint64_t, uint64_t>> m_usedOutputs;
     std::vector<Crypto::Hash> m_txHashes;
   };
@@ -178,6 +209,11 @@ Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
       std::lock_guard<std::recursive_mutex> lock(m_transactions_lock);
       if (haveSpentInputs(tx)) {
         logger(INFO) << "Transaction with id= " << id << " used already spent inputs";
+        tvc.m_verification_failed = true;
+        return false;
+      }
+      if (havePqAccountRegistration(tx)) {
+        logger(INFO) << "Transaction with id= " << id << " registers a PQ account already pending in the pool";
         tvc.m_verification_failed = true;
         return false;
       }
@@ -512,6 +548,7 @@ Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
 
       m_transactions.clear();
       m_spent_key_images.clear();
+      m_pq_account_registrations.clear();
       m_paymentIdIndex.clear();
       m_timestampIndex.clear();
     } else {
@@ -666,6 +703,25 @@ Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
       }
     }
 
+    Crypto::Hash accountId;
+    if (getPqAccountRegistrationId(tx, accountId)) {
+      auto it = m_pq_account_registrations.find(accountId);
+      if (it == m_pq_account_registrations.end()) {
+        logger(ERROR, BRIGHT_RED) << "failed to find PQ account registration in pool index. tx_id=" << tx_id;
+        return false;
+      }
+      std::unordered_set<Crypto::Hash>& txSet = it->second;
+      auto txIt = txSet.find(tx_id);
+      if (txIt == txSet.end()) {
+        logger(ERROR, BRIGHT_RED) << "transaction id not found in PQ account registration pool index. tx_id=" << tx_id;
+        return false;
+      }
+      txSet.erase(txIt);
+      if (txSet.empty()) {
+        m_pq_account_registrations.erase(it);
+      }
+    }
+
     return true;
   }
 
@@ -696,6 +752,23 @@ Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
       }
     }
 
+    Crypto::Hash accountId;
+    if (getPqAccountRegistrationId(tx, accountId)) {
+      std::unordered_set<Crypto::Hash>& txSet = m_pq_account_registrations[accountId];
+      if (!(keptByBlock || txSet.empty())) {
+        logger(ERROR, BRIGHT_RED)
+            << "internal error: keptByBlock=" << keptByBlock
+            << ", pq_account_registration_set.size()=" << txSet.size()
+            << ENDL << "tx_id=" << id;
+        return false;
+      }
+      auto ins = txSet.insert(id);
+      if (!ins.second) {
+        logger(ERROR, BRIGHT_RED) << "internal error: duplicate PQ account registration tx id";
+        return false;
+      }
+    }
+
     return true;
   }
 
@@ -716,6 +789,12 @@ Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
     return false;
   }
 
+  bool tx_memory_pool::havePqAccountRegistration(const Transaction& tx) const {
+    Crypto::Hash accountId;
+    return getPqAccountRegistrationId(tx, accountId) &&
+           m_pq_account_registrations.count(accountId) != 0;
+  }
+
   bool tx_memory_pool::addObserver(ITxPoolObserver* observer) {
     return m_observerManager.add(observer);
   }
@@ -726,9 +805,14 @@ Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
 
   void tx_memory_pool::buildIndices() {
     std::lock_guard<std::recursive_mutex> lock(m_transactions_lock);
+    m_pq_account_registrations.clear();
     for (auto it = m_transactions.begin(); it != m_transactions.end(); it++) {
       m_paymentIdIndex.add(it->tx);
       m_timestampIndex.add(it->receiveTime, it->id);
+      Crypto::Hash accountId;
+      if (getPqAccountRegistrationId(it->tx, accountId)) {
+        m_pq_account_registrations[accountId].insert(it->id);
+      }
     }
   }
 

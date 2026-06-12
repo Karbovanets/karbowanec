@@ -22,6 +22,7 @@
 #include <iterator>
 #include <limits>
 #include <numeric>
+#include <unordered_set>
 #include <cstdio>
 #include <cmath>
 #include <cstring>
@@ -2668,6 +2669,9 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
       return false;
     }
 
+    size_t freeRegCount = 0;
+    std::unordered_set<Crypto::Hash> pqRegistrationsInBlock;
+
     for (size_t i = 0; i < transactions.size(); ++i) {
       const Crypto::Hash& tx_id = blockData.transactionHashes[i];
       block.transactions.resize(block.transactions.size() + 1);
@@ -2675,6 +2679,27 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
 
       const Transaction& curTx = block.transactions.back().tx;
       size_t blob_size = toBinaryArray(curTx).size();
+      if (curTx.version >= TRANSACTION_VERSION_PQ && curTx.txType == TX_FREE_REG) {
+        ++freeRegCount;
+        if (freeRegCount > parameters::FREE_REG_PER_BLOCK) {
+          logger(INFO, BRIGHT_WHITE) << "Block " << blockHash
+            << " exceeds the free PQ registration limit";
+          bvc.m_verification_failed = true;
+          abortCurrentBlockTxn();
+          return false;
+        }
+      }
+      TransactionExtraPqAccountRegistration pqReg;
+      if (getPqAccountRegistrationFromExtra(curTx.extra, pqReg)) {
+        const Crypto::Hash accountId = getPqAccountIdentityHash(pqReg);
+        if (!pqRegistrationsInBlock.insert(accountId).second) {
+          logger(INFO, BRIGHT_WHITE) << "Block " << blockHash
+            << " contains duplicate PQ account registrations";
+          bvc.m_verification_failed = true;
+          abortCurrentBlockTxn();
+          return false;
+        }
+      }
       // TX_PQ inputs carry no amount (value lives in the referenced outputs), so
       // getInputAmount would read 0 and the fee would underflow. Resolve the
       // referenced amounts instead. (TX_BRIDGE has classical inputs -> normal.)

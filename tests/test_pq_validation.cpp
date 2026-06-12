@@ -366,7 +366,9 @@ Transaction makeFreeRegTx() {
     addPqAccountRegistrationToExtra(tx.extra, freeRegViewPub(), freeRegSpendPub());
     TransactionExtraPow pow{};
     pow.refBlockHash = hashPat(1, 1);
-    pow.nonce = 42;
+    while (!checkFreeRegPow(freeRegViewPub(), pow.refBlockHash, pow.nonce)) {
+        ++pow.nonce;
+    }
     appendPowTagToExtra(tx.extra, pow);  // PoW must be the last field
     return tx;
 }
@@ -374,7 +376,6 @@ Transaction makeFreeRegTx() {
 }  // namespace
 
 TEST(PqValidation, FreeRegAcceptsValid) {
-    // FREE_REG_POW_TARGET is the placeholder max, so any nonce satisfies PoW.
     Transaction tx = makeFreeRegTx();
     std::string err;
     EXPECT_TRUE(checkFreeRegTransactionSemantic(tx, &err)) << err;
