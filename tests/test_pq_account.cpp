@@ -9,10 +9,12 @@
 #include "gtest/gtest.h"
 
 #include "CryptoNoteCore/LMDBBlockchainDB.h"
+#include "CryptoNoteCore/TransactionExtra.h"
 #include "AccountNumber.h"
 #include "CryptoTypes.h"
 
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <string>
 
@@ -62,9 +64,29 @@ TEST(PqAcctReg, PutHasGetRemove) {
     EXPECT_FALSE(t.db.hasPqAcctReg(vp));
 }
 
+TEST(PqAcctReg, AccountIdentityBindsSpendKey) {
+    TransactionExtraPqAccountRegistration a{};
+    TransactionExtraPqAccountRegistration b{};
+    for (size_t i = 0; i < a.viewPub.size(); ++i) {
+        a.viewPub[i] = static_cast<uint8_t>(i & 0xff);
+        b.viewPub[i] = a.viewPub[i];
+    }
+    for (size_t i = 0; i < a.spendPub.size(); ++i) {
+        a.spendPub[i] = static_cast<uint8_t>((i * 3) & 0xff);
+        b.spendPub[i] = static_cast<uint8_t>((i * 5 + 1) & 0xff);
+    }
+
+    const Crypto::Hash aidA = getPqAccountIdentityHash(a);
+    const Crypto::Hash aidB = getPqAccountIdentityHash(b);
+    const Crypto::Hash aidA2 = getPqAccountIdentityHash(a.viewPub, a.spendPub);
+    EXPECT_NE(0, std::memcmp(aidA.data, aidB.data, sizeof(aidA.data)));
+    EXPECT_EQ(0, std::memcmp(aidA.data, aidA2.data, sizeof(aidA.data)));
+}
+
 TEST(PqAcctReg, FirstRegistrationWins) {
     // The consensus rule (in pushTransaction) rejects a second registration of
-    // an already-present viewPub. At the DB layer that's a hasPqAcctReg() check
+    // an already-present account identity. At the DB layer that's a
+    // hasPqAcctReg() check
     // returning true for the duplicate.
     TempDb t;
     Crypto::Hash vp = hashPat(5, 5);
@@ -73,7 +95,7 @@ TEST(PqAcctReg, FirstRegistrationWins) {
     t.db.putPqAcctReg(vp, 100, 1);   // first registration wins at (100,1)
     t.db.commitTxn();
 
-    EXPECT_TRUE(t.db.hasPqAcctReg(vp));  // a later tx would be rejected
+    EXPECT_TRUE(t.db.hasPqAcctReg(vp));  // a later tx with this id would be rejected
     uint32_t h, ti;
     t.db.getPqAcctReg(vp, h, ti);
     EXPECT_EQ(h, 100u);
@@ -95,7 +117,7 @@ TEST(PqAcctReg, ReorgRollbackAllowsReregister) {
     t.db.commitTxn();
     EXPECT_FALSE(t.db.hasPqAcctReg(vp));
 
-    // Same viewPub may now register at a new height on the competing chain.
+    // Same account identity may now register at a new height on the competing chain.
     t.db.beginWriteTxn();
     EXPECT_TRUE(t.db.putPqAcctReg(vp, 101, 3));
     t.db.commitTxn();

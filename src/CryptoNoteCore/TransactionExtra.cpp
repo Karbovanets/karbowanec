@@ -23,8 +23,11 @@
 #include "Common/StringTools.h"
 #include "CryptoNoteTools.h"
 #include "../crypto/crypto.h"
+#include "crypto_pq/PqHash.h"
 #include "Serialization/BinaryOutputStreamSerializer.h"
 #include "Serialization/BinaryInputStreamSerializer.h"
+
+#include <cstring>
 
 using namespace Crypto;
 using namespace Common;
@@ -360,6 +363,26 @@ bool getPqAccountRegistrationFromExtra(const std::vector<uint8_t>& tx_extra, Tra
     return false;
   }
   return findTransactionExtraFieldByType(tx_extra_fields, reg);
+}
+
+Crypto::Hash getPqAccountIdentityHash(const TransactionExtraPqAccountRegistration& reg) {
+  return getPqAccountIdentityHash(reg.viewPub, reg.spendPub);
+}
+
+Crypto::Hash getPqAccountIdentityHash(
+    const std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>& viewPub,
+    const std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE>& spendPub) {
+  static const char domain[] = "karbo-pq-account-id-v1";
+  std::vector<uint8_t> buf;
+  buf.reserve(sizeof(domain) - 1 + viewPub.size() + spendPub.size());
+  buf.insert(buf.end(), domain, domain + sizeof(domain) - 1);
+  buf.insert(buf.end(), viewPub.begin(), viewPub.end());
+  buf.insert(buf.end(), spendPub.begin(), spendPub.end());
+
+  CryptoPQ::Hash256 digest = CryptoPQ::sha3_256(buf.data(), buf.size());
+  Crypto::Hash out;
+  std::memcpy(out.data, digest.data(), 32);
+  return out;
 }
 
 bool appendPowTagToExtra(std::vector<uint8_t>& tx_extra, const TransactionExtraPow& pow) {

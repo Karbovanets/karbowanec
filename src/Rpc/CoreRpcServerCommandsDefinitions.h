@@ -1514,14 +1514,16 @@ struct COMMAND_RPC_GET_ACCOUNT_NUMBER {
 
 // --- PQ account registry ---------------------------------------------------
 // Look up the on-chain registration coordinates (height, in-block tx index) of a
-// PQ identity by its ML-KEM-768 view public key (hex). The wallet renders the
+// PQ identity by its full payable key pair (hex). The wallet renders the
 // human-readable H-I-C number from (height, tx_index).
 struct COMMAND_RPC_GET_PQ_ACCOUNT {
   struct request {
     std::string view_pub;  // hex of the 1184-byte ML-KEM-768 view public key
+    std::string spend_pub; // hex of the 1952-byte ML-DSA-65 spend public key
 
     void serialize(ISerializer& s) {
       KV_MEMBER(view_pub)
+      KV_MEMBER(spend_pub)
     }
   };
 

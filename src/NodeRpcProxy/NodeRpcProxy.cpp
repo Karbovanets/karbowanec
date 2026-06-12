@@ -1066,22 +1066,23 @@ std::error_code NodeRpcProxy::doGetAccountNumber(const std::string& address, std
   return ec;
 }
 
-void NodeRpcProxy::getPqAccount(const std::string& viewPubHex, bool& registered,
+void NodeRpcProxy::getPqAccount(const std::string& viewPubHex, const std::string& spendPubHex, bool& registered,
                                 uint32_t& blockHeight, uint32_t& txIndex, const Callback& callback) {
   std::lock_guard<std::mutex> lock(m_mutex);
   if (m_state != STATE_INITIALIZED) {
     callback(make_error_code(error::NOT_INITIALIZED));
     return;
   }
-  scheduleRequest(std::bind(&NodeRpcProxy::doGetPqAccount, this, viewPubHex,
+  scheduleRequest(std::bind(&NodeRpcProxy::doGetPqAccount, this, viewPubHex, spendPubHex,
                             std::ref(registered), std::ref(blockHeight), std::ref(txIndex)), callback);
 }
 
-std::error_code NodeRpcProxy::doGetPqAccount(const std::string& viewPubHex, bool& registered,
+std::error_code NodeRpcProxy::doGetPqAccount(const std::string& viewPubHex, const std::string& spendPubHex, bool& registered,
                                              uint32_t& blockHeight, uint32_t& txIndex) {
   COMMAND_RPC_GET_PQ_ACCOUNT::request req = AUTO_VAL_INIT(req);
   COMMAND_RPC_GET_PQ_ACCOUNT::response rsp = AUTO_VAL_INIT(rsp);
   req.view_pub = viewPubHex;
+  req.spend_pub = spendPubHex;
   std::error_code ec = jsonRpcCommand("getpqaccount", req, rsp);
   if (!ec) {
     registered = rsp.registered;

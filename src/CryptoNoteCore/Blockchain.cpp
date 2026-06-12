@@ -2267,11 +2267,9 @@ bool Blockchain::checkFreeRegInputs(const Transaction& tx, uint32_t* pmax_used_b
     return false;
   }
 
-  // First-registration-wins: reject if the viewPub is already registered.
-  CryptoPQ::Hash256 h = CryptoPQ::sha3_256(reg.viewPub.data(), reg.viewPub.size());
-  Crypto::Hash viewPubHash;
-  std::memcpy(viewPubHash.data, h.data(), 32);
-  if (m_db.hasPqAcctReg(viewPubHash)) {
+  // First-registration-wins: reject if the full PQ identity is already registered.
+  const Crypto::Hash accountId = getPqAccountIdentityHash(reg);
+  if (m_db.hasPqAcctReg(accountId)) {
     logger(INFO, BRIGHT_WHITE) << "free-reg account already registered, rejected";
     return false;
   }
@@ -2966,15 +2964,13 @@ bool Blockchain::pushTransaction(BlockEntry& block, const Crypto::Hash& transact
   if (transactionIndex.transaction != 0) {
     TransactionExtraPqAccountRegistration pqReg;
     if (getPqAccountRegistrationFromExtra(tx.extra, pqReg)) {
-      CryptoPQ::Hash256 h = CryptoPQ::sha3_256(pqReg.viewPub.data(), pqReg.viewPub.size());
-      Crypto::Hash viewPubHash;
-      std::memcpy(viewPubHash.data, h.data(), 32);
-      if (m_db.hasPqAcctReg(viewPubHash)) {
+      const Crypto::Hash accountId = getPqAccountIdentityHash(pqReg);
+      if (m_db.hasPqAcctReg(accountId)) {
         logger(INFO, BRIGHT_WHITE) << "PQ account already registered, rejecting tx "
                                    << transactionHash;
         return false;
       }
-      m_db.putPqAcctReg(viewPubHash, block.height, transactionIndex.transaction);
+      m_db.putPqAcctReg(accountId, block.height, transactionIndex.transaction);
     }
   }
 
@@ -3049,10 +3045,7 @@ void Blockchain::popTransaction(const Transaction& transaction,
   {
     TransactionExtraPqAccountRegistration pqReg;
     if (getPqAccountRegistrationFromExtra(transaction.extra, pqReg)) {
-      CryptoPQ::Hash256 h = CryptoPQ::sha3_256(pqReg.viewPub.data(), pqReg.viewPub.size());
-      Crypto::Hash viewPubHash;
-      std::memcpy(viewPubHash.data, h.data(), 32);
-      m_db.removePqAcctReg(viewPubHash);
+      m_db.removePqAcctReg(getPqAccountIdentityHash(pqReg));
     }
   }
 
@@ -3367,10 +3360,10 @@ bool Blockchain::resolvePqAccountNumber(uint32_t blockHeight, uint32_t txIndex,
   return false;
 }
 
-bool Blockchain::getPqAccountNumber(const Crypto::Hash& viewPubHash,
+bool Blockchain::getPqAccountNumber(const Crypto::Hash& accountId,
                                     uint32_t& blockHeight, uint32_t& txIndex) {
   std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
-  return m_db.getPqAcctReg(viewPubHash, blockHeight, txIndex);
+  return m_db.getPqAcctReg(accountId, blockHeight, txIndex);
 }
 
 void Blockchain::invalidateAccountRegistrationsCountCache() {

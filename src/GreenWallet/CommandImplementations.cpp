@@ -1447,12 +1447,13 @@ void pqAccount(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node)
     Crypto::SecretKey spendSecret = wallet.getAddressSpendKey(0).secretKey;
     CryptoNote::PqWalletKeys pq = CryptoNote::derivePqWalletKeys(spendSecret);
     std::string viewHex = Common::toHex(pq.viewPub.data(), pq.viewPub.size());
+    std::string spendHex = Common::toHex(pq.spendPub.data(), pq.spendPub.size());
 
     bool registered = false;
     uint32_t blockHeight = 0, txIndex = 0;
     std::promise<std::error_code> promise;
     auto future = promise.get_future();
-    node.getPqAccount(viewHex, registered, blockHeight, txIndex,
+    node.getPqAccount(viewHex, spendHex, registered, blockHeight, txIndex,
                       [&promise](std::error_code ec) { promise.set_value(ec); });
     std::error_code ec = future.get();
     if (ec)

@@ -137,12 +137,12 @@ public:
   // SHA3-256(viewPub) (32B — the full 1184B viewPub stays in the registration
   // tx, read on demand). Value: BE32(height) || BE32(txIndex). The (height,
   // txIndex) pair renders to the human account number (H-I-C).
-  bool putPqAcctReg(const Crypto::Hash& viewPubHash, uint32_t blockHeight,
+  bool putPqAcctReg(const Crypto::Hash& accountId, uint32_t blockHeight,
                     uint32_t txIndex);
-  bool hasPqAcctReg(const Crypto::Hash& viewPubHash) const;
-  bool getPqAcctReg(const Crypto::Hash& viewPubHash, uint32_t& height,
+  bool hasPqAcctReg(const Crypto::Hash& accountId) const;
+  bool getPqAcctReg(const Crypto::Hash& accountId, uint32_t& height,
                     uint32_t& txIndex) const;
-  bool removePqAcctReg(const Crypto::Hash& viewPubHash);
+  bool removePqAcctReg(const Crypto::Hash& accountId);
 
   // ── tx_indices ────────────────────────────────────────────────────────────
   bool putTxIndex(const Crypto::Hash& txHash, uint32_t block, uint16_t txSlot);

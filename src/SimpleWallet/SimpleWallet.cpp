@@ -2761,12 +2761,13 @@ bool simple_wallet::pq_account(const std::vector<std::string> &args) {
   }
   CryptoNote::PqWalletKeys pq = CryptoNote::derivePqWalletKeys(keys.spendSecretKey);
   std::string viewHex = Common::toHex(pq.viewPub.data(), pq.viewPub.size());
+  std::string spendHex = Common::toHex(pq.spendPub.data(), pq.spendPub.size());
 
   bool registered = false;
   uint32_t blockHeight = 0, txIndex = 0;
   std::promise<std::error_code> promise;
   auto future = promise.get_future();
-  m_node->getPqAccount(viewHex, registered, blockHeight, txIndex,
+  m_node->getPqAccount(viewHex, spendHex, registered, blockHeight, txIndex,
                        [&promise](std::error_code ec) { promise.set_value(ec); });
   std::error_code ec = future.get();
   if (ec) {

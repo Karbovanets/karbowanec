@@ -39,7 +39,6 @@
 #include "Common/Math.h"
 #include "Common/FormatTools.h"
 #include "Common/StringTools.h"
-#include "crypto_pq/PqHash.h"
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "CryptoNoteCore/TransactionUtils.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
@@ -2831,16 +2830,18 @@ bool RpcServer::on_get_account_number(const COMMAND_RPC_GET_ACCOUNT_NUMBER::requ
 bool RpcServer::on_get_pq_account(const COMMAND_RPC_GET_PQ_ACCOUNT::request& req,
                                   COMMAND_RPC_GET_PQ_ACCOUNT::response& res) {
   std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE> viewPub;
+  std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE> spendPub;
   size_t sz = 0;
   if (!Common::fromHex(req.view_pub, viewPub.data(), viewPub.size(), sz) || sz != viewPub.size()) {
     throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_WRONG_PARAM, "Invalid view_pub hex" };
   }
-  CryptoPQ::Hash256 h = CryptoPQ::sha3_256(viewPub.data(), viewPub.size());
-  Crypto::Hash viewPubHash;
-  std::memcpy(viewPubHash.data, h.data(), 32);
+  sz = 0;
+  if (!Common::fromHex(req.spend_pub, spendPub.data(), spendPub.size(), sz) || sz != spendPub.size()) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_WRONG_PARAM, "Invalid spend_pub hex" };
+  }
 
   uint32_t blockHeight = 0, txIndex = 0;
-  res.registered = m_core.getPqAccountNumber(viewPubHash, blockHeight, txIndex);
+  res.registered = m_core.getPqAccountNumber(getPqAccountIdentityHash(viewPub, spendPub), blockHeight, txIndex);
   res.block_height = res.registered ? blockHeight : 0;
   res.tx_index = res.registered ? txIndex : 0;
   res.status = CORE_RPC_STATUS_OK;

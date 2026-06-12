@@ -159,11 +159,11 @@ namespace CryptoNote {
 
     // PQ account registry. resolve: (height, txIndex) -> the registered view +
     // spend public keys (read from the registration tx's extra). lookup: a PQ
-    // identity's view-pubkey hash -> its registration coordinates.
+    // identity hash (viewPub+spendPub) -> its registration coordinates.
     bool resolvePqAccountNumber(uint32_t blockHeight, uint32_t txIndex,
                                 std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>& viewPub,
                                 std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE>& spendPub);
-    bool getPqAccountNumber(const Crypto::Hash& viewPubHash,
+    bool getPqAccountNumber(const Crypto::Hash& accountId,
                             uint32_t& blockHeight, uint32_t& txIndex);
 
     template<class visitor_t>

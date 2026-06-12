@@ -133,6 +133,10 @@ bool addPqAccountRegistrationToExtra(std::vector<uint8_t>& tx_extra,
                                      const std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>& viewPub,
                                      const std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE>& spendPub);
 bool getPqAccountRegistrationFromExtra(const std::vector<uint8_t>& tx_extra, TransactionExtraPqAccountRegistration& reg);
+Crypto::Hash getPqAccountIdentityHash(const TransactionExtraPqAccountRegistration& reg);
+Crypto::Hash getPqAccountIdentityHash(
+    const std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>& viewPub,
+    const std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE>& spendPub);
 
 // PQ anti-spam PoW tag (tag 0x06). appendPowTagToExtra MUST be the final write
 // into tx_extra; the layout guarantees the nonce occupies the last 8 bytes.

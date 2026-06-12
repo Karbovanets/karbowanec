@@ -677,10 +677,10 @@ bool LMDBBlockchainDB::removeSpentKey(const Crypto::KeyImage& ki) {
 
 // ─── pq_acct_reg ────────────────────────────────────────────────────────────
 
-bool LMDBBlockchainDB::putPqAcctReg(const Crypto::Hash& viewPubHash,
+bool LMDBBlockchainDB::putPqAcctReg(const Crypto::Hash& accountId,
                                     uint32_t blockHeight, uint32_t txIndex) {
   assert(m_writeTxn);
-  MDB_val k = {sizeof(viewPubHash), const_cast<Crypto::Hash*>(&viewPubHash)};
+  MDB_val k = {sizeof(accountId), const_cast<Crypto::Hash*>(&accountId)};
   uint8_t valBuf[8];
   encBE32(valBuf, blockHeight);
   encBE32(valBuf + 4, txIndex);
@@ -690,19 +690,19 @@ bool LMDBBlockchainDB::putPqAcctReg(const Crypto::Hash& viewPubHash,
   return true;
 }
 
-bool LMDBBlockchainDB::hasPqAcctReg(const Crypto::Hash& viewPubHash) const {
+bool LMDBBlockchainDB::hasPqAcctReg(const Crypto::Hash& accountId) const {
   auto guard = readTxn();
-  MDB_val k = {sizeof(viewPubHash), const_cast<Crypto::Hash*>(&viewPubHash)}, v{};
+  MDB_val k = {sizeof(accountId), const_cast<Crypto::Hash*>(&accountId)}, v{};
   int rc = mdb_get(guard.txn, m_dbiPqAcctReg, &k, &v);
   if (rc == MDB_NOTFOUND) return false;
   checkRc(rc, "hasPqAcctReg");
   return true;
 }
 
-bool LMDBBlockchainDB::getPqAcctReg(const Crypto::Hash& viewPubHash,
+bool LMDBBlockchainDB::getPqAcctReg(const Crypto::Hash& accountId,
                                     uint32_t& height, uint32_t& txIndex) const {
   auto guard = readTxn();
-  MDB_val k = {sizeof(viewPubHash), const_cast<Crypto::Hash*>(&viewPubHash)}, v{};
+  MDB_val k = {sizeof(accountId), const_cast<Crypto::Hash*>(&accountId)}, v{};
   int rc = mdb_get(guard.txn, m_dbiPqAcctReg, &k, &v);
   if (rc == MDB_NOTFOUND) return false;
   checkRc(rc, "getPqAcctReg");
@@ -713,9 +713,9 @@ bool LMDBBlockchainDB::getPqAcctReg(const Crypto::Hash& viewPubHash,
   return true;
 }
 
-bool LMDBBlockchainDB::removePqAcctReg(const Crypto::Hash& viewPubHash) {
+bool LMDBBlockchainDB::removePqAcctReg(const Crypto::Hash& accountId) {
   assert(m_writeTxn);
-  MDB_val k = {sizeof(viewPubHash), const_cast<Crypto::Hash*>(&viewPubHash)};
+  MDB_val k = {sizeof(accountId), const_cast<Crypto::Hash*>(&accountId)};
   int rc = mdb_del(m_writeTxn, m_dbiPqAcctReg, &k, nullptr);
   if (rc == MDB_NOTFOUND) return false;
   checkRc(rc, "removePqAcctReg");

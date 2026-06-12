@@ -1439,9 +1439,9 @@ bool Core::resolvePqAccountNumber(uint32_t blockHeight, uint32_t txIndex,
   return m_blockchain.resolvePqAccountNumber(blockHeight, txIndex, viewPub, spendPub);
 }
 
-bool Core::getPqAccountNumber(const Crypto::Hash& viewPubHash,
+bool Core::getPqAccountNumber(const Crypto::Hash& accountId,
                               uint32_t& blockHeight, uint32_t& txIndex) {
-  return m_blockchain.getPqAccountNumber(viewPubHash, blockHeight, txIndex);
+  return m_blockchain.getPqAccountNumber(accountId, blockHeight, txIndex);
 }
 
 bool Core::getCanonicalAccountRegistrationsCount(uint64_t& count) {
