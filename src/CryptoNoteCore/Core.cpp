@@ -317,6 +317,13 @@ bool Core::check_tx_mixin(const Transaction& tx, const Crypto::Hash& txHash, uin
 }
 
 bool Core::check_tx_fee(const Transaction& tx, const Crypto::Hash& txHash, size_t blobSize, tx_verification_context& tvc, uint32_t height) {
+  const uint8_t blockMajorVersion = m_blockchain.getBlockMajorVersionForHeight(height);
+  const bool isPqTx = tx.version >= TRANSACTION_VERSION_PQ;
+  const bool isFreeRegTransaction = isPqTx && tx.txType == TX_FREE_REG;
+  if (isPqTx && tx.txType == TX_PQ) {
+    return true;
+  }
+
   uint64_t inputs_amount = 0;
   if (!get_inputs_money_amount(tx, inputs_amount)) {
     tvc.m_verification_failed = true;
@@ -333,7 +340,11 @@ bool Core::check_tx_fee(const Transaction& tx, const Crypto::Hash& txHash, size_
   }
 
   const uint64_t fee = inputs_amount - outputs_amount;
-  bool isFusionTransaction = fee == 0 && m_currency.isFusionTransaction(tx, blobSize, height);
+  if (isFreeRegTransaction && fee == 0 && blockMajorVersion >= BLOCK_MAJOR_VERSION_6) {
+    return true;
+  }
+
+  bool isFusionTransaction = fee == 0 && blockMajorVersion < BLOCK_MAJOR_VERSION_6 && m_currency.isFusionTransaction(tx, blobSize, height);
   if (!isFusionTransaction && !m_checkpoints.is_in_checkpoint_zone(height)) {
     bool enough = true;
 

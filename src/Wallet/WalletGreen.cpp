@@ -3475,11 +3475,20 @@ uint32_t WalletGreen::pqSyncedHeight() const {
 
 Transaction WalletGreen::createBridgeTransaction(const CryptoPQ::KemPublicKey& destViewPub,
                                                  const CryptoPQ::DsaPublicKey& destSpendPub,
-                                                 uint64_t amount, uint64_t feePerByte,
+                                                 uint64_t amount, uint64_t minimumFee,
                                                  uint64_t mixin, uint64_t& feeOut) {
   throwIfNotInitialized();
   throwIfStopped();
   throwIfTrackingMode();
+
+  uint64_t bridgeFee = minimumFee != 0 ? minimumFee : m_node.getMinimalFee();
+  if (bridgeFee == 0) {
+    bridgeFee = m_currency.minimumFee();
+  }
+  if (amount > std::numeric_limits<uint64_t>::max() - bridgeFee) {
+    throw std::runtime_error("bridge amount plus fee overflows");
+  }
+  const uint64_t targetWithFee = amount + bridgeFee;
 
   // Collect unlocked legacy key outputs across all addresses, each paired with
   // the owning address's keys; select largest-first to cover amount + fee.
@@ -3519,9 +3528,9 @@ Transaction WalletGreen::createBridgeTransaction(const CryptoPQ::KemPublicKey& d
     if (chosen.size() >= kMaxBridgeInputs) break;
     chosen.push_back(c);
     sumIn += c.out.amount;
-    if (sumIn >= amount) break;
+    if (sumIn >= targetWithFee) break;
   }
-  if (sumIn < amount) {
+  if (sumIn < targetWithFee) {
     throw std::runtime_error("insufficient unlocked legacy balance to bridge");
   }
 
@@ -3584,8 +3593,10 @@ Transaction WalletGreen::createBridgeTransaction(const CryptoPQ::KemPublicKey& d
   };
 
   Transaction draft = buildWith(sumIn - amount);
-  uint64_t size = toBinaryArray(draft).size();
-  uint64_t fee = size * (feePerByte == 0 ? 1 : feePerByte) + 1000;
+  uint64_t fee = bridgeFee + m_currency.getFeePerByte(draft.extra.size(), bridgeFee);
+  if (fee < bridgeFee || amount > std::numeric_limits<uint64_t>::max() - fee) {
+    throw std::runtime_error("bridge amount plus fee overflows");
+  }
   if (sumIn < amount + fee) {
     throw std::runtime_error("insufficient unlocked legacy balance to cover the bridge fee");
   }

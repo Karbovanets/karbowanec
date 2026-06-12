@@ -51,6 +51,7 @@
 #include "AccountNumber.h"
 #include "CryptoNoteCore/CryptoNoteBasicImpl.h"
 #include "CryptoNoteProtocol/ICryptoNoteProtocolQuery.h"
+#include "PqTxType.h"
 #include "P2p/ConnectionContext.h"
 #include "P2p/NetNode.h"
 
@@ -768,13 +769,24 @@ bool RpcServer::checkIncomingTransactionForFee(const BinaryArray& tx_blob) {
     return false;
   }
 
-  // always relay fusion transactions
+  const uint32_t currentHeight = m_core.getCurrentBlockchainHeight();
+  const uint8_t blockMajorVersion = m_core.getBlockMajorVersionForHeight(currentHeight);
+  if (tx.version >= TRANSACTION_VERSION_PQ &&
+      tx.txType == TX_FREE_REG &&
+      blockMajorVersion >= BLOCK_MAJOR_VERSION_6) {
+    logger(Logging::DEBUGGING) << "Masternode received free PQ account registration transaction, relaying with no fee check";
+    return true;
+  }
+
+  // always relay pre-v6 fusion transactions
   uint64_t inputs_amount = 0;
   get_inputs_money_amount(tx, inputs_amount);
   uint64_t outputs_amount = get_outs_money_amount(tx);
 
   const uint64_t fee = inputs_amount - outputs_amount;
-  if (fee == 0 && m_core.currency().isFusionTransaction(tx, tx_blob.size(), m_core.getCurrentBlockchainHeight() - 1)) {
+  if (fee == 0 &&
+      blockMajorVersion < BLOCK_MAJOR_VERSION_6 &&
+      m_core.currency().isFusionTransaction(tx, tx_blob.size(), currentHeight)) {
     logger(Logging::DEBUGGING) << "Masternode received fusion transaction, relaying with no fee check";
     return true;
   }

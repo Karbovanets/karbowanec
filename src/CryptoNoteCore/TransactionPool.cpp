@@ -147,6 +147,7 @@ Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
     // checkPqInputs below. (TX_BRIDGE has classical inputs, so it uses the
     // normal accounting.)
     const bool pqOnlyInputs = tx.version >= TRANSACTION_VERSION_PQ && tx.txType == TX_PQ;
+    const bool freeRegTransaction = tx.version >= TRANSACTION_VERSION_PQ && tx.txType == TX_FREE_REG;
     uint64_t fee = 0;
     bool isFusionTransaction = false;
     if (!pqOnlyInputs) {
@@ -166,7 +167,11 @@ Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
       }
 
       fee = inputs_amount - outputs_amount;
-      isFusionTransaction = fee == 0 && m_currency.isFusionTransaction(tx, blobSize, m_core.getCurrentBlockchainHeight());
+      const uint32_t currentHeight = m_core.getCurrentBlockchainHeight();
+      isFusionTransaction =
+        fee == 0 &&
+        m_core.getBlockMajorVersionForHeight(currentHeight) < BLOCK_MAJOR_VERSION_6 &&
+        m_currency.isFusionTransaction(tx, blobSize, currentHeight);
     }
     // TODO(pq): for TX_PQ, resolve referenced output amounts to set an accurate
     // per-byte fee for mempool prioritization (currently sorts as zero-fee).
@@ -240,7 +245,7 @@ Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
     }
 
     tvc.m_added_to_pool = true;
-    tvc.m_should_be_relayed = inputsValid && (fee > 0 || isFusionTransaction);
+    tvc.m_should_be_relayed = inputsValid && (fee > 0 || isFusionTransaction || (freeRegTransaction && fee == 0));
     tvc.m_verification_failed = true;
 
     if (!addTransactionInputs(id, tx, keptByBlock))

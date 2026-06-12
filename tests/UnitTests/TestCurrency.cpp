@@ -20,6 +20,7 @@
 #include "crypto/crypto.h"
 #include "CryptoNoteCore/Currency.h"
 #include "CryptoNoteCore/TransactionApi.h"
+#include "PqTxType.h"
 #include "Logging/ConsoleLogger.h"
 
 #include "TransactionApiHelpers.h"
@@ -53,6 +54,28 @@ protected:
 TEST_F(Currency_isFusionTransactionTest, succeedsOnFusionTransaction) {
   auto tx = FusionTransactionBuilder(m_currency, TEST_AMOUNT).buildTx();
   ASSERT_TRUE(m_currency.isFusionTransaction(tx));
+}
+
+TEST_F(Currency_isFusionTransactionTest, failsForPqTransaction) {
+  Transaction tx;
+  tx.version = TRANSACTION_VERSION_PQ;
+  tx.txType = TX_FREE_REG;
+
+  ASSERT_FALSE(m_currency.isFusionTransaction(tx));
+}
+
+TEST_F(Currency_isFusionTransactionTest, failsAfterV6Activation) {
+  Currency currency = CurrencyBuilder(m_logger).
+    defaultDustThreshold(TEST_DUST_THRESHOLD).
+    fusionTxMaxSize(TEST_FUSION_TX_MAX_SIZE).
+    fusionTxMinInputCount(TEST_FUSION_TX_MIN_INPUT_COUNT).
+    fusionTxMinInOutCountRatio(TEST_FUSION_TX_MIN_IN_OUT_COUNT_RATIO).
+    upgradeHeightV6(6).
+    currency();
+
+  auto tx = FusionTransactionBuilder(currency, TEST_AMOUNT).buildTx();
+  ASSERT_TRUE(currency.isFusionTransaction(tx, getObjectBinarySize(tx), 6));
+  ASSERT_FALSE(currency.isFusionTransaction(tx, getObjectBinarySize(tx), 7));
 }
 
 TEST_F(Currency_isFusionTransactionTest, succeedsIfFusionTransactionSizeEqMaxSize) {

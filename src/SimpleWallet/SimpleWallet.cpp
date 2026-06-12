@@ -2852,7 +2852,7 @@ bool simple_wallet::bridge_legacy(const std::vector<std::string> &args) {
   try {
     uint64_t fee = 0;
     CryptoNote::Transaction tx = wl->createBridgeTransaction(
-        destView, destSpend, amount, CryptoNote::parameters::MIN_PQ_FEE_PER_BYTE,
+        destView, destSpend, amount, m_node->getMinimalFee(),
         m_currency.minMixin(), fee);
 
     success_msg_writer() << "Built bridge transaction (fee " << m_currency.formatAmount(fee) << "). Relaying...";

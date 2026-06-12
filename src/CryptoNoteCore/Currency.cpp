@@ -296,6 +296,10 @@ namespace CryptoNote {
   }
 
   bool Currency::isFusionTransaction(const std::vector<uint64_t>& inputsAmounts, const std::vector<uint64_t>& outputsAmounts, size_t size, uint32_t height) const {
+    if (height > upgradeHeight(BLOCK_MAJOR_VERSION_6)) {
+      return false;
+    }
+
     if (height <= CryptoNote::parameters::UPGRADE_HEIGHT_V3 ? size > CryptoNote::parameters::CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE_CURRENT * 30 / 100 : size > fusionTxMaxSize()) {
       logger(ERROR) << "Fusion transaction verification failed: size exceeded max allowed size.";
       return false;
@@ -337,6 +341,10 @@ namespace CryptoNote {
 
   bool Currency::isFusionTransaction(const Transaction& transaction, size_t size, uint32_t height) const {
     assert(getObjectBinarySize(transaction) == size);
+
+    if (transaction.version >= TRANSACTION_VERSION_PQ) {
+      return false;
+    }
 
     std::vector<uint64_t> outputsAmounts;
     outputsAmounts.reserve(transaction.outputs.size());

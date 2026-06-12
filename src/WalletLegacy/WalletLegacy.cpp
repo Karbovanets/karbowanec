@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <future>
+#include <limits>
 #include <numeric>
 #include <crypto/random.h>
 #include <set>
@@ -670,7 +671,7 @@ uint32_t WalletLegacy::pqSyncedHeight() const {
 
 Transaction WalletLegacy::createBridgeTransaction(const CryptoPQ::KemPublicKey& destViewPub,
                                                   const CryptoPQ::DsaPublicKey& destSpendPub,
-                                                  uint64_t amount, uint64_t feePerByte,
+                                                  uint64_t amount, uint64_t minimumFee,
                                                   uint64_t mixin, uint64_t& feeOut) {
   std::unique_lock<std::mutex> lock(m_cacheMutex);
   throwIfNotInitialised();
@@ -679,6 +680,15 @@ Transaction WalletLegacy::createBridgeTransaction(const CryptoPQ::KemPublicKey& 
   if (accKeys.spendSecretKey == NULL_SECRET_KEY) {
     throw std::runtime_error("tracking wallet cannot bridge");
   }
+
+  uint64_t bridgeFee = minimumFee != 0 ? minimumFee : m_node.getMinimalFee();
+  if (bridgeFee == 0) {
+    bridgeFee = m_currency.minimumFee();
+  }
+  if (amount > std::numeric_limits<uint64_t>::max() - bridgeFee) {
+    throw std::runtime_error("bridge amount plus fee overflows");
+  }
+  const uint64_t targetWithFee = amount + bridgeFee;
 
   // Collect unlocked, spendable legacy key outputs, largest first.
   std::vector<TransactionOutputInformation> outs;
@@ -695,9 +705,9 @@ Transaction WalletLegacy::createBridgeTransaction(const CryptoPQ::KemPublicKey& 
     if (chosen.size() >= 50) break;  // bound tx size
     chosen.push_back(o);
     sumIn += o.amount;
-    if (sumIn >= amount) break;
+    if (sumIn >= targetWithFee) break;
   }
-  if (sumIn < amount) {
+  if (sumIn < targetWithFee) {
     throw std::runtime_error("insufficient unlocked legacy balance to bridge");
   }
 
@@ -765,8 +775,10 @@ Transaction WalletLegacy::createBridgeTransaction(const CryptoPQ::KemPublicKey& 
   };
 
   Transaction draft = buildWith(sumIn - amount);
-  uint64_t size = toBinaryArray(draft).size();
-  uint64_t fee = size * (feePerByte == 0 ? 1 : feePerByte) + 1000;  // margin over the floor
+  uint64_t fee = bridgeFee + m_currency.getFeePerByte(draft.extra.size(), bridgeFee);
+  if (fee < bridgeFee || amount > std::numeric_limits<uint64_t>::max() - fee) {
+    throw std::runtime_error("bridge amount plus fee overflows");
+  }
   if (sumIn < amount + fee) {
     throw std::runtime_error("insufficient unlocked legacy balance to cover the bridge fee");
   }

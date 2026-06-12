@@ -1354,7 +1354,7 @@ void bridgeLegacy(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &nod
         uint64_t fee = 0;
         CryptoNote::Transaction tx = wallet.createBridgeTransaction(
             destView, destSpend, amount,
-            CryptoNote::parameters::MIN_PQ_FEE_PER_BYTE, WalletConfig::defaultMixin, fee);
+            node.getMinimalFee(), WalletConfig::defaultMixin, fee);
 
         std::cout << InformationMsg("Built bridge transaction (fee " + formatAmount(fee)
                                     + "). Relaying...")
