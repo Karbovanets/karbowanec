@@ -104,6 +104,7 @@ public:
   virtual std::vector<Crypto::Hash> getTransactionHashesByPaymentId(const Crypto::Hash& paymentId) override;
   virtual uint64_t getMinimalFee(uint32_t height) override;
   virtual uint64_t getMinimalFee() override;
+  virtual bool getPqTransactionFee(const CryptoNote::Transaction& tx, uint64_t& fee) override;
   virtual uint64_t getNextBlockDifficulty() override;
   virtual uint64_t getTotalGeneratedAmount() override;
   virtual bool check_tx_fee(const CryptoNote::Transaction& tx, const Crypto::Hash& txHash, size_t blobSize, CryptoNote::tx_verification_context& tvc, uint32_t height) override;

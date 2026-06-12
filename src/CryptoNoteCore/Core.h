@@ -180,6 +180,7 @@ namespace CryptoNote {
 
      uint64_t getNextBlockDifficulty() override;
      uint64_t getTotalGeneratedAmount() override;
+     bool getPqTransactionFee(const Transaction& tx, uint64_t& fee) override;
      uint8_t getBlockMajorVersionForHeight(uint32_t height) const;
      virtual bool getMixin(const Transaction& transaction, uint64_t& mixin) override;
 

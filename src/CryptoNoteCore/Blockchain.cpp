@@ -2238,6 +2238,17 @@ uint64_t Blockchain::pqReferencedInputAmount(const Transaction& tx) {
   return sum;
 }
 
+bool Blockchain::getPqTransactionFee(const Transaction& tx, uint64_t& fee) {
+  std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+  const uint64_t inAmount = pqReferencedInputAmount(tx);
+  const uint64_t outAmount = getOutputAmount(tx);
+  if (outAmount > inAmount) {
+    return false;
+  }
+  fee = inAmount - outAmount;
+  return true;
+}
+
 bool Blockchain::checkFreeRegInputs(const Transaction& tx, uint32_t* pmax_used_block_height) {
   std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
   if (pmax_used_block_height) *pmax_used_block_height = 0;
@@ -2668,8 +2679,27 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
       // getInputAmount would read 0 and the fee would underflow. Resolve the
       // referenced amounts instead. (TX_BRIDGE has classical inputs -> normal.)
       const bool pqOnlyInputs = curTx.version >= TRANSACTION_VERSION_PQ && curTx.txType == TX_PQ;
-      uint64_t inAmount = pqOnlyInputs ? pqReferencedInputAmount(curTx) : getInputAmount(curTx);
-      uint64_t fee = inAmount - getOutputAmount(curTx);
+      uint64_t fee = 0;
+      if (pqOnlyInputs) {
+        if (!getPqTransactionFee(curTx, fee)) {
+          logger(INFO, BRIGHT_WHITE) << "Block " << blockHash
+            << " has TX_PQ with invalid value balance: " << tx_id;
+          bvc.m_verification_failed = true;
+          abortCurrentBlockTxn();
+          return false;
+        }
+      } else {
+        uint64_t inAmount = getInputAmount(curTx);
+        uint64_t outAmount = getOutputAmount(curTx);
+        if (outAmount > inAmount) {
+          logger(INFO, BRIGHT_WHITE) << "Block " << blockHash
+            << " has transaction spending more than its inputs: " << tx_id;
+          bvc.m_verification_failed = true;
+          abortCurrentBlockTxn();
+          return false;
+        }
+        fee = inAmount - outAmount;
+      }
 
       // Under a confirmed checkpoint the block hash has already been verified by
       // the network. Skip the expensive per-input validation (key-image domain

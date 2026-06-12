@@ -363,6 +363,19 @@ bool runFunded() {
                                    core.getCurrentBlockchainHeight());
     ok &= expect(tvc.m_added_to_pool && !tvc.m_verification_failed,
                  "funded: TX_PQ spending the bridged output accepted by consensus");
+    ok &= expect(tvc.m_should_be_relayed, "funded: TX_PQ marked for relay");
+
+    bool foundSpendInPool = false;
+    uint64_t storedPqFee = 0;
+    for (const auto& txd : core.getMemoryPool()) {
+      if (std::memcmp(txd.id.data, spendHash.data, sizeof(spendHash.data)) == 0) {
+        foundSpendInPool = true;
+        storedPqFee = txd.fee;
+        break;
+      }
+    }
+    ok &= expect(foundSpendInPool && storedPqFee == pqFee,
+                 "funded: TX_PQ stored in mempool with actual fee");
 
     // Double-spend: a second TX_PQ over the same output (same nullifier) rejected.
     PqWalletKeys recip3 = pqKeysFromPattern(4, 4);

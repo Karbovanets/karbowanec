@@ -549,6 +549,11 @@ uint64_t ICoreStub::getMinimalFee() {
   return 10000000000ULL;
 }
 
+bool ICoreStub::getPqTransactionFee(const CryptoNote::Transaction& tx, uint64_t& fee) {
+  fee = 0;
+  return true;
+}
+
 uint64_t ICoreStub::getNextBlockDifficulty() {
   return 0;
 }

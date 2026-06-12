@@ -1287,6 +1287,10 @@ uint64_t Core::getTotalGeneratedAmount() {
   return m_blockchain.getCoinsInCirculation();
 }
 
+bool Core::getPqTransactionFee(const Transaction& tx, uint64_t& fee) {
+  return m_blockchain.getPqTransactionFee(tx, fee);
+}
+
 uint8_t Core::getBlockMajorVersionForHeight(uint32_t height) const {
   return m_blockchain.getBlockMajorVersionForHeight(height);
 }

@@ -173,9 +173,6 @@ Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
         m_core.getBlockMajorVersionForHeight(currentHeight) < BLOCK_MAJOR_VERSION_6 &&
         m_currency.isFusionTransaction(tx, blobSize, currentHeight);
     }
-    // TODO(pq): for TX_PQ, resolve referenced output amounts to set an accurate
-    // per-byte fee for mempool prioritization (currently sorts as zero-fee).
-
     //check key images for transaction if it is not kept by block
     if (!keptByBlock) {
       std::lock_guard<std::recursive_mutex> lock(m_transactions_lock);
@@ -200,6 +197,14 @@ Crypto::KeyImage pqInputNullifierAsKeyImage(const PqInput& in) {
 
       maxUsedBlock.clear();
       tvc.m_verifivation_impossible = true;
+    }
+
+    if (inputsValid && pqOnlyInputs) {
+      if (!m_core.getPqTransactionFee(tx, fee)) {
+        logger(INFO) << "TX_PQ fee accounting failed, rejected";
+        tvc.m_verification_failed = true;
+        return false;
+      }
     }
 
     if (!keptByBlock) {

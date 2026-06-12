@@ -105,6 +105,7 @@ namespace CryptoNote {
     uint64_t getBlockTimestamp(uint32_t height);
     uint64_t getCoinsInCirculation();
     uint64_t getCoinsInCirculation(uint32_t height);
+    bool getPqTransactionFee(const Transaction& tx, uint64_t& fee);
     uint8_t getBlockMajorVersionForHeight(uint32_t height) const;
     bool addNewBlock(const Block& bl, block_verification_context& bvc);
     bool resetAndSetGenesisBlock(const Block& b);
