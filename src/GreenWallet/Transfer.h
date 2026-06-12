@@ -10,7 +10,7 @@
 
 #include <GreenWallet/Types.h>
 #include <GreenWallet/WalletConfig.h>
-#include <CryptoNoteCore/AccountNumber.h>
+#include <AccountNumber.h>
 #include <INode.h>
 
 enum BalanceInfo { NotEnoughBalance, EnoughBalance, SetMixinToZero };

@@ -70,7 +70,7 @@
 #include "Common/Util.h"
 #include "Common/ColouredMsg.h"
 #include "CryptoNoteCore/Account.h"
-#include "CryptoNoteCore/AccountNumber.h"
+#include "AccountNumber.h"
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
