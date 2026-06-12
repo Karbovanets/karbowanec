@@ -26,7 +26,9 @@
 #include "CryptoNoteCore/CryptoNoteBasicImpl.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "CryptoNoteCore/TransactionExtra.h"
+#include "CryptoNoteCore/PqValidation.h"
 #include "CryptoNoteConfig.h"
+#include "PqTxType.h"
 
 namespace CryptoNote {
 
@@ -222,6 +224,7 @@ bool BlockchainExplorerDataBuilder::fillTransactionDetails(const Transaction& tr
   Crypto::Hash hash = getObjectHash(transaction);
   transactionDetails.hash = hash;
   transactionDetails.version = transaction.version;
+  transactionDetails.txType = transaction.txType;
   transactionDetails.timestamp = timestamp;
 
   Crypto::Hash blockHash;
@@ -246,17 +249,32 @@ bool BlockchainExplorerDataBuilder::fillTransactionDetails(const Transaction& tr
   transactionDetails.unlockTime = transaction.unlockTime;
   transactionDetails.totalOutputsAmount = get_outs_money_amount(transaction);
 
-  uint64_t inputsAmount;
-  if (!get_inputs_money_amount(transaction, inputsAmount)) {
-    return false;
+  const bool pqOnlyInputs = transaction.version >= TRANSACTION_VERSION_PQ && transaction.txType == TX_PQ;
+  const bool freeRegTransaction = transaction.version >= TRANSACTION_VERSION_PQ && transaction.txType == TX_FREE_REG;
+  if (pqOnlyInputs) {
+    uint64_t fee = 0;
+    if (!m_core.getPqTransactionFee(transaction, fee)) {
+      return false;
+    }
+    transactionDetails.fee = fee;
+    transactionDetails.totalInputsAmount = transactionDetails.totalOutputsAmount + fee;
+    transactionDetails.mixin = 0;
+  } else {
+    uint64_t inputsAmount;
+    if (!get_inputs_money_amount(transaction, inputsAmount)) {
+      return false;
+    }
+    transactionDetails.totalInputsAmount = inputsAmount;
   }
-  transactionDetails.totalInputsAmount = inputsAmount;
 
   if (transaction.inputs.size() > 0 && transaction.inputs.front().type() == typeid(BaseInput)) {
     //It's gen transaction
     transactionDetails.fee = 0;
     transactionDetails.mixin = 0;
-  } else {
+  } else if (freeRegTransaction) {
+    transactionDetails.fee = 0;
+    transactionDetails.mixin = 0;
+  } else if (!pqOnlyInputs) {
     uint64_t fee;
     if (!get_tx_fee(transaction, fee)) {
       return false;
@@ -314,6 +332,20 @@ bool BlockchainExplorerDataBuilder::fillTransactionDetails(const Transaction& tr
         txInToKeyDetails.outputs.push_back(d);
       }
       txInDetails = txInToKeyDetails;
+    } else if (txIn.type() == typeid(PqInput)) {
+      PqInputDetails txInPqDetails;
+      const PqInput& txInPq = boost::get<PqInput>(txIn);
+      txInPqDetails.input = txInPq;
+      txInPqDetails.nullifier = pqNullifier(txInPq);
+      txInPqDetails.output.transactionHash = txInPq.prevTxid;
+      txInPqDetails.output.number = txInPq.prevOutIndex;
+
+      Transaction referencedTx;
+      if (m_core.getTransaction(txInPq.prevTxid, referencedTx, true) &&
+          txInPq.prevOutIndex < referencedTx.outputs.size()) {
+        txInPqDetails.amount = referencedTx.outputs[txInPq.prevOutIndex].amount;
+      }
+      txInDetails = txInPqDetails;
     } else {
       return false;
     }

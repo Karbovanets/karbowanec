@@ -288,10 +288,11 @@ bool lookup_acc_outs(const AccountKeys& acc, const Transaction& tx, const Public
   size_t outputIndex = 0;
 
   KeyDerivation derivation;
-  generate_key_derivation(tx_pub_key, acc.viewSecretKey, derivation);
+  if (!generate_key_derivation(tx_pub_key, acc.viewSecretKey, derivation)) {
+    return true;
+  }
 
   for (const TransactionOutput& o : tx.outputs) {
-    assert(o.target.type() == typeid(KeyOutput));
     if (o.target.type() == typeid(KeyOutput)) {
       if (is_out_to_acc(acc, boost::get<KeyOutput>(o.target), derivation, keyIndex)) {
         outs.push_back(outputIndex);

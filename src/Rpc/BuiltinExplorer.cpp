@@ -21,6 +21,7 @@
 #include "version.h"
 
 #include <ctime>
+#include <array>
 #include <list>
 #include <string>
 #include <vector>
@@ -548,6 +549,11 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
     body += "  <li>\n";
     body += "    Version: " + std::to_string(transactionsDetails.version) + "\n";
     body += "  </li>\n";
+    if (transactionsDetails.version >= TRANSACTION_VERSION_PQ) {
+      body += "  <li>\n";
+      body += "    TX type: " + std::to_string(transactionsDetails.txType) + "\n";
+      body += "  </li>\n";
+    }
     body += "  <li>\n";
     body += "    Mixin count: " + std::to_string(transactionsDetails.mixin) + "\n";
     body += "  </li>\n";
@@ -603,6 +609,37 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
         }
       }
     }
+    // Check for PQ account registration in tx extra
+    {
+      TransactionExtraPqAccountRegistration reg;
+      if (getPqAccountRegistrationFromExtra(txs.back().extra, reg)) {
+        body += "  <li>\n";
+        body += "    PQ account registration\n";
+        body += "  </li>\n";
+        body += "  <li>\n";
+        body += "    PQ view public key: <span class=\"wrap\">" + Common::toHex(reg.viewPub.data(), reg.viewPub.size()) + "</span>\n";
+        body += "  </li>\n";
+        body += "  <li>\n";
+        body += "    PQ spend public key: <span class=\"wrap\">" + Common::toHex(reg.spendPub.data(), reg.spendPub.size()) + "</span>\n";
+        body += "  </li>\n";
+
+        if (transactionsDetails.inBlockchain) {
+          uint32_t bh = transactionsDetails.blockHeight;
+          std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE> viewPub;
+          std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE> spendPub;
+          for (uint32_t i = 0; i < 1000; ++i) {
+            if (m_core.resolvePqAccountNumber(bh, i, viewPub, spendPub) &&
+                viewPub == reg.viewPub && spendPub == reg.spendPub) {
+              AccountNumber an{bh, i};
+              body += "  <li>\n";
+              body += "    PQ account number: " + an.toString() + "\n";
+              body += "  </li>\n";
+              break;
+            }
+          }
+        }
+      }
+    }
     body += "</ul>\n";
 
     body += "<h3>Inputs</h3>\n";
@@ -640,6 +677,18 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
         body.pop_back();
         body += "    </td>\n";
       }
+      else if (in.type() == typeid(PqInputDetails)) {
+        PqInputDetails p = boost::get<PqInputDetails>(in);
+        body += m_core.currency().formatAmount(p.amount);
+        body += "</td>\n    <td class=\"wrap\">";
+        body += Common::podToHex(p.nullifier);
+        body += "</td>\n    <td>";
+        body += "    <a href=\"/explorer/tx/" + Common::podToHex(p.output.transactionHash) + "\">";
+        body += "output No " + std::to_string(p.output.number) + "</a>";
+        body += "<br/>auth_pub bytes: " + std::to_string(p.input.authPub.size());
+        body += "<br/>signature bytes: " + std::to_string(p.input.signature.size());
+        body += "    </td>\n";
+      }
       body += "  </tr>\n";
     }
     body += "</tbody>\n";
@@ -650,7 +699,7 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
     body += "<table class=\"counter\" cellpadding=\"10px\">\n";
     body += "  <thead>\n";
     body += "  <tr>\n";
-    body += "    <th>No</th><th>Amount</th><th>Public key (stealth address)</th><th>Global index</th>\n";
+    body += "    <th>No</th><th>Amount</th><th>Output target</th><th>Global index</th>\n";
     body += "  </tr>\n";
     body += "</thead>\n";
     body += "<tbody>\n";
@@ -664,9 +713,18 @@ bool BuiltinExplorer::on_get_explorer_tx_by_hash(const COMMAND_EXPLORER_GET_TRAN
       if (o.output.target.type() == typeid(KeyOutput)) {
         KeyOutput ko = boost::get<KeyOutput>(o.output.target);
         body += Common::podToHex(ko);
+      } else if (o.output.target.type() == typeid(PqOutput)) {
+        PqOutput po = boost::get<PqOutput>(o.output.target);
+        body += "PQ spend_commit: " + Common::podToHex(po.spendCommit);
+        body += "<br/>kem_ct bytes: " + std::to_string(po.kemCt.size());
+        body += "<br/>enc_payload bytes: " + std::to_string(po.encPayload.size());
       }
       body += "</td>\n    <td>";
-      body += std::to_string(o.globalIndex);
+      if (o.output.target.type() == typeid(KeyOutput)) {
+        body += std::to_string(o.globalIndex);
+      } else {
+        body += "n/a";
+      }
       body += "    </td>\n";
       body += "  </tr>\n";
     }

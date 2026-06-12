@@ -29,13 +29,14 @@
 
 namespace CryptoNote {
 
-enum class SerializationTag : uint8_t { Base = 0xff, Key = 0x2, Transaction = 0xcc, Block = 0xbb };
+enum class SerializationTag : uint8_t { Base = 0xff, Key = 0x2, Pq = 0x10, Transaction = 0xcc, Block = 0xbb };
 
 namespace {
 
 struct BinaryVariantTagGetter: boost::static_visitor<uint8_t> {
   uint8_t operator()(const CryptoNote::BaseInputDetails) { return static_cast<uint8_t>(SerializationTag::Base); }
   uint8_t operator()(const CryptoNote::KeyInputDetails) { return static_cast<uint8_t>(SerializationTag::Key); }
+  uint8_t operator()(const CryptoNote::PqInputDetails) { return static_cast<uint8_t>(SerializationTag::Pq); }
 };
 
 struct VariantSerializer : boost::static_visitor<> {
@@ -49,7 +50,8 @@ struct VariantSerializer : boost::static_visitor<> {
 };
 
 void getVariantValue(CryptoNote::ISerializer& serializer, uint8_t tag, boost::variant<CryptoNote::BaseInputDetails,
-                                                                                      CryptoNote::KeyInputDetails> in) {
+                                                                                      CryptoNote::KeyInputDetails,
+                                                                                      CryptoNote::PqInputDetails>& in) {
   switch (static_cast<SerializationTag>(tag)) {
   case SerializationTag::Base: {
     CryptoNote::BaseInputDetails v;
@@ -59,6 +61,12 @@ void getVariantValue(CryptoNote::ISerializer& serializer, uint8_t tag, boost::va
   }
   case SerializationTag::Key: {
     CryptoNote::KeyInputDetails v;
+    serializer(v, "data");
+    in = v;
+    break;
+  }
+  case SerializationTag::Pq: {
+    CryptoNote::PqInputDetails v;
     serializer(v, "data");
     in = v;
     break;
@@ -96,6 +104,13 @@ void serialize(KeyInputDetails& inputToKey, ISerializer& serializer) {
   serializer(inputToKey.input, "input");
   serializer(inputToKey.mixin, "mixin");
   serializer(inputToKey.outputs, "outputs");
+}
+
+void serialize(PqInputDetails& inputPq, ISerializer& serializer) {
+  serializer(inputPq.input, "input");
+  serializer(inputPq.amount, "amount");
+  serializePod(inputPq.nullifier, "nullifier", serializer);
+  serializer(inputPq.output, "output");
 }
 
 void serialize(transactionInputDetails2& input, ISerializer& serializer) {
@@ -137,6 +152,7 @@ void serialize(TransactionDetails& transaction, ISerializer& serializer) {
   serializer(transaction.unlockTime, "unlockTime");
   serializer(transaction.timestamp, "timestamp");
   serializer(transaction.version, "version");
+  serializer(transaction.txType, "txType");
   serializePod(transaction.paymentId, "paymentId", serializer);
   serializer(transaction.inBlockchain, "inBlockchain");
   serializePod(transaction.blockHash, "blockHash", serializer);

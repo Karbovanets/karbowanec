@@ -98,7 +98,14 @@ struct KeyInputDetails {
   std::vector<TransactionOutputReferenceDetails> outputs;
 };
 
-typedef boost::variant<BaseInputDetails, KeyInputDetails> transactionInputDetails2;
+struct PqInputDetails {
+  PqInput input;
+  uint64_t amount = 0;
+  Crypto::Hash nullifier;
+  TransactionOutputReferenceDetails output;
+};
+
+typedef boost::variant<BaseInputDetails, KeyInputDetails, PqInputDetails> transactionInputDetails2;
 
 struct TransactionExtraDetails2 {
   std::vector<size_t> padding;
@@ -118,6 +125,7 @@ struct TransactionDetails {
   uint64_t unlockTime = 0;
   uint64_t timestamp = 0;
   uint8_t version = 0;
+  uint8_t txType = 0;
   Crypto::Hash paymentId;
   bool hasPaymentId = false;
   bool inBlockchain = false;

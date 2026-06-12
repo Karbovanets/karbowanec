@@ -124,10 +124,11 @@ bool findOutputsToAccount(const CryptoNote::TransactionPrefix& transaction, cons
   uint32_t outputIndex = 0;
 
   Crypto::KeyDerivation derivation;
-  generate_key_derivation(txPubKey, keys.viewSecretKey, derivation);
+  if (!generate_key_derivation(txPubKey, keys.viewSecretKey, derivation)) {
+    return true;
+  }
 
   for (const TransactionOutput& o : transaction.outputs) {
-    assert(o.target.type() == typeid(KeyOutput));
     if (o.target.type() == typeid(KeyOutput)) {
       if (is_out_to_acc(keys, boost::get<KeyOutput>(o.target), derivation, keyIndex)) {
         out.push_back(outputIndex);
