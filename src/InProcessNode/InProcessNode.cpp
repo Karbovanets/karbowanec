@@ -26,7 +26,7 @@
 #include "CryptoNoteConfig.h"
 #include "Common/Math.h"
 #include "Common/StringTools.h"
-#include "CryptoNoteCore/AccountNumber.h"
+#include "AccountNumber.h"
 #include "CryptoNoteCore/CryptoNoteBasicImpl.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "CryptoNoteCore/IBlock.h"

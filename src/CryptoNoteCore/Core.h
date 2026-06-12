@@ -189,6 +189,13 @@ namespace CryptoNote {
                                    uint32_t& blockHeight, uint32_t& txIndex) override;
      virtual bool getCanonicalAccountRegistrationsCount(uint64_t& count) override;
 
+     // PQ account registry (concrete; not on ICore).
+     bool resolvePqAccountNumber(uint32_t blockHeight, uint32_t txIndex,
+                                 std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>& viewPub,
+                                 std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE>& spendPub);
+     bool getPqAccountNumber(const Crypto::Hash& viewPubHash,
+                             uint32_t& blockHeight, uint32_t& txIndex);
+
      bool is_key_image_spent(const Crypto::KeyImage& key_im);
      bool is_key_image_spent(const Crypto::KeyImage& key_im, uint32_t height);
      bool is_tx_spendtime_unlocked(uint64_t unlock_time);

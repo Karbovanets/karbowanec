@@ -70,7 +70,7 @@
 #include "Common/Util.h"
 #include "Common/ColouredMsg.h"
 #include "CryptoNoteCore/Account.h"
-#include "CryptoNoteCore/AccountNumber.h"
+#include "AccountNumber.h"
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "CryptoNoteCore/TransactionExtra.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
@@ -736,6 +736,7 @@ simple_wallet::simple_wallet(System::Dispatcher& dispatcher, const CryptoNote::C
   m_consoleHandler.setHandler("pq_transfer", std::bind(&simple_wallet::pq_transfer, this, std::placeholders::_1), "pq_transfer <pq_address> <amount> - Send PQ funds to a PQ address");
   m_consoleHandler.setHandler("bridge_legacy", std::bind(&simple_wallet::bridge_legacy, this, std::placeholders::_1), "bridge_legacy <pq_address> <amount> - One-way migrate legacy funds to a PQ address");
   m_consoleHandler.setHandler("pq_register", std::bind(&simple_wallet::pq_register, this, std::placeholders::_1), "Register a free post-quantum (PQ) account number (anti-spam PoW, no fee)");
+  m_consoleHandler.setHandler("pq_account", std::bind(&simple_wallet::pq_account, this, std::placeholders::_1), "Show this wallet's PQ account number (once its registration is confirmed)");
   m_consoleHandler.setHandler("help", std::bind(&simple_wallet::help, this, std::placeholders::_1), "Show this help");
   m_consoleHandler.setHandler("exit", std::bind(&simple_wallet::exit, this, std::placeholders::_1), "Close wallet");
 }
@@ -2617,9 +2618,10 @@ bool simple_wallet::pq_transfer(const std::vector<std::string> &args) {
     return true;
   }
 
-  CryptoNote::PqAddress dest;
-  if (!CryptoNote::parsePqAddress(args[0], dest)) {
-    fail_msg_writer() << "Invalid PQ address.";
+  CryptoPQ::KemPublicKey destView;
+  CryptoPQ::DsaPublicKey destSpend;
+  if (!resolvePqRecipient(args[0], destView, destSpend)) {
+    fail_msg_writer() << "Recipient is not a valid PQ address or account number.";
     return true;
   }
 
@@ -2658,7 +2660,7 @@ bool simple_wallet::pq_transfer(const std::vector<std::string> &args) {
   // final size whenever a change output is present; fee = size * MIN_PQ_FEE_PER_BYTE.
   auto buildWith = [&](uint64_t change) {
     std::vector<CryptoNote::PqSendOutput> outs;
-    outs.push_back(CryptoNote::PqSendOutput{dest.viewPub, dest.spendPub, amount});
+    outs.push_back(CryptoNote::PqSendOutput{destView, destSpend, amount});
     if (change > 0) {
       outs.push_back(CryptoNote::PqSendOutput{pq.viewPub, pq.spendPub, change});
     }
@@ -2739,11 +2741,75 @@ bool simple_wallet::pq_register(const std::vector<std::string> &args) {
     }
     success_msg_writer(true) << "PQ registration submitted. Tx hash: "
                              << Common::podToHex(CryptoNote::getObjectHash(tx));
-    logger(INFO) << "Your account number is assigned once the transaction is confirmed.";
+    logger(INFO) << "Once the transaction is confirmed, run 'pq_account' to see your account number.";
   } catch (const std::exception& e) {
     fail_msg_writer() << "Failed to build registration: " << e.what();
   }
   return true;
+}
+//----------------------------------------------------------------------------------------------------
+bool simple_wallet::pq_account(const std::vector<std::string> &args) {
+  if (m_trackingWallet) {
+    fail_msg_writer() << "This is a tracking wallet; it has no PQ identity.";
+    return true;
+  }
+  CryptoNote::AccountKeys keys;
+  m_wallet->getAccountKeys(keys);
+  if (keys.spendSecretKey == boost::value_initialized<Crypto::SecretKey>()) {
+    fail_msg_writer() << "Wallet has no spend secret key.";
+    return true;
+  }
+  CryptoNote::PqWalletKeys pq = CryptoNote::derivePqWalletKeys(keys.spendSecretKey);
+  std::string viewHex = Common::toHex(pq.viewPub.data(), pq.viewPub.size());
+
+  bool registered = false;
+  uint32_t blockHeight = 0, txIndex = 0;
+  std::promise<std::error_code> promise;
+  auto future = promise.get_future();
+  m_node->getPqAccount(viewHex, registered, blockHeight, txIndex,
+                       [&promise](std::error_code ec) { promise.set_value(ec); });
+  std::error_code ec = future.get();
+  if (ec) {
+    fail_msg_writer() << "Failed to query PQ account: " << ec.message();
+    return true;
+  }
+  if (!registered) {
+    success_msg_writer() << "No PQ account number registered yet. Use 'pq_register', then "
+                            "re-check with 'pq_account' once it is confirmed.";
+    return true;
+  }
+  CryptoNote::AccountNumber acct{blockHeight, txIndex};
+  success_msg_writer(true) << "Your PQ account number: " << acct.toString();
+  return true;
+}
+//----------------------------------------------------------------------------------------------------
+bool simple_wallet::resolvePqRecipient(const std::string& s, CryptoPQ::KemPublicKey& viewPub,
+                                       CryptoPQ::DsaPublicKey& spendPub) {
+  // 1. A raw PQ address carries both keys directly.
+  CryptoNote::PqAddress addr;
+  if (CryptoNote::parsePqAddress(s, addr)) {
+    viewPub = addr.viewPub;
+    spendPub = addr.spendPub;
+    return true;
+  }
+  // 2. An H-I-C account number: resolve its registration via the node.
+  CryptoNote::AccountNumber acct;
+  if (CryptoNote::AccountNumber::fromString(s, acct)) {
+    bool found = false;
+    std::string viewHex, spendHex;
+    std::promise<std::error_code> promise;
+    auto future = promise.get_future();
+    m_node->resolvePqAccount(acct.blockHeight, acct.txIndex, found, viewHex, spendHex,
+                             [&promise](std::error_code ec) { promise.set_value(ec); });
+    if (future.get() || !found) {
+      return false;
+    }
+    size_t sz = 0;
+    if (!Common::fromHex(viewHex, viewPub.data(), viewPub.size(), sz) || sz != viewPub.size()) return false;
+    if (!Common::fromHex(spendHex, spendPub.data(), spendPub.size(), sz) || sz != spendPub.size()) return false;
+    return true;
+  }
+  return false;
 }
 //----------------------------------------------------------------------------------------------------
 bool simple_wallet::bridge_legacy(const std::vector<std::string> &args) {
@@ -2761,9 +2827,10 @@ bool simple_wallet::bridge_legacy(const std::vector<std::string> &args) {
     return true;
   }
 
-  CryptoNote::PqAddress dest;
-  if (!CryptoNote::parsePqAddress(args[0], dest)) {
-    fail_msg_writer() << "Invalid PQ address.";
+  CryptoPQ::KemPublicKey destView;
+  CryptoPQ::DsaPublicKey destSpend;
+  if (!resolvePqRecipient(args[0], destView, destSpend)) {
+    fail_msg_writer() << "Recipient is not a valid PQ address or account number.";
     return true;
   }
   uint64_t amount = 0;
@@ -2785,7 +2852,7 @@ bool simple_wallet::bridge_legacy(const std::vector<std::string> &args) {
   try {
     uint64_t fee = 0;
     CryptoNote::Transaction tx = wl->createBridgeTransaction(
-        dest.viewPub, dest.spendPub, amount, CryptoNote::parameters::MIN_PQ_FEE_PER_BYTE,
+        destView, destSpend, amount, CryptoNote::parameters::MIN_PQ_FEE_PER_BYTE,
         m_currency.minMixin(), fee);
 
     success_msg_writer() << "Built bridge transaction (fee " << m_currency.formatAmount(fee) << "). Relaying...";

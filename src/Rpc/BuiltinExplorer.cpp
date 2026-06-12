@@ -29,7 +29,7 @@
 #include <crypto/random.h>
 #include "BlockchainExplorerData.h"
 #include "Common/StringTools.h"
-#include "CryptoNoteCore/AccountNumber.h"
+#include "AccountNumber.h"
 #include "CryptoNoteCore/Core.h"
 #include "CryptoNoteCore/CryptoNoteBasicImpl.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"

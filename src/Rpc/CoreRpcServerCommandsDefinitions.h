@@ -1512,4 +1512,60 @@ struct COMMAND_RPC_GET_ACCOUNT_NUMBER {
   };
 };
 
+// --- PQ account registry ---------------------------------------------------
+// Look up the on-chain registration coordinates (height, in-block tx index) of a
+// PQ identity by its ML-KEM-768 view public key (hex). The wallet renders the
+// human-readable H-I-C number from (height, tx_index).
+struct COMMAND_RPC_GET_PQ_ACCOUNT {
+  struct request {
+    std::string view_pub;  // hex of the 1184-byte ML-KEM-768 view public key
+
+    void serialize(ISerializer& s) {
+      KV_MEMBER(view_pub)
+    }
+  };
+
+  struct response {
+    bool registered;
+    uint32_t block_height;
+    uint32_t tx_index;
+    std::string status;
+
+    void serialize(ISerializer& s) {
+      KV_MEMBER(registered)
+      KV_MEMBER(block_height)
+      KV_MEMBER(tx_index)
+      KV_MEMBER(status)
+    }
+  };
+};
+
+// Resolve a PQ account number's coordinates (height, in-block tx index) to the
+// registered view + spend public keys (hex), forming a payable PQ identity.
+struct COMMAND_RPC_RESOLVE_PQ_ACCOUNT {
+  struct request {
+    uint32_t block_height;
+    uint32_t tx_index;
+
+    void serialize(ISerializer& s) {
+      KV_MEMBER(block_height)
+      KV_MEMBER(tx_index)
+    }
+  };
+
+  struct response {
+    bool found;
+    std::string view_pub;   // hex, 1184 bytes
+    std::string spend_pub;  // hex, 1952 bytes
+    std::string status;
+
+    void serialize(ISerializer& s) {
+      KV_MEMBER(found)
+      KV_MEMBER(view_pub)
+      KV_MEMBER(spend_pub)
+      KV_MEMBER(status)
+    }
+  };
+};
+
 }

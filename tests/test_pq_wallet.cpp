@@ -11,9 +11,7 @@
 
 #include "Wallet/PqWallet.h"
 
-#include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -148,40 +146,8 @@ TEST(PqWallet, ChecksumTamperRejectedThroughParse) {
     EXPECT_FALSE(isPqAddressString(b58));
 }
 
-// --- H-I-C account numbers -------------------------------------------------
-
-TEST(PqWallet, AccountNumberRoundTrip) {
-    uint32_t h = 1234567, i = 42;
-    std::string num = pqAccountNumber(h, i);
-    EXPECT_EQ(num.substr(0, 11), "1234567-42-");  // "<h>-<i>-<chk>"
-
-    uint32_t gotH = 0, gotI = 0;
-    ASSERT_TRUE(parsePqAccountNumber(num, gotH, gotI));
-    EXPECT_EQ(gotH, h);
-    EXPECT_EQ(gotI, i);
-
-    // Whitespace tolerated; checksum case-insensitive.
-    std::string lower = num;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-    EXPECT_TRUE(parsePqAccountNumber("  " + lower + "  ", gotH, gotI));
-}
-
-TEST(PqWallet, AccountNumberRejectsBadChecksumAndGarbage) {
-    std::string num = pqAccountNumber(100, 7);
-    // Corrupt the checksum char.
-    num.back() = (num.back() == 'A') ? 'B' : 'A';
-    uint32_t h = 0, i = 0;
-    EXPECT_FALSE(parsePqAccountNumber(num, h, i));
-    EXPECT_FALSE(parsePqAccountNumber("not-a-number", h, i));
-    EXPECT_FALSE(parsePqAccountNumber("100-7", h, i));   // missing checksum
-    EXPECT_FALSE(parsePqAccountNumber("", h, i));
-}
-
-TEST(PqWallet, AccountNumberDistinctCoordsDistinctChecksum) {
-    // Transposed coords must not collide.
-    EXPECT_NE(pqAccountNumber(42, 7), pqAccountNumber(7, 42));
-}
+// PQ account numbers reuse the shared CryptoNote::AccountNumber format; its
+// round-trip/checksum behaviour is covered by the AccountNumber tests, not here.
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

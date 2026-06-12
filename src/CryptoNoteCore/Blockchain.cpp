@@ -3346,6 +3346,33 @@ bool Blockchain::getAccountNumber(const AccountPublicAddress& address,
                                             blockHeight, txIndex);
 }
 
+bool Blockchain::resolvePqAccountNumber(uint32_t blockHeight, uint32_t txIndex,
+                                        std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>& viewPub,
+                                        std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE>& spendPub) {
+  std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
+  const uint32_t chainHeight = m_db.getChainHeight();
+  if (blockHeight >= chainHeight || txIndex > std::numeric_limits<uint16_t>::max()) {
+    return false;
+  }
+  try {
+    TransactionEntry te = transactionByIndex({ blockHeight, static_cast<uint16_t>(txIndex) });
+    TransactionExtraPqAccountRegistration reg;
+    if (getPqAccountRegistrationFromExtra(te.tx.extra, reg)) {
+      viewPub = reg.viewPub;
+      spendPub = reg.spendPub;
+      return true;
+    }
+  } catch (...) {
+  }
+  return false;
+}
+
+bool Blockchain::getPqAccountNumber(const Crypto::Hash& viewPubHash,
+                                    uint32_t& blockHeight, uint32_t& txIndex) {
+  std::lock_guard<std::recursive_mutex> lk(m_blockchain_lock);
+  return m_db.getPqAcctReg(viewPubHash, blockHeight, txIndex);
+}
+
 void Blockchain::invalidateAccountRegistrationsCountCache() {
   m_accountRegistrationsCountCacheTime = std::chrono::steady_clock::time_point();
 }

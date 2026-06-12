@@ -1176,6 +1176,39 @@ void pqBalance(std::shared_ptr<WalletInfo> walletInfo)
               << std::endl;
 }
 
+// Resolve a recipient string (a raw PQ address OR an H-I-C account number) to
+// its view + spend public keys, querying the node for an account number.
+static bool resolvePqRecipientGreen(CryptoNote::INode &node, const std::string &s,
+                                    CryptoPQ::KemPublicKey &viewPub, CryptoPQ::DsaPublicKey &spendPub)
+{
+    CryptoNote::PqAddress addr;
+    if (CryptoNote::parsePqAddress(s, addr))
+    {
+        viewPub = addr.viewPub;
+        spendPub = addr.spendPub;
+        return true;
+    }
+    CryptoNote::AccountNumber acct;
+    if (CryptoNote::AccountNumber::fromString(s, acct))
+    {
+        bool found = false;
+        std::string viewHex, spendHex;
+        std::promise<std::error_code> promise;
+        auto future = promise.get_future();
+        node.resolvePqAccount(acct.blockHeight, acct.txIndex, found, viewHex, spendHex,
+                              [&promise](std::error_code ec) { promise.set_value(ec); });
+        if (future.get() || !found)
+        {
+            return false;
+        }
+        size_t sz = 0;
+        if (!Common::fromHex(viewHex, viewPub.data(), viewPub.size(), sz) || sz != viewPub.size()) return false;
+        if (!Common::fromHex(spendHex, spendPub.data(), spendPub.size(), sz) || sz != spendPub.size()) return false;
+        return true;
+    }
+    return false;
+}
+
 void pqTransfer(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node)
 {
     CryptoNote::WalletGreen &wallet = walletInfo->wallet;
@@ -1185,13 +1218,14 @@ void pqTransfer(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node)
         return;
     }
 
-    std::cout << InformationMsg("PQ recipient address: ");
+    std::cout << InformationMsg("PQ recipient (address or account number): ");
     std::string addrStr;
     std::getline(std::cin, addrStr);
-    CryptoNote::PqAddress dest;
-    if (!CryptoNote::parsePqAddress(addrStr, dest))
+    CryptoPQ::KemPublicKey destView;
+    CryptoPQ::DsaPublicKey destSpend;
+    if (!resolvePqRecipientGreen(node, addrStr, destView, destSpend))
     {
-        std::cout << WarningMsg("Invalid PQ address.") << std::endl;
+        std::cout << WarningMsg("Not a valid PQ address or account number.") << std::endl;
         return;
     }
 
@@ -1231,7 +1265,7 @@ void pqTransfer(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node)
 
     auto buildWith = [&](uint64_t change) {
         std::vector<CryptoNote::PqSendOutput> outs;
-        outs.push_back(CryptoNote::PqSendOutput{dest.viewPub, dest.spendPub, amount});
+        outs.push_back(CryptoNote::PqSendOutput{destView, destSpend, amount});
         if (change > 0)
         {
             outs.push_back(CryptoNote::PqSendOutput{pq.viewPub, pq.spendPub, change});
@@ -1284,13 +1318,14 @@ void bridgeLegacy(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &nod
         return;
     }
 
-    std::cout << InformationMsg("PQ recipient address: ");
+    std::cout << InformationMsg("PQ recipient (address or account number): ");
     std::string addrStr;
     std::getline(std::cin, addrStr);
-    CryptoNote::PqAddress dest;
-    if (!CryptoNote::parsePqAddress(addrStr, dest))
+    CryptoPQ::KemPublicKey destView;
+    CryptoPQ::DsaPublicKey destSpend;
+    if (!resolvePqRecipientGreen(node, addrStr, destView, destSpend))
     {
-        std::cout << WarningMsg("Invalid PQ address.") << std::endl;
+        std::cout << WarningMsg("Not a valid PQ address or account number.") << std::endl;
         return;
     }
 
@@ -1318,7 +1353,7 @@ void bridgeLegacy(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &nod
     {
         uint64_t fee = 0;
         CryptoNote::Transaction tx = wallet.createBridgeTransaction(
-            dest.viewPub, dest.spendPub, amount,
+            destView, destSpend, amount,
             CryptoNote::parameters::MIN_PQ_FEE_PER_BYTE, WalletConfig::defaultMixin, fee);
 
         std::cout << InformationMsg("Built bridge transaction (fee " + formatAmount(fee)
@@ -1391,11 +1426,47 @@ void pqRegister(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node)
         std::cout << SuccessMsg("PQ registration submitted. Tx hash: "
                                 + Common::podToHex(CryptoNote::getObjectHash(tx)))
                   << std::endl
-                  << InformationMsg("Your account number is assigned once confirmed.") << std::endl;
+                  << InformationMsg("Once confirmed, run 'pq_account' to see your account number.")
+                  << std::endl;
     }
     catch (const std::exception &e)
     {
         std::cout << WarningMsg(std::string("Failed to build registration: ") + e.what())
                   << std::endl;
     }
+}
+
+void pqAccount(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node)
+{
+    CryptoNote::WalletGreen &wallet = walletInfo->wallet;
+    if (walletInfo->viewWallet)
+    {
+        std::cout << WarningMsg("View-only wallets have no PQ identity.") << std::endl;
+        return;
+    }
+    Crypto::SecretKey spendSecret = wallet.getAddressSpendKey(0).secretKey;
+    CryptoNote::PqWalletKeys pq = CryptoNote::derivePqWalletKeys(spendSecret);
+    std::string viewHex = Common::toHex(pq.viewPub.data(), pq.viewPub.size());
+
+    bool registered = false;
+    uint32_t blockHeight = 0, txIndex = 0;
+    std::promise<std::error_code> promise;
+    auto future = promise.get_future();
+    node.getPqAccount(viewHex, registered, blockHeight, txIndex,
+                      [&promise](std::error_code ec) { promise.set_value(ec); });
+    std::error_code ec = future.get();
+    if (ec)
+    {
+        std::cout << WarningMsg("Failed to query PQ account: " + ec.message()) << std::endl;
+        return;
+    }
+    if (!registered)
+    {
+        std::cout << InformationMsg("No PQ account number registered yet. Use 'pq_register', then "
+                                    "re-check with 'pq_account' once confirmed.")
+                  << std::endl;
+        return;
+    }
+    CryptoNote::AccountNumber acct{blockHeight, txIndex};
+    std::cout << SuccessMsg("Your PQ account number: " + acct.toString()) << std::endl;
 }

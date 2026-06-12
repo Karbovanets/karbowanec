@@ -1422,6 +1422,17 @@ bool Core::getAccountNumber(const AccountPublicAddress& address,
   return m_blockchain.getAccountNumber(address, blockHeight, txIndex);
 }
 
+bool Core::resolvePqAccountNumber(uint32_t blockHeight, uint32_t txIndex,
+                                  std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>& viewPub,
+                                  std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE>& spendPub) {
+  return m_blockchain.resolvePqAccountNumber(blockHeight, txIndex, viewPub, spendPub);
+}
+
+bool Core::getPqAccountNumber(const Crypto::Hash& viewPubHash,
+                              uint32_t& blockHeight, uint32_t& txIndex) {
+  return m_blockchain.getPqAccountNumber(viewPubHash, blockHeight, txIndex);
+}
+
 bool Core::getCanonicalAccountRegistrationsCount(uint64_t& count) {
   return m_blockchain.getCanonicalAccountRegistrationsCount(count);
 }

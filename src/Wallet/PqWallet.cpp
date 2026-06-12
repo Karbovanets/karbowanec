@@ -18,7 +18,6 @@
 #include "PqWallet.h"
 
 #include <algorithm>
-#include <cctype>
 
 #include "crypto_pq/PqHash.h"
 
@@ -77,72 +76,6 @@ bool isPqAddressString(const std::string& s) {
   }
   PqAddress out;
   return parsePqAddress(s, out, nullptr);
-}
-
-namespace {
-// First `n` base36 chars (uppercase) of a 32-byte hash, big-endian.
-std::string hashToBase36(const CryptoPQ::Hash256& h, size_t n) {
-  static const char* kDigits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  // Accumulate from the leading bytes; we only need a few digits.
-  uint64_t acc = 0;
-  for (size_t i = 0; i < 8; ++i) acc = (acc << 8) | h[i];
-  std::string out;
-  for (size_t i = 0; i < n; ++i) {
-    out.push_back(kDigits[acc % 36]);
-    acc /= 36;
-  }
-  std::reverse(out.begin(), out.end());
-  return out;
-}
-
-std::string accountChecksum(uint32_t height, uint32_t txIndex) {
-  uint8_t buf[12];
-  for (int i = 0; i < 8; ++i) buf[i] = static_cast<uint8_t>((static_cast<uint64_t>(height) >> (8 * i)) & 0xFF);
-  for (int i = 0; i < 4; ++i) buf[8 + i] = static_cast<uint8_t>((txIndex >> (8 * i)) & 0xFF);
-  CryptoPQ::Hash256 h = CryptoPQ::sha3_256(buf, sizeof(buf));
-  return hashToBase36(h, 3);
-}
-}  // namespace
-
-std::string pqAccountNumber(uint32_t height, uint32_t txIndex) {
-  return std::to_string(height) + "-" + std::to_string(txIndex) + "-" + accountChecksum(height, txIndex);
-}
-
-bool parsePqAccountNumber(const std::string& in, uint32_t& height, uint32_t& txIndex) {
-  // Trim whitespace.
-  size_t b = in.find_first_not_of(" \t\r\n");
-  if (b == std::string::npos) return false;
-  size_t e = in.find_last_not_of(" \t\r\n");
-  std::string s = in.substr(b, e - b + 1);
-
-  size_t d1 = s.find('-');
-  if (d1 == std::string::npos) return false;
-  size_t d2 = s.find('-', d1 + 1);
-  if (d2 == std::string::npos) return false;
-
-  const std::string hStr = s.substr(0, d1);
-  const std::string iStr = s.substr(d1 + 1, d2 - d1 - 1);
-  const std::string chk = s.substr(d2 + 1);
-  if (hStr.empty() || iStr.empty() || chk.empty()) return false;
-
-  try {
-    unsigned long long h = std::stoull(hStr);
-    unsigned long long i = std::stoull(iStr);
-    if (h > 0xFFFFFFFFull || i > 0xFFFFFFFFull) return false;
-    uint32_t hh = static_cast<uint32_t>(h);
-    uint32_t ii = static_cast<uint32_t>(i);
-    std::string expect = accountChecksum(hh, ii);
-    // Case-insensitive checksum compare.
-    if (chk.size() != expect.size()) return false;
-    for (size_t k = 0; k < chk.size(); ++k) {
-      if (std::toupper(static_cast<unsigned char>(chk[k])) != expect[k]) return false;
-    }
-    height = hh;
-    txIndex = ii;
-    return true;
-  } catch (...) {
-    return false;
-  }
 }
 
 bool parsePqAddress(const std::string& s, PqAddress& out, PqAddressEncoding* encoding) {

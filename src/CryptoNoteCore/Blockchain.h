@@ -30,6 +30,7 @@
 #include "CryptoNoteCore/LMDBBlockchainDB.h"
 #include "CryptoNoteCore/Currency.h"
 #include "CryptoNoteCore/IBlockchainStorageObserver.h"
+#include "CryptoNoteCore/TransactionExtra.h"
 #include "CryptoNoteCore/ITransactionValidator.h"
 #include "CryptoNoteCore/SwappedVector.h"        // kept for migrateFromSwappedVector
 #include "CryptoNoteCore/UpgradeDetector.h"
@@ -155,6 +156,15 @@ namespace CryptoNote {
     bool getAccountNumber(const AccountPublicAddress& address,
                           uint32_t& blockHeight, uint32_t& txIndex);
     bool getCanonicalAccountRegistrationsCount(uint64_t& count);
+
+    // PQ account registry. resolve: (height, txIndex) -> the registered view +
+    // spend public keys (read from the registration tx's extra). lookup: a PQ
+    // identity's view-pubkey hash -> its registration coordinates.
+    bool resolvePqAccountNumber(uint32_t blockHeight, uint32_t txIndex,
+                                std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE>& viewPub,
+                                std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE>& spendPub);
+    bool getPqAccountNumber(const Crypto::Hash& viewPubHash,
+                            uint32_t& blockHeight, uint32_t& txIndex);
 
     template<class visitor_t>
     bool scanOutputKeysForIndexes(const KeyInput& tx_in_to_key, visitor_t& vis,

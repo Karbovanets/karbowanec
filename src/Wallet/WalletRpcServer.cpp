@@ -38,7 +38,7 @@
 #include "Common/Base58.h"
 #include "Common/Util.h"
 #include "WalletRpcServer.h"
-#include "CryptoNoteCore/AccountNumber.h"
+#include "AccountNumber.h"
 #include "CryptoNoteCore/TransactionExtra.h"
 
 #undef ERROR

@@ -160,6 +160,10 @@ bool handleCommand(const std::string command,
     {
         pqRegister(walletInfo, node);
     }
+    else if (command == "pq_account")
+    {
+        pqAccount(walletInfo, node);
+    }
     /* This should never happen */
     else
     {

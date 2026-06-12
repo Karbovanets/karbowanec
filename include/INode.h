@@ -187,6 +187,16 @@ public:
   virtual void getAccountNumber(const std::string& address, std::string& accountNumber, const Callback& callback) {
     callback(std::make_error_code(std::errc::not_supported));
   }
+  // PQ account registry. getPqAccount: viewPub (hex) -> registration coords.
+  // resolvePqAccount: coords -> registered view+spend pubkeys (hex).
+  virtual void getPqAccount(const std::string& viewPubHex, bool& registered,
+                            uint32_t& blockHeight, uint32_t& txIndex, const Callback& callback) {
+    callback(std::make_error_code(std::errc::not_supported));
+  }
+  virtual void resolvePqAccount(uint32_t blockHeight, uint32_t txIndex, bool& found,
+                                std::string& viewPubHex, std::string& spendPubHex, const Callback& callback) {
+    callback(std::make_error_code(std::errc::not_supported));
+  }
 };
 
 }

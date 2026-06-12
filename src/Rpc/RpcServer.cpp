@@ -39,6 +39,8 @@
 #include "Common/Math.h"
 #include "Common/FormatTools.h"
 #include "Common/StringTools.h"
+#include "crypto_pq/PqHash.h"
+#include "CryptoNoteCore/TransactionExtra.h"
 #include "CryptoNoteCore/TransactionUtils.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "CryptoNoteCore/CryptoNoteFormatUtils.h"
@@ -46,7 +48,7 @@
 #include "CryptoNoteCore/IBlock.h"
 #include "CryptoNoteCore/Miner.h"
 #include "CryptoNoteCore/TransactionExtra.h"
-#include "CryptoNoteCore/AccountNumber.h"
+#include "AccountNumber.h"
 #include "CryptoNoteCore/CryptoNoteBasicImpl.h"
 #include "CryptoNoteProtocol/ICryptoNoteProtocolQuery.h"
 #include "P2p/ConnectionContext.h"
@@ -721,6 +723,8 @@ bool RpcServer::processJsonRpcRequest(const CryptoNote::HttpRequest& request, Cr
       { "search", { makeMemberMethod(&RpcServer::on_explorer_search), true } },
       { "resolveaccountnumber", { makeMemberMethod(&RpcServer::on_resolve_account_number), true } },
       { "getaccountnumber", { makeMemberMethod(&RpcServer::on_get_account_number), true } },
+      { "getpqaccount", { makeMemberMethod(&RpcServer::on_get_pq_account), true } },
+      { "resolvepqaccount", { makeMemberMethod(&RpcServer::on_resolve_pq_account), true } },
 
     };
 
@@ -2808,6 +2812,38 @@ bool RpcServer::on_get_account_number(const COMMAND_RPC_GET_ACCOUNT_NUMBER::requ
 
   AccountNumber acctNum{blockHeight, txIndex};
   res.account_number = acctNum.toString();
+  res.status = CORE_RPC_STATUS_OK;
+  return true;
+}
+
+bool RpcServer::on_get_pq_account(const COMMAND_RPC_GET_PQ_ACCOUNT::request& req,
+                                  COMMAND_RPC_GET_PQ_ACCOUNT::response& res) {
+  std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE> viewPub;
+  size_t sz = 0;
+  if (!Common::fromHex(req.view_pub, viewPub.data(), viewPub.size(), sz) || sz != viewPub.size()) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_WRONG_PARAM, "Invalid view_pub hex" };
+  }
+  CryptoPQ::Hash256 h = CryptoPQ::sha3_256(viewPub.data(), viewPub.size());
+  Crypto::Hash viewPubHash;
+  std::memcpy(viewPubHash.data, h.data(), 32);
+
+  uint32_t blockHeight = 0, txIndex = 0;
+  res.registered = m_core.getPqAccountNumber(viewPubHash, blockHeight, txIndex);
+  res.block_height = res.registered ? blockHeight : 0;
+  res.tx_index = res.registered ? txIndex : 0;
+  res.status = CORE_RPC_STATUS_OK;
+  return true;
+}
+
+bool RpcServer::on_resolve_pq_account(const COMMAND_RPC_RESOLVE_PQ_ACCOUNT::request& req,
+                                      COMMAND_RPC_RESOLVE_PQ_ACCOUNT::response& res) {
+  std::array<uint8_t, TX_EXTRA_PQ_VIEW_PUBKEY_SIZE> viewPub;
+  std::array<uint8_t, TX_EXTRA_PQ_SPEND_PUBKEY_SIZE> spendPub;
+  res.found = m_core.resolvePqAccountNumber(req.block_height, req.tx_index, viewPub, spendPub);
+  if (res.found) {
+    res.view_pub = Common::toHex(viewPub.data(), viewPub.size());
+    res.spend_pub = Common::toHex(spendPub.data(), spendPub.size());
+  }
   res.status = CORE_RPC_STATUS_OK;
   return true;
 }

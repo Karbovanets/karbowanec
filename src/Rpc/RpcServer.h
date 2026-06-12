@@ -161,6 +161,8 @@ private:
   bool on_check_payment(const COMMAND_RPC_CHECK_PAYMENT_BY_PAYMENT_ID::request& req, COMMAND_RPC_CHECK_PAYMENT_BY_PAYMENT_ID::response& rsp);
   bool on_resolve_account_number(const COMMAND_RPC_RESOLVE_ACCOUNT_NUMBER::request& req, COMMAND_RPC_RESOLVE_ACCOUNT_NUMBER::response& res);
   bool on_get_account_number(const COMMAND_RPC_GET_ACCOUNT_NUMBER::request& req, COMMAND_RPC_GET_ACCOUNT_NUMBER::response& res);
+  bool on_get_pq_account(const COMMAND_RPC_GET_PQ_ACCOUNT::request& req, COMMAND_RPC_GET_PQ_ACCOUNT::response& res);
+  bool on_resolve_pq_account(const COMMAND_RPC_RESOLVE_PQ_ACCOUNT::request& req, COMMAND_RPC_RESOLVE_PQ_ACCOUNT::response& res);
 
   void fill_block_header_response(const Block& blk, bool orphan_status, uint32_t height, const Crypto::Hash& hash, block_header_response& responce);
   void listen(const std::string address, const uint16_t port);

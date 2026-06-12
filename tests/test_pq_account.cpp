@@ -9,7 +9,7 @@
 #include "gtest/gtest.h"
 
 #include "CryptoNoteCore/LMDBBlockchainDB.h"
-#include "CryptoNoteCore/AccountNumber.h"
+#include "AccountNumber.h"
 #include "CryptoTypes.h"
 
 #include <cstdint>
