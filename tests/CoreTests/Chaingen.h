@@ -52,7 +52,7 @@ namespace CryptoNote {
     size_t get_blockchain_total_transactions() { return getBlockchainTotalTransactions(); }
     size_t get_alternative_blocks_count() { return getAlternativeBlocksCount(); }
 
-    bool get_block_template(Block& b, const AccountPublicAddress& address, difficulty_type& difficulty,
+    bool get_block_template(Block& b, const AccountPublicAddress& address, Difficulty& difficulty,
       uint32_t& height, const BinaryArray& extraNonce) {
       AccountKeys keys{};
       keys.address = address;

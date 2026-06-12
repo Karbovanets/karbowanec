@@ -323,12 +323,12 @@ bool ICoreStub::scanOutputkeysForIndices(const CryptoNote::KeyInput& txInToKey, 
   return true;
 }
 
-bool ICoreStub::getBlockDifficulty(uint32_t height, CryptoNote::difficulty_type& difficulty) {
+bool ICoreStub::getBlockDifficulty(uint32_t height, CryptoNote::Difficulty& difficulty) {
   if (blockHashByHeightIndex.count(height) == 0) {
     return false;
   }
 
-  difficulty = static_cast<CryptoNote::difficulty_type>(height + 1);
+  difficulty = static_cast<CryptoNote::Difficulty>(height + 1);
   return true;
 }
 
@@ -513,12 +513,12 @@ bool ICoreStub::getTransaction(const Crypto::Hash& id, CryptoNote::Transaction& 
   return true;
 }
 
-bool ICoreStub::getBlockCumulativeDifficulty(uint32_t height, CryptoNote::difficulty_type& difficulty) {
+bool ICoreStub::getBlockCumulativeDifficulty(uint32_t height, CryptoNote::Difficulty& difficulty) {
   if (blockHashByHeightIndex.count(height) == 0) {
     return false;
   }
 
-  difficulty = static_cast<CryptoNote::difficulty_type>(height + 1);
+  difficulty = static_cast<CryptoNote::Difficulty>(height + 1);
   return true;
 }
 
@@ -604,7 +604,7 @@ size_t ICoreStub::getAlternativeBlocksCount() {
   return 0;
 }
 
-bool ICoreStub::getblockEntry(uint32_t height, uint64_t& block_cumulative_size, CryptoNote::difficulty_type& difficulty, uint64_t& already_generated_coins, uint64_t& reward, uint64_t& transactions_count, uint64_t& timestamp) {
+bool ICoreStub::getblockEntry(uint32_t height, uint64_t& block_cumulative_size, CryptoNote::Difficulty& difficulty, uint64_t& already_generated_coins, uint64_t& reward, uint64_t& transactions_count, uint64_t& timestamp) {
   return false;
 }
 

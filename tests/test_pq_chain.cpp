@@ -78,7 +78,7 @@ bool mineBlock(CryptoNote::Core& core, const CryptoNote::Currency& currency,
   std::list<CryptoNote::Transaction> txs;
   if (!gen.constructBlock(blk, height, tail, miner, timestamp, generated, sizes, txs)) return false;
 
-  CryptoNote::difficulty_type diff = core.getNextBlockDifficulty();
+  CryptoNote::Difficulty diff = core.getNextBlockDifficulty();
   if (diff > 1) {
     // Version-aware PoW search (yespower for v5+).
     fillNonce(blk, diff, &core.get_blockchain_storage());
@@ -107,7 +107,7 @@ bool mineBlockWithTxs(CryptoNote::Core& core, const CryptoNote::Currency& curren
   CryptoNote::Block blk;
   if (!gen.constructBlock(blk, height, tail, miner, timestamp, generated, sizes, txs)) return false;
 
-  CryptoNote::difficulty_type diff = core.getNextBlockDifficulty();
+  CryptoNote::Difficulty diff = core.getNextBlockDifficulty();
   if (diff > 1) {
     fillNonce(blk, diff, &core.get_blockchain_storage());
   }

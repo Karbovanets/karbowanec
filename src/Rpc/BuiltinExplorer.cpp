@@ -239,7 +239,7 @@ bool BuiltinExplorer::on_get_explorer(const COMMAND_EXPLORER::request& req, COMM
     struct tm* timeinfo;
     timeinfo = gmtime(&rawtime);
 
-    difficulty_type blockDifficulty;
+    Difficulty blockDifficulty;
     m_core.getBlockDifficulty(static_cast<uint32_t>(i), blockDifficulty);
     size_t tx_cumulative_block_size;
     m_core.getBlockSize(blockHash, tx_cumulative_block_size);

@@ -264,7 +264,7 @@ bool test_generator::constructBlock(CryptoNote::Block& blk, const CryptoNote::Bl
 bool test_generator::constructBlockManually(Block& blk, const Block& prevBlock, const AccountBase& minerAcc,
                                             int actualParams/* = bf_none*/, uint8_t majorVer/* = 0*/,
                                             uint8_t minorVer/* = 0*/, uint64_t timestamp/* = 0*/,
-                                            const Crypto::Hash& previousBlockHash/* = Crypto::Hash()*/, const difficulty_type& diffic/* = 1*/,
+                                            const Crypto::Hash& previousBlockHash/* = Crypto::Hash()*/, const Difficulty& diffic/* = 1*/,
                                             const Transaction& baseTransaction/* = transaction()*/,
                                             const std::vector<Crypto::Hash>& transactionHashes/* = std::vector<Crypto::Hash>()*/,
                                             size_t txsSizes/* = 0*/, uint64_t fee/* = 0*/) {
@@ -311,7 +311,7 @@ bool test_generator::constructBlockManually(Block& blk, const Block& prevBlock, 
     }
   }
 
-  difficulty_type aDiffic = actualParams & bf_diffic ? diffic : getTestDifficulty();
+  Difficulty aDiffic = actualParams & bf_diffic ? diffic : getTestDifficulty();
   if (1 < aDiffic) {
     // Version-aware: V5+ uses yespower if a Blockchain sink is wired in.
     fillNonce(blk, aDiffic, m_blockchain);
@@ -364,13 +364,13 @@ bool test_generator::constructMaxSizeBlock(CryptoNote::Block& blk, const CryptoN
     0, 0, 0, Crypto::Hash(), 0, baseTransaction, transactionHashes, txsSize, totalFee);
 }
 
-void fillNonce(CryptoNote::Block& blk, const difficulty_type& diffic) {
+void fillNonce(CryptoNote::Block& blk, const Difficulty& diffic) {
   // Compatibility overload — V1–V4 PoW only. V5+ callers must use the
   // Blockchain-aware overload below.
   fillNonce(blk, diffic, /*blockchain=*/nullptr);
 }
 
-void fillNonce(CryptoNote::Block& blk, const difficulty_type& diffic,
+void fillNonce(CryptoNote::Block& blk, const Difficulty& diffic,
                CryptoNote::Blockchain* blockchain) {
   blk.nonce = 0;
   Crypto::cn_context context;

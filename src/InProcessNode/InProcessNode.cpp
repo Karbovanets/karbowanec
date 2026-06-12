@@ -574,7 +574,9 @@ void InProcessNode::updateLastLocalBlockHeaderInfo() {
   try {
     core.get_blockchain_top(height, hash);
     core.getBlockByHash(hash, block);
-    difficulty = core.getBlockDifficulty(height, difficulty);
+    if (!core.getBlockDifficulty(height, difficulty)) {
+      return;
+    }
   } catch (const std::exception&) {
     return;
   }
