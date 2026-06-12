@@ -93,6 +93,7 @@ private:
   bool on_resolve_account_number(const wallet_rpc::COMMAND_RPC_RESOLVE_ACCOUNT_NUMBER::request& req, wallet_rpc::COMMAND_RPC_RESOLVE_ACCOUNT_NUMBER::response& res);
   bool on_get_account_number(const wallet_rpc::COMMAND_RPC_GET_ACCOUNT_NUMBER::request& req, wallet_rpc::COMMAND_RPC_GET_ACCOUNT_NUMBER::response& res);
   bool on_register_account(const wallet_rpc::COMMAND_RPC_REGISTER_ACCOUNT::request& req, wallet_rpc::COMMAND_RPC_REGISTER_ACCOUNT::response& res);
+  bool on_register_pq_account(const wallet_rpc::COMMAND_RPC_REGISTER_PQ_ACCOUNT::request& req, wallet_rpc::COMMAND_RPC_REGISTER_PQ_ACCOUNT::response& res);
 
   bool handle_command_line(const boost::program_options::variables_map& vm);
   bool authenticate(const CryptoNote::HttpRequest& request) const;

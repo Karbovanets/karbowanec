@@ -40,6 +40,7 @@
 #include "WalletRpcServer.h"
 #include "AccountNumber.h"
 #include "CryptoNoteCore/TransactionExtra.h"
+#include "Wallet/PqWallet.h"
 
 #undef ERROR
 
@@ -274,6 +275,7 @@ void wallet_rpc_server::processRequest(const CryptoNote::HttpRequest& request, C
             { "resolve_account_number", makeMemberMethod(&wallet_rpc_server::on_resolve_account_number) },
             { "get_account_number",     makeMemberMethod(&wallet_rpc_server::on_get_account_number)     },
             { "register_account",       makeMemberMethod(&wallet_rpc_server::on_register_account)       },
+            { "register_pq_account",    makeMemberMethod(&wallet_rpc_server::on_register_pq_account)    },
     };
 
     auto it = s_methods.find(jsonRequest.getMethod());
@@ -968,6 +970,76 @@ bool wallet_rpc_server::on_register_account(const wallet_rpc::COMMAND_RPC_REGIST
     CryptoNote::TransactionId tx = m_wallet.sendTransaction(transfer, m_node.getMinimalFee(), extraString, 0, 0);
     if (tx == WALLET_LEGACY_INVALID_TRANSACTION_ID)
       throw std::runtime_error("Couldn't send registration transaction");
+
+    std::error_code sendError = sent.wait(tx);
+    removeGuard.removeObserver();
+
+    if (sendError)
+      throw std::system_error(sendError);
+
+    CryptoNote::WalletLegacyTransaction txInfo;
+    m_wallet.getTransaction(tx, txInfo);
+    res.tx_hash = Common::podToHex(txInfo.hash);
+    res.tx_key = Common::podToHex(txInfo.secretKey);
+  }
+  catch (const std::exception& e)
+  {
+    throw JsonRpc::JsonRpcError(WALLET_RPC_ERROR_CODE_GENERIC_TRANSFER_ERROR, e.what());
+  }
+
+  return true;
+}
+
+//------------------------------------------------------------------------------------------------------------------------------
+bool wallet_rpc_server::on_register_pq_account(const wallet_rpc::COMMAND_RPC_REGISTER_PQ_ACCOUNT::request& req,
+  wallet_rpc::COMMAND_RPC_REGISTER_PQ_ACCOUNT::response& res)
+{
+  CryptoNote::AccountKeys keys;
+  m_wallet.getAccountKeys(keys);
+  if (keys.spendSecretKey == CryptoNote::NULL_SECRET_KEY) {
+    throw JsonRpc::JsonRpcError(WALLET_RPC_ERROR_CODE_GENERIC_TRANSFER_ERROR,
+      "Tracking wallet cannot register a PQ account");
+  }
+
+  CryptoNote::PqWalletKeys pq = CryptoNote::derivePqWalletKeys(keys.spendSecretKey);
+  std::string viewHex = Common::toHex(pq.viewPub.data(), pq.viewPub.size());
+  std::string spendHex = Common::toHex(pq.spendPub.data(), pq.spendPub.size());
+
+  {
+    bool registered = false;
+    uint32_t blockHeight = 0, txIndex = 0;
+    std::promise<std::error_code> promise;
+    auto future = promise.get_future();
+    m_node.getPqAccount(viewHex, spendHex, registered, blockHeight, txIndex,
+        [&promise](std::error_code ec) { promise.set_value(ec); });
+    auto ec = future.get();
+    if (ec) {
+      throw JsonRpc::JsonRpcError(WALLET_RPC_ERROR_CODE_GENERIC_TRANSFER_ERROR,
+        "Failed to check existing PQ account: " + ec.message());
+    }
+    if (registered) {
+      CryptoNote::AccountNumber acct{blockHeight, txIndex};
+      throw JsonRpc::JsonRpcError(WALLET_RPC_ERROR_CODE_GENERIC_TRANSFER_ERROR,
+        "This PQ identity already has account number: " + acct.toString());
+    }
+  }
+
+  std::vector<uint8_t> extra;
+  CryptoNote::addPqAccountRegistrationToExtra(extra, pq.viewPub, pq.spendPub);
+  std::string extraString(extra.begin(), extra.end());
+
+  try
+  {
+    CryptoNote::WalletHelper::SendCompleteResultObserver sent;
+    WalletHelper::IWalletRemoveObserverGuard removeGuard(m_wallet, sent);
+
+    CryptoNote::WalletLegacyTransfer transfer;
+    transfer.address = m_wallet.getAddress();
+    transfer.amount = CryptoNote::parameters::DEFAULT_DUST_THRESHOLD;
+
+    CryptoNote::TransactionId tx = m_wallet.sendTransaction(transfer, m_node.getMinimalFee(), extraString, 0, 0);
+    if (tx == WALLET_LEGACY_INVALID_TRANSACTION_ID)
+      throw std::runtime_error("Couldn't send PQ registration transaction");
 
     std::error_code sendError = sent.wait(tx);
     removeGuard.removeObserver();

@@ -72,6 +72,7 @@ std::vector<AdvancedCommand> allCommands()
         AdvancedCommand("pq_transfer", "Send PQ funds to a PQ address", false, true),
         AdvancedCommand("bridge_legacy", "One-way migrate legacy funds to a PQ address", false, true),
         AdvancedCommand("pq_register", "Register a free post-quantum (PQ) account number", false, true),
+        AdvancedCommand("pq_register_paid", "Register a post-quantum (PQ) account number with a fee", false, true),
         AdvancedCommand("pq_account", "Show your post-quantum (PQ) account number", false, true),
     };
 }

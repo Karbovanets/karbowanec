@@ -1436,6 +1436,90 @@ void pqRegister(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node)
     }
 }
 
+void pqRegisterPaid(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node)
+{
+    CryptoNote::WalletGreen &wallet = walletInfo->wallet;
+    if (walletInfo->viewWallet)
+    {
+        std::cout << WarningMsg("View-only wallets cannot register a PQ account.") << std::endl;
+        return;
+    }
+
+    Crypto::SecretKey spendSecret = wallet.getAddressSpendKey(0).secretKey;
+    CryptoNote::PqWalletKeys pq = CryptoNote::derivePqWalletKeys(spendSecret);
+    std::string viewHex = Common::toHex(pq.viewPub.data(), pq.viewPub.size());
+    std::string spendHex = Common::toHex(pq.spendPub.data(), pq.spendPub.size());
+
+    bool registered = false;
+    uint32_t blockHeight = 0, txIndex = 0;
+    {
+        std::promise<std::error_code> promise;
+        auto future = promise.get_future();
+        node.getPqAccount(viewHex, spendHex, registered, blockHeight, txIndex,
+                          [&promise](std::error_code ec) { promise.set_value(ec); });
+        std::error_code ec = future.get();
+        if (ec)
+        {
+            std::cout << WarningMsg("Failed to check existing PQ account: " + ec.message())
+                      << std::endl;
+            return;
+        }
+    }
+    if (registered)
+    {
+        CryptoNote::AccountNumber acct{blockHeight, txIndex};
+        std::cout << WarningMsg("This PQ identity already has account number: ")
+                  << SuccessMsg(acct.toString()) << std::endl;
+        return;
+    }
+
+    std::cout << InformationMsg("Register a PQ account number with a normal fee-paying transaction?")
+              << std::endl;
+    std::cout << "Proceed? (Y/n): ";
+
+    std::string confirm;
+    std::getline(std::cin, confirm);
+    if (!confirm.empty() && confirm[0] != 'y' && confirm[0] != 'Y')
+    {
+        std::cout << WarningMsg("Cancelling registration.") << std::endl;
+        return;
+    }
+
+    std::vector<uint8_t> extra;
+    CryptoNote::addPqAccountRegistrationToExtra(extra, pq.viewPub, pq.spendPub);
+
+    try
+    {
+        CryptoNote::TransactionParameters params;
+        params.destinations.push_back({walletInfo->walletAddress, CryptoNote::parameters::DEFAULT_DUST_THRESHOLD});
+        params.fee = node.getMinimalFee();
+        params.extra = std::string(extra.begin(), extra.end());
+        params.sourceAddresses = {walletInfo->walletAddress};
+        params.changeDestination = walletInfo->walletAddress;
+
+        Crypto::SecretKey txSecretKey;
+        size_t txId = wallet.transfer(params, txSecretKey);
+
+        auto txHash = wallet.getTransaction(txId).hash;
+        std::cout << SuccessMsg("PQ account registration transaction sent!")
+                  << std::endl
+                  << SuccessMsg("Transaction hash: ")
+                  << Common::podToHex(txHash) << std::endl
+                  << InformationMsg("Your PQ account number will be available once the transaction is confirmed.")
+                  << std::endl;
+    }
+    catch (const std::system_error &e)
+    {
+        std::cout << WarningMsg("Failed to send PQ registration transaction: ")
+                  << WarningMsg(e.what()) << std::endl;
+    }
+    catch (const std::exception &e)
+    {
+        std::cout << WarningMsg("Failed to send PQ registration transaction: ")
+                  << WarningMsg(e.what()) << std::endl;
+    }
+}
+
 void pqAccount(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node)
 {
     CryptoNote::WalletGreen &wallet = walletInfo->wallet;

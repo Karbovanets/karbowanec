@@ -573,4 +573,21 @@ using CryptoNote::ISerializer;
     };
   };
 
+  /* Command: register_pq_account */
+  struct COMMAND_RPC_REGISTER_PQ_ACCOUNT
+  {
+    typedef CryptoNote::EMPTY_STRUCT request;
+    struct response
+    {
+      std::string tx_hash;
+      std::string tx_key;
+
+      void serialize(ISerializer& s)
+      {
+        KV_MEMBER(tx_hash)
+        KV_MEMBER(tx_key)
+      }
+    };
+  };
+
 }} //Tools::wallet_rpc

@@ -736,6 +736,7 @@ simple_wallet::simple_wallet(System::Dispatcher& dispatcher, const CryptoNote::C
   m_consoleHandler.setHandler("pq_transfer", std::bind(&simple_wallet::pq_transfer, this, std::placeholders::_1), "pq_transfer <pq_address> <amount> - Send PQ funds to a PQ address");
   m_consoleHandler.setHandler("bridge_legacy", std::bind(&simple_wallet::bridge_legacy, this, std::placeholders::_1), "bridge_legacy <pq_address> <amount> - One-way migrate legacy funds to a PQ address");
   m_consoleHandler.setHandler("pq_register", std::bind(&simple_wallet::pq_register, this, std::placeholders::_1), "Register a free post-quantum (PQ) account number (anti-spam PoW, no fee)");
+  m_consoleHandler.setHandler("pq_register_paid", std::bind(&simple_wallet::pq_register_paid, this, std::placeholders::_1), "Register a post-quantum (PQ) account number with a normal fee-paying transaction");
   m_consoleHandler.setHandler("pq_account", std::bind(&simple_wallet::pq_account, this, std::placeholders::_1), "Show this wallet's PQ account number (once its registration is confirmed)");
   m_consoleHandler.setHandler("help", std::bind(&simple_wallet::help, this, std::placeholders::_1), "Show this help");
   m_consoleHandler.setHandler("exit", std::bind(&simple_wallet::exit, this, std::placeholders::_1), "Close wallet");
@@ -2745,6 +2746,90 @@ bool simple_wallet::pq_register(const std::vector<std::string> &args) {
   } catch (const std::exception& e) {
     fail_msg_writer() << "Failed to build registration: " << e.what();
   }
+  return true;
+}
+//----------------------------------------------------------------------------------------------------
+bool simple_wallet::pq_register_paid(const std::vector<std::string> &args) {
+  if (!args.empty()) {
+    fail_msg_writer() << "usage: pq_register_paid";
+    return true;
+  }
+  if (m_trackingWallet) {
+    fail_msg_writer() << "This is a tracking wallet and cannot register a PQ account.";
+    return true;
+  }
+  CryptoNote::AccountKeys keys;
+  m_wallet->getAccountKeys(keys);
+  if (keys.spendSecretKey == boost::value_initialized<Crypto::SecretKey>()) {
+    fail_msg_writer() << "Wallet has no spend secret key.";
+    return true;
+  }
+  CryptoNote::PqWalletKeys pq = CryptoNote::derivePqWalletKeys(keys.spendSecretKey);
+
+  std::string viewHex = Common::toHex(pq.viewPub.data(), pq.viewPub.size());
+  std::string spendHex = Common::toHex(pq.spendPub.data(), pq.spendPub.size());
+  bool registered = false;
+  uint32_t blockHeight = 0, txIndex = 0;
+  {
+    std::promise<std::error_code> promise;
+    auto future = promise.get_future();
+    m_node->getPqAccount(viewHex, spendHex, registered, blockHeight, txIndex,
+                         [&promise](std::error_code ec) { promise.set_value(ec); });
+    std::error_code ec = future.get();
+    if (ec) {
+      fail_msg_writer() << "Failed to check existing PQ account: " << ec.message();
+      return true;
+    }
+  }
+  if (registered) {
+    CryptoNote::AccountNumber acct{blockHeight, txIndex};
+    fail_msg_writer() << "This PQ identity already has account number: " << acct.toString();
+    return true;
+  }
+
+  std::cout << "Register a PQ account number with a normal fee-paying transaction? (Y/n): ";
+  std::string confirm;
+  std::getline(std::cin, confirm);
+  if (!confirm.empty() && confirm[0] != 'y' && confirm[0] != 'Y') {
+    logger(INFO) << "Cancelled.";
+    return true;
+  }
+
+  std::vector<uint8_t> extra;
+  CryptoNote::addPqAccountRegistrationToExtra(extra, pq.viewPub, pq.spendPub);
+  std::string extraString(extra.begin(), extra.end());
+
+  try {
+    CryptoNote::WalletLegacyTransfer transfer;
+    transfer.address = m_wallet->getAddress();
+    transfer.amount = CryptoNote::parameters::DEFAULT_DUST_THRESHOLD;
+
+    CryptoNote::WalletHelper::SendCompleteResultObserver sent;
+    WalletHelper::IWalletRemoveObserverGuard removeGuard(*m_wallet, sent);
+
+    CryptoNote::TransactionId tx = m_wallet->sendTransaction(transfer, m_node->getMinimalFee(), extraString, 0, 0);
+    if (tx == WALLET_LEGACY_INVALID_TRANSACTION_ID) {
+      fail_msg_writer() << "Can't send PQ registration transaction";
+      return true;
+    }
+
+    std::error_code sendError = sent.wait(tx);
+    removeGuard.removeObserver();
+
+    if (sendError) {
+      fail_msg_writer() << sendError.message();
+      return true;
+    }
+
+    CryptoNote::WalletLegacyTransaction txInfo;
+    m_wallet->getTransaction(tx, txInfo);
+    success_msg_writer(true) << "PQ account registration transaction sent!";
+    success_msg_writer(true) << "Transaction hash: " << Common::podToHex(txInfo.hash);
+    logger(INFO) << "Your PQ account number will be available once the transaction is confirmed.";
+  } catch (const std::exception& e) {
+    fail_msg_writer() << "Failed to send PQ registration transaction: " << e.what();
+  }
+
   return true;
 }
 //----------------------------------------------------------------------------------------------------

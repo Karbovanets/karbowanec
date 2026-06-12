@@ -82,4 +82,6 @@ void bridgeLegacy(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &nod
 
 void pqRegister(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node);
 
+void pqRegisterPaid(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node);
+
 void pqAccount(std::shared_ptr<WalletInfo> walletInfo, CryptoNote::INode &node);
