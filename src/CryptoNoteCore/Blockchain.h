@@ -100,7 +100,7 @@ namespace CryptoNote {
     uint32_t getCurrentBlockchainHeight();
     Crypto::Hash getTailId();
     Crypto::Hash getTailId(uint32_t& height);
-    difficulty_type getDifficultyForNextBlock(const Crypto::Hash& prevHash);
+    Difficulty getDifficultyForNextBlock(const Crypto::Hash& prevHash);
     uint64_t getBlockTimestamp(uint32_t height);
     uint64_t getCoinsInCirculation();
     uint64_t getCoinsInCirculation(uint32_t height);
@@ -127,7 +127,7 @@ namespace CryptoNote {
     uint64_t getCurrentCumulativeBlocksizeLimit();
     uint64_t blockDifficulty(size_t i);
     uint64_t blockCumulativeDifficulty(size_t i);
-    bool getblockEntry(size_t i, uint64_t& block_cumulative_size, difficulty_type& difficulty,
+    bool getblockEntry(size_t i, uint64_t& block_cumulative_size, Difficulty& difficulty,
                        uint64_t& already_generated_coins, uint64_t& reward,
                        uint64_t& transactions_count, uint64_t& timestamp);
     bool getBlockStats(uint32_t startHeight, uint32_t endHeight, std::vector<BlockStatsEntry>& stats);
@@ -246,7 +246,7 @@ namespace CryptoNote {
     bool is_tx_spendtime_unlocked(uint64_t unlock_time, uint32_t height);
 
     bool checkProofOfWork(Crypto::cn_context& context, const Block& block,
-                           difficulty_type currentDiffic, Crypto::Hash& proofOfWork);
+                           Difficulty currentDiffic, Crypto::Hash& proofOfWork);
     bool getBlockLongHash(Crypto::cn_context& context, const Block& b, Crypto::Hash& res);
 
   private:
@@ -267,7 +267,7 @@ namespace CryptoNote {
       Block bl;
       uint32_t height                 = 0;
       uint64_t block_cumulative_size  = 0;
-      difficulty_type cumulative_difficulty = 0;
+      Difficulty cumulative_difficulty = 0;
       uint64_t already_generated_coins = 0;
       std::vector<TransactionEntry> transactions;
 
@@ -340,7 +340,7 @@ namespace CryptoNote {
                                    block_verification_context& bvc,
                                    bool sendNewAlternativeBlockMessage = true);
     bool checkProofOfWork(Crypto::cn_context& context, const Block& block,
-                           difficulty_type currentDiffic, Crypto::Hash& proofOfWork,
+                           Difficulty currentDiffic, Crypto::Hash& proofOfWork,
                            const std::list<Crypto::Hash>& alt_chain, bool no_blobs = false);
     bool getBlockLongHash(Crypto::cn_context& context, const Block& b, Crypto::Hash& res,
                            const std::list<Crypto::Hash>& alt_chain, bool no_blobs = false);

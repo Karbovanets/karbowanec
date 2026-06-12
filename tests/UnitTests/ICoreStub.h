@@ -79,7 +79,7 @@ public:
   virtual bool getBlockReward(uint8_t blockMajorVersion, size_t medianSize, size_t currentBlockSize, uint64_t alreadyGeneratedCoins, uint64_t fee,
     uint64_t& reward, int64_t& emissionChange) override;
   virtual bool scanOutputkeysForIndices(const CryptoNote::KeyInput& txInToKey, std::list<std::pair<Crypto::Hash, size_t>>& outputReferences) override;
-  virtual bool getBlockDifficulty(uint32_t height, CryptoNote::difficulty_type& difficulty) override;
+  virtual bool getBlockDifficulty(uint32_t height, CryptoNote::Difficulty& difficulty) override;
   virtual bool getBlockContainingTx(const Crypto::Hash& txId, Crypto::Hash& blockId, uint32_t& blockHeight) override;
   virtual bool getGeneratedTransactionsNumber(uint32_t height, uint64_t& generatedTransactions) override;
   virtual bool getOrphanBlocksByHeight(uint32_t height, std::vector<CryptoNote::Block>& blocks) override;
@@ -99,7 +99,7 @@ public:
   virtual bool getTransactionHeight(const Crypto::Hash &txId, uint32_t& blockHeight) override;
   virtual bool getTransactionsWithOutputGlobalIndexes(const std::vector<Crypto::Hash>& txs_ids, std::list<Crypto::Hash>& missed_txs, std::vector<std::pair<CryptoNote::Transaction, std::vector<uint32_t>>>& txs) override;
   virtual bool getTransaction(const Crypto::Hash& id, CryptoNote::Transaction& tx, bool checkTxPool = false) override;
-  virtual bool getBlockCumulativeDifficulty(uint32_t height, CryptoNote::difficulty_type& difficulty) override;
+  virtual bool getBlockCumulativeDifficulty(uint32_t height, CryptoNote::Difficulty& difficulty) override;
   virtual bool getBlockTimestamp(uint32_t height, uint64_t& timestamp) override;
   virtual std::vector<Crypto::Hash> getTransactionHashesByPaymentId(const Crypto::Hash& paymentId) override;
   virtual uint64_t getMinimalFee(uint32_t height) override;
@@ -113,7 +113,7 @@ public:
   virtual uint8_t getBlockMajorVersionForHeight(uint32_t height) override;
   virtual uint8_t getCurrentBlockMajorVersion() override;
   virtual size_t getAlternativeBlocksCount() override;
-  virtual bool getblockEntry(uint32_t height, uint64_t& block_cumulative_size, CryptoNote::difficulty_type& difficulty, uint64_t& already_generated_coins, uint64_t& reward, uint64_t& transactions_count, uint64_t& timestamp) override;
+  virtual bool getblockEntry(uint32_t height, uint64_t& block_cumulative_size, CryptoNote::Difficulty& difficulty, uint64_t& already_generated_coins, uint64_t& reward, uint64_t& transactions_count, uint64_t& timestamp) override;
   virtual bool getBlockStats(uint32_t startHeight, uint32_t endHeight, std::vector<CryptoNote::BlockStatsEntry>& stats) override;
   virtual bool getBlockStats(const std::vector<uint32_t>& heights, std::vector<CryptoNote::BlockStatsEntry>& stats) override;
   virtual void rollbackBlockchain(const uint32_t height) override;

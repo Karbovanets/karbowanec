@@ -90,7 +90,7 @@ public:
   bool constructBlockManually(CryptoNote::Block& blk, const CryptoNote::Block& prevBlock,
     const CryptoNote::AccountBase& minerAcc, int actualParams = bf_none, uint8_t majorVer = 0,
     uint8_t minorVer = 0, uint64_t timestamp = 0, const Crypto::Hash& previousBlockHash = Crypto::Hash(),
-    const CryptoNote::difficulty_type& diffic = 1, const CryptoNote::Transaction& baseTransaction = CryptoNote::Transaction(),
+    const CryptoNote::Difficulty& diffic = 1, const CryptoNote::Transaction& baseTransaction = CryptoNote::Transaction(),
     const std::vector<Crypto::Hash>& transactionHashes = std::vector<Crypto::Hash>(), size_t txsSizes = 0, uint64_t fee = 0);
   bool constructBlockManuallyTx(CryptoNote::Block& blk, const CryptoNote::Block& prevBlock,
     const CryptoNote::AccountBase& minerAcc, const std::vector<Crypto::Hash>& transactionHashes, size_t txsSize);
@@ -103,8 +103,8 @@ private:
   std::unordered_map<Crypto::Hash, BlockInfo> m_blocksInfo;
 };
 
-inline CryptoNote::difficulty_type getTestDifficulty() { return 1; }
-void fillNonce(CryptoNote::Block& blk, const CryptoNote::difficulty_type& diffic);
+inline CryptoNote::Difficulty getTestDifficulty() { return 1; }
+void fillNonce(CryptoNote::Block& blk, const CryptoNote::Difficulty& diffic);
 
 bool constructMinerTxManually(const CryptoNote::Currency& currency, uint8_t blockMajorVersion, uint32_t height, uint64_t alreadyGeneratedCoins,
   const CryptoNote::AccountPublicAddress& minerAddress, CryptoNote::Transaction& tx, uint64_t fee, CryptoNote::KeyPair* pTxKey = 0);

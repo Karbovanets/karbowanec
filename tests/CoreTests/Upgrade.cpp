@@ -217,7 +217,7 @@ bool gen_upgrade::checkBlockTemplateVersion(CryptoNote::core& c, uint8_t expecte
   account.generate();
 
   Block b;
-  difficulty_type diff;
+  Difficulty diff;
   uint32_t height;
   CHECK_TEST_CONDITION(c.get_block_template(b, account.getAccountKeys().address, diff, height, BinaryArray()));
   CHECK_EQ(static_cast<int>(b.majorVersion), static_cast<int>(expectedMajorVersion));

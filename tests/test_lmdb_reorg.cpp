@@ -65,7 +65,7 @@ bool buildMainBlock(CryptoNote::Core& core,
     return false;
   }
 
-  const CryptoNote::difficulty_type difficulty = core.getNextBlockDifficulty();
+  const CryptoNote::Difficulty difficulty = core.getNextBlockDifficulty();
   if (difficulty > 1) {
     fillNonce(out, difficulty);
   }
@@ -105,7 +105,7 @@ bool buildAlternativeBlock(CryptoNote::Core& core,
     return false;
   }
 
-  const CryptoNote::difficulty_type difficulty =
+  const CryptoNote::Difficulty difficulty =
       core.get_blockchain_storage().getDifficultyForNextBlock(prevHash);
   if (difficulty > 1) {
     fillNonce(out, difficulty);

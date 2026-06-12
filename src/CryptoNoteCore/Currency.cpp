@@ -419,8 +419,8 @@ namespace CryptoNote {
     return txExtraSize > 100 ? minFee / 100 * (txExtraSize - 100) : 0;
   }
 
-  difficulty_type Currency::nextDifficulty(uint32_t height, uint8_t blockMajorVersion, std::vector<uint64_t> timestamps,
-    std::vector<difficulty_type> cumulativeDifficulties) const {
+  Difficulty Currency::nextDifficulty(uint32_t height, uint8_t blockMajorVersion, std::vector<uint64_t> timestamps,
+    std::vector<Difficulty> cumulativeDifficulties) const {
     if (blockMajorVersion >= BLOCK_MAJOR_VERSION_5) {
       return nextDifficultyV5(height, blockMajorVersion, timestamps, cumulativeDifficulties);
     }
@@ -438,8 +438,8 @@ namespace CryptoNote {
     }
   }
 
-  difficulty_type Currency::nextDifficultyV1(std::vector<uint64_t> timestamps,
-        std::vector<difficulty_type> cumulativeDifficulties) const {
+  Difficulty Currency::nextDifficultyV1(std::vector<uint64_t> timestamps,
+        std::vector<Difficulty> cumulativeDifficulties) const {
     assert(m_difficultyWindow >= 2);
 
     if (timestamps.size() > m_difficultyWindow) {
@@ -472,7 +472,7 @@ namespace CryptoNote {
       timeSpan = 1;
     }
 
-    difficulty_type totalWork = cumulativeDifficulties[cutEnd - 1] - cumulativeDifficulties[cutBegin];
+    Difficulty totalWork = cumulativeDifficulties[cutEnd - 1] - cumulativeDifficulties[cutBegin];
     assert(totalWork > 0);
 
     uint64_t low, high;
@@ -484,8 +484,8 @@ namespace CryptoNote {
     return (low + timeSpan - 1) / timeSpan;
   }
 
-  difficulty_type Currency::nextDifficultyV2(std::vector<uint64_t> timestamps,
-    std::vector<difficulty_type> cumulativeDifficulties) const {
+  Difficulty Currency::nextDifficultyV2(std::vector<uint64_t> timestamps,
+    std::vector<Difficulty> cumulativeDifficulties) const {
 
     // Difficulty calculation v. 2
     // based on Zawy difficulty algorithm v1.0
@@ -515,7 +515,7 @@ namespace CryptoNote {
       timeSpan = 1;
     }
 
-    difficulty_type totalWork = cumulativeDifficulties.back() - cumulativeDifficulties.front();
+    Difficulty totalWork = cumulativeDifficulties.back() - cumulativeDifficulties.front();
     assert(totalWork > 0);
 
     // uint64_t nextDiffZ = totalWork * m_difficultyTarget / timeSpan; 
@@ -538,11 +538,11 @@ namespace CryptoNote {
     // with difficulty-1 work, and integer division can truncate the V2 result
     // to 0. Core treats that as "difficulty overhead" and refuses to create
     // the next block template.
-    return std::max<difficulty_type>(1, nextDiffZ);
+    return std::max<Difficulty>(1, nextDiffZ);
   }
 
-  difficulty_type Currency::nextDifficultyV3(std::vector<uint64_t> timestamps,
-    std::vector<difficulty_type> cumulativeDifficulties) const {
+  Difficulty Currency::nextDifficultyV3(std::vector<uint64_t> timestamps,
+    std::vector<Difficulty> cumulativeDifficulties) const {
 
     // LWMA difficulty algorithm
     // Copyright (c) 2017-2018 Zawy
@@ -606,7 +606,7 @@ namespace CryptoNote {
     // static_cast<uint64_t> of a sub-1.0 LWMA result can truncate to 0 in the
     // difficulty-1 regime of a fresh chain — which trips Blockchain's
     // "difficulty overhead" reject. Mainnet is unaffected (already >= 100000).
-    return std::max<difficulty_type>(1, next_difficulty);
+    return std::max<Difficulty>(1, next_difficulty);
   }
 
   template <typename T>
@@ -615,8 +615,8 @@ namespace CryptoNote {
     return v < lo ? lo : v > hi ? hi : v;
   }
 
-  difficulty_type Currency::nextDifficultyV4(uint32_t height, uint8_t blockMajorVersion,
-    std::vector<std::uint64_t> timestamps, std::vector<difficulty_type> cumulativeDifficulties) const {
+  Difficulty Currency::nextDifficultyV4(uint32_t height, uint8_t blockMajorVersion,
+    std::vector<std::uint64_t> timestamps, std::vector<Difficulty> cumulativeDifficulties) const {
 
     // LWMA-2 / LWMA-3 difficulty algorithm 
     // Copyright (c) 2017-2018 Zawy, MIT License
@@ -688,14 +688,14 @@ namespace CryptoNote {
     // prev_D (e.g. the difficulty-1 regime of a fresh test chain), so next_D
     // can land on 0 — which trips Blockchain's "difficulty overhead" reject.
     // Mainnet is unaffected (already >= 100000). Mirrors nextDifficultyV5.
-    return std::max<difficulty_type>(1, next_D);
+    return std::max<Difficulty>(1, next_D);
   }
 
-  difficulty_type Currency::nextDifficultyV5(
+  Difficulty Currency::nextDifficultyV5(
     uint32_t height,
     uint8_t blockMajorVersion,
     std::vector<std::uint64_t> timestamps,
-    std::vector<difficulty_type> cumulativeDifficulties) const {
+    std::vector<Difficulty> cumulativeDifficulties) const {
 
     // LWMA-1 difficulty algorithm
     // Copyright (c) 2017-2018 Zawy, MIT License
@@ -714,10 +714,10 @@ namespace CryptoNote {
       difficulty or interact badly with the small available window.
     */
     if (!isTestnet() && height == upgradeHeightV5) {
-      difficulty_type resetDifficulty =
+      Difficulty resetDifficulty =
         cumulativeDifficulties[0] / height / RESET_WORK_FACTOR_V5;
 
-      return std::max<difficulty_type>(1, resetDifficulty);
+      return std::max<Difficulty>(1, resetDifficulty);
     }
 
     uint32_t count =
@@ -835,10 +835,10 @@ namespace CryptoNote {
       next_D = 100000;
     }
 
-    return std::max<difficulty_type>(1, next_D);
+    return std::max<Difficulty>(1, next_D);
   }
 
-  bool Currency::checkProofOfWorkV1(Crypto::cn_context& context, const Block& block, difficulty_type currentDiffic,
+  bool Currency::checkProofOfWorkV1(Crypto::cn_context& context, const Block& block, Difficulty currentDiffic,
     Crypto::Hash& proofOfWork) const {
     if (BLOCK_MAJOR_VERSION_2 == block.majorVersion || BLOCK_MAJOR_VERSION_3 == block.majorVersion) {
       return false;
@@ -851,7 +851,7 @@ namespace CryptoNote {
     return check_hash(proofOfWork, currentDiffic);
   }
 
-  bool Currency::checkProofOfWorkV2(Crypto::cn_context& context, const Block& block, difficulty_type currentDiffic,
+  bool Currency::checkProofOfWorkV2(Crypto::cn_context& context, const Block& block, Difficulty currentDiffic,
     Crypto::Hash& proofOfWork) const {
     if (block.majorVersion < BLOCK_MAJOR_VERSION_2) {
       return false;
@@ -892,7 +892,7 @@ namespace CryptoNote {
     return true;
   }
 
-  bool Currency::checkProofOfWork(Crypto::cn_context& context, const Block& block, difficulty_type currentDiffic, Crypto::Hash& proofOfWork) const {
+  bool Currency::checkProofOfWork(Crypto::cn_context& context, const Block& block, Difficulty currentDiffic, Crypto::Hash& proofOfWork) const {
     switch (block.majorVersion) {
     case BLOCK_MAJOR_VERSION_1:
     case BLOCK_MAJOR_VERSION_4:

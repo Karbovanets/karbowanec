@@ -20,7 +20,7 @@ struct BlockStatsEntry {
   uint64_t alreadyGeneratedCoins;
   uint64_t transactionsCount;
   uint64_t blockSize;
-  difficulty_type difficulty;
+  Difficulty difficulty;
   uint64_t reward;
   uint64_t timestamp;
 };
