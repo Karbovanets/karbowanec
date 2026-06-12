@@ -32,8 +32,8 @@
 // Transaction the node will accept; tests previously hand-rolled this.
 //
 // This header covers TX_PQ (PQ inputs -> PQ outputs), which is node-independent
-// (no ring/mixin resolution). TX_BRIDGE (classical inputs -> PQ outputs) reuses
-// the legacy ring-signature machinery and is added separately.
+// (no ring/mixin resolution). TX_BRIDGE (classical inputs -> PQ outputs, with
+// optional CN change) reuses the legacy ring-signature machinery.
 
 namespace CryptoNote {
 
@@ -60,6 +60,13 @@ struct PqSendOutput {
 struct BridgeLegacyInput {
   TransactionTypes::InputKeyInfo keyInfo;
   AccountKeys                    senderKeys;
+};
+
+// A classical CryptoNote output produced by a TX_BRIDGE, used for returning
+// unbridged change back to the sender's ECC wallet.
+struct BridgeKeyOutput {
+  AccountPublicAddress destination;
+  uint64_t             amount = 0;
 };
 
 // The PQ "inputs hash" a wallet binds into every output's out_context. This is a
@@ -94,9 +101,16 @@ Transaction buildPqTransaction(const std::vector<PqSpendInput>& inputs,
 
 // Build and sign a TX_BRIDGE (one-way legacy -> PQ migration). Classical inputs
 // are ring-signed exactly as a v1 transaction (the signature covers the prefix,
-// which includes the PQ outputs); outputs are PQ. `inputs` is taken by non-const
-// reference because key-image / ephemeral-key generation is performed per input.
-// Throws std::runtime_error on empty/oversized sets or if outputs exceed inputs.
+// which includes PQ outputs and any classical change). At least one PQ output is
+// required; optional BridgeKeyOutput entries return unbridged change to ECC CN.
+// `inputs` is taken by non-const reference because key-image / ephemeral-key
+// generation is performed per input. Throws std::runtime_error on empty/oversized
+// sets or if outputs exceed inputs.
+Transaction buildBridgeTransaction(std::vector<BridgeLegacyInput>& inputs,
+                                   const std::vector<PqSendOutput>& pqOutputs,
+                                   const std::vector<BridgeKeyOutput>& keyOutputs,
+                                   uint64_t unlockTime = 0);
+
 Transaction buildBridgeTransaction(std::vector<BridgeLegacyInput>& inputs,
                                    const std::vector<PqSendOutput>& outputs,
                                    uint64_t unlockTime = 0);

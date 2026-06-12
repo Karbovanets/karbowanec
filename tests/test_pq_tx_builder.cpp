@@ -13,7 +13,9 @@
 #include "Wallet/PqWallet.h"
 #include "CryptoNoteCore/PqValidation.h"
 #include "CryptoNoteCore/Account.h"
+#include "CryptoNoteCore/CryptoNoteFormatUtils.h"
 #include "CryptoNoteCore/CryptoNoteTools.h"
+#include "CryptoNoteCore/TransactionExtra.h"
 #include "crypto_pq/PqOutputBuilder.h"
 #include "crypto_pq/PqDerive.h"
 #include "crypto/crypto.h"
@@ -251,6 +253,33 @@ TEST(PqBridgeBuilder, ShapeAndRingSignaturesValid) {
     std::vector<const Crypto::PublicKey*> ring{ &ins[0].keyInfo.outputs[0].targetKey };
     EXPECT_TRUE(Crypto::check_ring_signature(prefixHash, kin.keyImage, ring,
                                              tx.signatures[0].data()));
+}
+
+TEST(PqBridgeBuilder, SupportsClassicalChangeOutput) {
+    CryptoNote::AccountBase sender; sender.generate();
+    PqWalletKeys recip = derivePqWalletKeys(spendSecret(9, 1));
+
+    std::vector<BridgeLegacyInput> ins{ legacyInput(sender, 1000000, 0) };
+    PqSendOutput pqOut{recip.viewPub, recip.spendPub, 700000};
+    BridgeKeyOutput change{sender.getAccountKeys().address, 200000};
+    Transaction tx = buildBridgeTransaction(ins, {pqOut}, {change});
+
+    ASSERT_EQ(tx.outputs.size(), 2u);
+    EXPECT_EQ(tx.outputs[0].target.type(), typeid(PqOutput));
+    EXPECT_EQ(tx.outputs[1].target.type(), typeid(KeyOutput));
+    EXPECT_EQ(tx.outputs[1].amount, 200000u);
+
+    std::string err;
+    EXPECT_TRUE(checkBridgeTransactionSemantic(tx, &err)) << err;
+
+    std::vector<size_t> outs;
+    uint64_t received = 0;
+    ASSERT_TRUE(lookup_acc_outs(sender.getAccountKeys(), tx,
+                                getTransactionPublicKeyFromExtra(tx.extra),
+                                outs, received));
+    ASSERT_EQ(outs.size(), 1u);
+    EXPECT_EQ(outs[0], 1u);
+    EXPECT_EQ(received, 200000u);
 }
 
 TEST(PqBridgeBuilder, RecipientScansBridgedOutput) {

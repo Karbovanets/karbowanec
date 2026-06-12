@@ -59,9 +59,11 @@ bool checkPqTransactionSemantic(const Transaction& tx, std::string* error);
 // validated by the existing v1 path); only the bridge-specific shape is checked
 // here:
 //  - subtype == TX_BRIDGE
-//  - non-empty; every input is a KeyInput (no PqInput); every output is a
-//    PqOutput (no classical output) -> one-way, no mixed families
-//  - outputs <= MAX_PQ_OUTPUTS_PER_TX; PqOutput field lengths exact; amount != 0
+//  - non-empty; every input is a KeyInput (no PqInput)
+//  - at least one PqOutput; optional KeyOutput entries are allowed only as
+//    classical CN change back to the sender
+//  - PQ outputs <= MAX_PQ_OUTPUTS_PER_TX; PqOutput field lengths exact; every
+//    output amount != 0; KeyOutput keys must be valid and unique
 //  - unlockTime == 0; serialized size <= MAX_PQ_TX_SIZE
 // Balance, ring signatures, key-image double-spend and fee floor are enforced by
 // the classical pipeline (check_tx_semantic / checkTransactionInputs).

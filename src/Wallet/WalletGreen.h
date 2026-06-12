@@ -56,8 +56,8 @@ public:
   std::vector<PqSpendInput> pqSpendableInputs() const;
   uint32_t pqSyncedHeight() const;
   // Build a signed TX_BRIDGE migrating `amount` of the LEGACY balance (across all
-  // of this wallet's addresses) to the given PQ recipient, PQ change to this
-  // wallet's own PQ address. `minimumFee` is the normal legacy minimum fee
+  // of this wallet's addresses) to the given PQ recipient, with unbridged change
+  // returned to the primary CN address. `minimumFee` is the normal legacy minimum fee
   // because TX_BRIDGE uses classical KeyInputs. Throws on insufficient unlocked
   // funds.
   Transaction createBridgeTransaction(const CryptoPQ::KemPublicKey& destViewPub,

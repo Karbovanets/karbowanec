@@ -3498,7 +3498,6 @@ Transaction WalletGreen::createBridgeTransaction(const CryptoPQ::KemPublicKey& d
   if (index.empty()) {
     throw std::runtime_error("wallet has no addresses");
   }
-  Crypto::SecretKey primarySpend = index[0].spendSecretKey;
   for (const auto& rec : index) {
     if (rec.container == nullptr || rec.spendSecretKey == NULL_SECRET_KEY) {
       continue;
@@ -3582,14 +3581,15 @@ Transaction WalletGreen::createBridgeTransaction(const CryptoPQ::KemPublicKey& d
     selected.push_back(std::move(bi));
   }
 
-  PqWalletKeys pq = derivePqWalletKeys(primarySpend);
+  AccountPublicAddress changeAddress{index[0].spendPublicKey, m_viewPublicKey};
   auto buildWith = [&](uint64_t change) {
     std::vector<PqSendOutput> outsPq;
     outsPq.push_back(PqSendOutput{destViewPub, destSpendPub, amount});
+    std::vector<BridgeKeyOutput> outsKey;
     if (change > 0) {
-      outsPq.push_back(PqSendOutput{pq.viewPub, pq.spendPub, change});
+      outsKey.push_back(BridgeKeyOutput{changeAddress, change});
     }
-    return buildBridgeTransaction(selected, outsPq);
+    return buildBridgeTransaction(selected, outsPq, outsKey);
   };
 
   Transaction draft = buildWith(sumIn - amount);

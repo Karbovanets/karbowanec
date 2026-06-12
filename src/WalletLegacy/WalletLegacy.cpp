@@ -763,15 +763,14 @@ Transaction WalletLegacy::createBridgeTransaction(const CryptoPQ::KemPublicKey& 
     selected.push_back(std::move(bi));
   }
 
-  PqWalletKeys pq = derivePqWalletKeys(accKeys.spendSecretKey);
-
   auto buildWith = [&](uint64_t change) {
     std::vector<PqSendOutput> outsPq;
     outsPq.push_back(PqSendOutput{destViewPub, destSpendPub, amount});
+    std::vector<BridgeKeyOutput> outsKey;
     if (change > 0) {
-      outsPq.push_back(PqSendOutput{pq.viewPub, pq.spendPub, change});
+      outsKey.push_back(BridgeKeyOutput{accKeys.address, change});
     }
-    return buildBridgeTransaction(selected, outsPq);
+    return buildBridgeTransaction(selected, outsPq, outsKey);
   };
 
   Transaction draft = buildWith(sumIn - amount);

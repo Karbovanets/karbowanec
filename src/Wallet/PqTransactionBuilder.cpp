@@ -146,16 +146,17 @@ Transaction buildPqTransaction(const std::vector<PqSpendInput>& inputs,
 }
 
 Transaction buildBridgeTransaction(std::vector<BridgeLegacyInput>& inputs,
-                                   const std::vector<PqSendOutput>& outputs,
+                                   const std::vector<PqSendOutput>& pqOutputs,
+                                   const std::vector<BridgeKeyOutput>& keyOutputs,
                                    uint64_t unlockTime) {
   if (inputs.empty()) {
     throw std::runtime_error("buildBridgeTransaction: no inputs");
   }
-  if (outputs.empty()) {
-    throw std::runtime_error("buildBridgeTransaction: no outputs");
+  if (pqOutputs.empty()) {
+    throw std::runtime_error("buildBridgeTransaction: no PQ outputs");
   }
-  if (outputs.size() > parameters::MAX_PQ_OUTPUTS_PER_TX) {
-    throw std::runtime_error("buildBridgeTransaction: too many outputs");
+  if (pqOutputs.size() > parameters::MAX_PQ_OUTPUTS_PER_TX) {
+    throw std::runtime_error("buildBridgeTransaction: too many PQ outputs");
   }
 
   Transaction tx;
@@ -164,16 +165,12 @@ Transaction buildBridgeTransaction(std::vector<BridgeLegacyInput>& inputs,
   tx.unlockTime = unlockTime;
   tx.extra.clear();
 
-  // Bridge outputs are all PQ (no stealth tx key is needed to derive them), but
-  // the sender's CLASSICAL wallet detects the spend of its legacy inputs only
-  // for transactions that carry a transaction public key (the classical scanner
-  // skips key-less transactions). So attach a throwaway tx public key in extra
-  // purely so the legacy side marks the migrated outputs as spent.
-  {
-    KeyPair txkey;
-    Crypto::generate_keys(txkey.publicKey, txkey.secretKey);
-    addTransactionPublicKeyToExtra(tx.extra, txkey.publicKey);
-  }
+  // Bridge transactions carry a classical transaction public key so ordinary CN
+  // wallet synchronizers can discover any KeyOutput change and mark migrated
+  // legacy inputs as spent.
+  KeyPair txkey;
+  Crypto::generate_keys(txkey.publicKey, txkey.secretKey);
+  addTransactionPublicKeyToExtra(tx.extra, txkey.publicKey);
 
   // Classical KeyInputs (one ring each). Generate the key image + ephemeral key
   // for the real output; record the per-input ephemeral secret for signing.
@@ -204,11 +201,11 @@ Transaction buildBridgeTransaction(std::vector<BridgeLegacyInput>& inputs,
   // Wallet-side inputsHash (key-image based for bridge); seeds out_context.
   CryptoPQ::Hash256 ih = pqTransactionInputsHash(tx);
 
-  // PQ outputs.
-  tx.outputs.reserve(outputs.size());
+  // PQ recipient outputs first; optional CN change is appended afterwards.
+  tx.outputs.reserve(pqOutputs.size() + keyOutputs.size());
   uint64_t sumOut = 0;
-  for (size_t i = 0; i < outputs.size(); ++i) {
-    const PqSendOutput& so = outputs[i];
+  for (size_t i = 0; i < pqOutputs.size(); ++i) {
+    const PqSendOutput& so = pqOutputs[i];
     CryptoPQ::PqBuiltOutput built = CryptoPQ::buildPqOutput(
         so.recipientViewPub, so.recipientSpendPub, ih,
         static_cast<uint32_t>(i), so.amount);
@@ -227,6 +224,29 @@ Transaction buildBridgeTransaction(std::vector<BridgeLegacyInput>& inputs,
       throw std::runtime_error("buildBridgeTransaction: output amount overflow");
     }
     sumOut += so.amount;
+  }
+
+  for (const BridgeKeyOutput& ko : keyOutputs) {
+    Crypto::KeyDerivation derivation;
+    if (!Crypto::generate_key_derivation(ko.destination.viewPublicKey, txkey.secretKey, derivation)) {
+      throw std::runtime_error("buildBridgeTransaction: failed to derive change key");
+    }
+
+    KeyOutput keyOutput;
+    if (!Crypto::derive_public_key(derivation, tx.outputs.size(),
+                                   ko.destination.spendPublicKey, keyOutput.key)) {
+      throw std::runtime_error("buildBridgeTransaction: failed to derive change output");
+    }
+
+    TransactionOutput out;
+    out.amount = ko.amount;
+    out.target = keyOutput;
+    tx.outputs.push_back(std::move(out));
+
+    if (sumOut + ko.amount < sumOut) {
+      throw std::runtime_error("buildBridgeTransaction: output amount overflow");
+    }
+    sumOut += ko.amount;
   }
 
   if (sumIn < sumOut) {
@@ -254,6 +274,13 @@ Transaction buildBridgeTransaction(std::vector<BridgeLegacyInput>& inputs,
   }
 
   return tx;
+}
+
+Transaction buildBridgeTransaction(std::vector<BridgeLegacyInput>& inputs,
+                                   const std::vector<PqSendOutput>& outputs,
+                                   uint64_t unlockTime) {
+  const std::vector<BridgeKeyOutput> keyOutputs;
+  return buildBridgeTransaction(inputs, outputs, keyOutputs, unlockTime);
 }
 
 Transaction buildFreeRegTransaction(const CryptoPQ::KemPublicKey& viewPub,

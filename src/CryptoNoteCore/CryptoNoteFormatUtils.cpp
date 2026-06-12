@@ -160,25 +160,25 @@ bool check_inputs_types_supported(const TransactionPrefix& tx) {
 }
 
 bool check_outs_valid(const TransactionPrefix& tx, std::string* error) {
-  // PQ transactions (v2): outputs must all be PqOutput with a non-zero amount.
-  // Deeper PQ shape (field lengths, limits) is checked by checkPqTransactionSemantic.
-  if (tx.version >= TRANSACTION_VERSION_PQ) {
-    for (const TransactionOutput& out : tx.outputs) {
-      if (out.target.type() != typeid(PqOutput)) {
-        if (error) *error = "PQ tx output is not a PqOutput";
+  std::unordered_set<PublicKey> keys_seen;
+  for (const TransactionOutput& out : tx.outputs) {
+    if (tx.version >= TRANSACTION_VERSION_PQ && out.target.type() == typeid(PqOutput)) {
+      if (tx.txType != TX_PQ && tx.txType != TX_BRIDGE) {
+        if (error) *error = "PQ output is not allowed for this tx type";
         return false;
       }
       if (out.amount == 0) {
         if (error) *error = "Zero amount output";
         return false;
       }
+      continue;
     }
-    return true;
-  }
 
-  std::unordered_set<PublicKey> keys_seen;
-  for (const TransactionOutput& out : tx.outputs) {
     if (out.target.type() == typeid(KeyOutput)) {
+      if (tx.version >= TRANSACTION_VERSION_PQ && tx.txType != TX_BRIDGE) {
+        if (error) *error = "KeyOutput is not allowed for this PQ tx type";
+        return false;
+      }
  
       if (out.amount == 0) {
         if (error) {
@@ -284,7 +284,6 @@ bool lookup_acc_outs(const AccountKeys& acc, const Transaction& tx, std::vector<
 
 bool lookup_acc_outs(const AccountKeys& acc, const Transaction& tx, const PublicKey& tx_pub_key, std::vector<size_t>& outs, uint64_t& money_transfered) {
   money_transfered = 0;
-  size_t keyIndex = 0;
   size_t outputIndex = 0;
 
   KeyDerivation derivation;
@@ -294,12 +293,10 @@ bool lookup_acc_outs(const AccountKeys& acc, const Transaction& tx, const Public
 
   for (const TransactionOutput& o : tx.outputs) {
     if (o.target.type() == typeid(KeyOutput)) {
-      if (is_out_to_acc(acc, boost::get<KeyOutput>(o.target), derivation, keyIndex)) {
+      if (is_out_to_acc(acc, boost::get<KeyOutput>(o.target), derivation, outputIndex)) {
         outs.push_back(outputIndex);
         money_transfered += o.amount;
       }
-
-      ++keyIndex;
     }
 
     ++outputIndex;

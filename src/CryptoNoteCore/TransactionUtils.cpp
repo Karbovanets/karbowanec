@@ -120,7 +120,6 @@ bool findOutputsToAccount(const CryptoNote::TransactionPrefix& transaction, cons
   Crypto::PublicKey txPubKey = getTransactionPublicKeyFromExtra(transaction.extra);
 
   amount = 0;
-  size_t keyIndex = 0;
   uint32_t outputIndex = 0;
 
   Crypto::KeyDerivation derivation;
@@ -130,11 +129,10 @@ bool findOutputsToAccount(const CryptoNote::TransactionPrefix& transaction, cons
 
   for (const TransactionOutput& o : transaction.outputs) {
     if (o.target.type() == typeid(KeyOutput)) {
-      if (is_out_to_acc(keys, boost::get<KeyOutput>(o.target), derivation, keyIndex)) {
+      if (is_out_to_acc(keys, boost::get<KeyOutput>(o.target), derivation, outputIndex)) {
         out.push_back(outputIndex);
         amount += o.amount;
       }
-      ++keyIndex;
     }
     ++outputIndex;
   }

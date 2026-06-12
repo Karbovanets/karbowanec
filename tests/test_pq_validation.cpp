@@ -19,6 +19,7 @@
 #include "crypto_pq/PqSeed.h"
 #include "crypto_pq/PqDerive.h"
 #include "crypto_pq/PqDsa.h"
+#include "crypto/crypto.h"
 
 #include <array>
 #include <cstdint>
@@ -278,6 +279,13 @@ PqOutput makeBridgePqOutput(uint64_t amount) {
     return po;
 }
 
+KeyOutput makeBridgeKeyOutput() {
+    KeyOutput out;
+    Crypto::SecretKey sk;
+    Crypto::generate_keys(out.key, sk);
+    return out;
+}
+
 Transaction makeBridgeTx() {
     Transaction tx;
     tx.version = TRANSACTION_VERSION_PQ;
@@ -301,6 +309,14 @@ TEST(PqValidation, BridgeAcceptsValidShape) {
     EXPECT_TRUE(checkBridgeTransactionSemantic(tx, &err)) << err;
 }
 
+TEST(PqValidation, BridgeAcceptsClassicalChangeOutput) {
+    Transaction tx = makeBridgeTx();
+    TransactionOutput out; out.amount = 100000; out.target = makeBridgeKeyOutput();
+    tx.outputs.push_back(out);
+    std::string err;
+    EXPECT_TRUE(checkBridgeTransactionSemantic(tx, &err)) << err;
+}
+
 TEST(PqValidation, BridgeRejectsWrongSubtype) {
     Transaction tx = makeBridgeTx();
     tx.txType = TX_PQ;
@@ -320,9 +336,20 @@ TEST(PqValidation, BridgeRejectsPqInput) {
     EXPECT_FALSE(checkBridgeTransactionSemantic(tx, &err));
 }
 
-TEST(PqValidation, BridgeRejectsClassicalOutput) {
+TEST(PqValidation, BridgeRejectsOnlyClassicalOutput) {
     Transaction tx = makeBridgeTx();
-    TransactionOutput out; out.amount = 1; out.target = KeyOutput{};
+    tx.outputs.clear();
+    TransactionOutput out; out.amount = 1; out.target = makeBridgeKeyOutput();
+    tx.outputs.push_back(out);
+    std::string err;
+    EXPECT_FALSE(checkBridgeTransactionSemantic(tx, &err));
+}
+
+TEST(PqValidation, BridgeRejectsInvalidClassicalOutput) {
+    Transaction tx = makeBridgeTx();
+    KeyOutput badKey;
+    std::memset(badKey.key.data, 0xFF, sizeof(badKey.key.data));
+    TransactionOutput out; out.amount = 1; out.target = badKey;
     tx.outputs.push_back(out);
     std::string err;
     EXPECT_FALSE(checkBridgeTransactionSemantic(tx, &err));

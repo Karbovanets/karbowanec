@@ -26,6 +26,7 @@
 #include "TransactionExtra.h"
 #include "../crypto/hash.h"
 
+#include "crypto/crypto.h"
 #include "crypto_pq/PqDerive.h"
 #include "crypto_pq/PqDsa.h"
 
@@ -158,9 +159,6 @@ bool checkBridgeTransactionSemantic(const Transaction& tx, std::string* error) {
   if (tx.inputs.empty() || tx.outputs.empty()) {
     return fail(error, "TX_BRIDGE with empty inputs or outputs");
   }
-  if (tx.outputs.size() > parameters::MAX_PQ_OUTPUTS_PER_TX) {
-    return fail(error, "too many bridge PQ outputs");
-  }
   if (tx.unlockTime != 0) {
     return fail(error, "bridge tx must have unlockTime == 0");
   }
@@ -170,17 +168,42 @@ bool checkBridgeTransactionSemantic(const Transaction& tx, std::string* error) {
       return fail(error, "TX_BRIDGE input is not a classical KeyInput");
     }
   }
-  // Outputs must all be PQ.
+
+  size_t pqOutputCount = 0;
+  bool hasPqOutput = false;
+  std::unordered_set<Crypto::PublicKey> keyOutputsSeen;
   for (const auto& out : tx.outputs) {
-    if (out.target.type() != typeid(PqOutput)) {
-      return fail(error, "TX_BRIDGE output is not a PqOutput");
-    }
     if (out.amount == 0) {
-      return fail(error, "bridge PQ output with zero amount");
+      return fail(error, "bridge output with zero amount");
     }
-    if (!pqOutputFieldsValid(boost::get<PqOutput>(out.target))) {
-      return fail(error, "bridge PqOutput field has wrong length");
+    if (out.target.type() == typeid(PqOutput)) {
+      hasPqOutput = true;
+      ++pqOutputCount;
+      if (pqOutputCount > parameters::MAX_PQ_OUTPUTS_PER_TX) {
+        return fail(error, "too many bridge PQ outputs");
+      }
+      if (!pqOutputFieldsValid(boost::get<PqOutput>(out.target))) {
+        return fail(error, "bridge PqOutput field has wrong length");
+      }
+      continue;
     }
+
+    if (out.target.type() == typeid(KeyOutput)) {
+      const Crypto::PublicKey& key = boost::get<KeyOutput>(out.target).key;
+      if (!Crypto::check_key(key)) {
+        return fail(error, "bridge KeyOutput has invalid key");
+      }
+      if (keyOutputsSeen.find(key) != keyOutputsSeen.end()) {
+        return fail(error, "bridge has duplicate KeyOutput target");
+      }
+      keyOutputsSeen.insert(key);
+      continue;
+    }
+
+    return fail(error, "TX_BRIDGE output has unsupported type");
+  }
+  if (!hasPqOutput) {
+    return fail(error, "TX_BRIDGE has no PqOutput");
   }
   if (toBinaryArray(tx).size() > parameters::MAX_PQ_TX_SIZE) {
     return fail(error, "bridge tx exceeds MAX_PQ_TX_SIZE");
