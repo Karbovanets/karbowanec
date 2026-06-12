@@ -78,19 +78,19 @@ namespace CryptoNote {
 
     if (isTestnet()) {
       if (m_upgradeHeightV2 == parameters::UPGRADE_HEIGHT_V2) {
-        m_upgradeHeightV2 = 10;
+        m_upgradeHeightV2 = 2;
       }
       if (m_upgradeHeightV3 == parameters::UPGRADE_HEIGHT_V3) {
-        m_upgradeHeightV3 = 60;
+        m_upgradeHeightV3 = 3;
       }
       if (m_upgradeHeightV4 == parameters::UPGRADE_HEIGHT_V4) {
-        m_upgradeHeightV4 = 70;
+        m_upgradeHeightV4 = 4;
       }
       if (m_upgradeHeightV5 == parameters::UPGRADE_HEIGHT_V5) {
-        m_upgradeHeightV5 = 80;
+        m_upgradeHeightV5 = 15;
       }
       if (m_upgradeHeightV6 == parameters::UPGRADE_HEIGHT_V6) {
-        m_upgradeHeightV6 = 100;
+        m_upgradeHeightV6 = 20;
       }
       m_blocksFileName = "testnet_" + m_blocksFileName;
       m_blocksCacheFileName = "testnet_" + m_blocksCacheFileName;
