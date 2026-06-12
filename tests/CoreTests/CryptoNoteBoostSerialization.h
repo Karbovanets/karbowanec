@@ -74,6 +74,14 @@ namespace boost
   }
 
   template <class Archive>
+  inline void serialize(Archive &a, CryptoNote::PqOutput &x, const boost::serialization::version_type ver)
+  {
+    a & x.kemCt;
+    a & x.encPayload;
+    a & x.spendCommit;
+  }
+
+  template <class Archive>
   inline void serialize(Archive &a, CryptoNote::BaseInput &x, const boost::serialization::version_type ver)
   {
     a & x.blockIndex;
@@ -88,6 +96,16 @@ namespace boost
   }
 
   template <class Archive>
+  inline void serialize(Archive &a, CryptoNote::PqInput &x, const boost::serialization::version_type ver)
+  {
+    a & x.prevTxid;
+    a & x.prevOutIndex;
+    a & x.authPub;
+    a & x.rhoReveal;
+    a & x.signature;
+  }
+
+  template <class Archive>
   inline void serialize(Archive &a, CryptoNote::TransactionOutput &x, const boost::serialization::version_type ver)
   {
     a & x.amount;
@@ -99,6 +117,11 @@ namespace boost
   inline void serialize(Archive &a, CryptoNote::Transaction &x, const boost::serialization::version_type ver)
   {
     a & x.version;
+    if (x.version >= CryptoNote::TRANSACTION_VERSION_PQ) {
+      a & x.txType;
+    } else {
+      x.txType = 0;
+    }
     a & x.unlockTime;
     a & x.inputs;
     a & x.outputs;
