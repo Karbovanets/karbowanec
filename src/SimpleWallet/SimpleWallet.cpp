@@ -1829,6 +1829,13 @@ bool simple_wallet::reset(const std::vector<std::string> &args) {
   }
 
   m_wallet->reset();
+  try {
+    CryptoNote::WalletHelper::storeWallet(*m_wallet, m_wallet_file);
+  } catch (const std::exception& e) {
+    fail_msg_writer() << e.what();
+    return true;
+  }
+
   success_msg_writer(true) << "Reset completed successfully.";
 
   std::unique_lock<std::mutex> lock(m_walletSynchronizedMutex);

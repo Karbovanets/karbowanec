@@ -466,6 +466,10 @@ void WalletLegacy::shutdown() {
 
   m_blockchainSync.removeObserver(this);
   m_blockchainSync.stop();
+  if (m_pqConsumer) {
+    m_blockchainSync.removeConsumer(m_pqConsumer.get());
+    m_pqConsumer.reset();
+  }
   m_asyncContextCounter.waitAsyncContextsFinish();
 
   m_sender.reset();
@@ -501,7 +505,21 @@ void WalletLegacy::reset() {
     }
 
     if (!saveError) {
+      uint64_t actualBeforeReset = actualBalance();
+      uint64_t pendingBeforeReset = pendingBalance();
+      uint64_t unmixableBeforeReset = unmixableBalance();
+
       shutdown();
+      if (actualBeforeReset != 0) {
+        m_observerManager.notify(&IWalletLegacyObserver::actualBalanceUpdated, UINT64_C(0));
+      }
+      if (pendingBeforeReset != 0) {
+        m_observerManager.notify(&IWalletLegacyObserver::pendingBalanceUpdated, UINT64_C(0));
+      }
+      if (unmixableBeforeReset != 0) {
+        m_observerManager.notify(&IWalletLegacyObserver::unmixableBalanceUpdated, UINT64_C(0));
+      }
+
       InitWaiter initWaiter;
       WalletHelper::IWalletRemoveObserverGuard initGuarantee(*this, initWaiter);
       initAndLoad(ss, m_password);
