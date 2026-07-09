@@ -446,6 +446,27 @@ bool Blockchain::init(const std::string& config_folder, bool load_existing) {
         m_blobs.push_back(BinaryArray(blobData.begin(), blobData.end()));
       }
     }
+
+    // Rebuild the v6 PoW record cache for the trailing sample window (cleared
+    // first for the same migration reason as m_blobs above).
+    m_powRecords.clear();
+    m_powRecordsBase = 0;
+    if (!m_no_blobs && shouldMaintainPowRecords(chainHeight - 1)) {
+      const size_t cap = size_t(CryptoNote::parameters::POW_SAMPLE_WINDOW_V6) +
+                         m_currency.minedMoneyUnlockWindow() + 32;
+      const uint32_t start = chainHeight > cap ? chainHeight - static_cast<uint32_t>(cap) : 0;
+      logger(INFO, BRIGHT_WHITE) << "Building PoW record cache for heights ["
+        << start << ", " << chainHeight << ")...";
+      m_powRecordsBase = start;
+      for (uint32_t h = start; h < chainHeight; ++h) {
+        BinaryArray record;
+        if (!buildPowRecordFromDb(h, record)) {
+          logger(ERROR, BRIGHT_RED) << "Cannot build PoW record at height " << h;
+          return false;
+        }
+        m_powRecords.push_back(std::move(record));
+      }
+    }
   }
 
   chainHeight = m_db.getChainHeight();
@@ -679,6 +700,8 @@ bool Blockchain::resetAndSetGenesisBlock(const Block& b) {
   m_alternative_chains.clear();
   m_orphanBlocksIndex.clear();
   m_blobs.clear();
+  m_powRecords.clear();
+  m_powRecordsBase = 0;
 
   block_verification_context bvc = boost::value_initialized<block_verification_context>();
   addNewBlock(b, bvc);
@@ -948,13 +971,27 @@ static inline uint32_t load_u32_be(const uint8_t* data, size_t offset) {
          (uint32_t(data[offset + 3]));
 }
 
-// Little-endian load — matches memcpy on LE platforms (x86, ARM),
-// but produces a well-defined result on any architecture.
-static inline uint32_t load_u32_le(const uint8_t* data, size_t offset) {
-  return (uint32_t(data[offset + 3]) << 24) |
-         (uint32_t(data[offset + 2]) << 16) |
-         (uint32_t(data[offset + 1]) << 8)  |
-         (uint32_t(data[offset]));
+// Little-endian 64-bit load, well-defined on any architecture.
+static inline uint64_t load_u64_le(const uint8_t* data, size_t offset) {
+  return  uint64_t(data[offset])            |
+         (uint64_t(data[offset + 1]) << 8)  |
+         (uint64_t(data[offset + 2]) << 16) |
+         (uint64_t(data[offset + 3]) << 24) |
+         (uint64_t(data[offset + 4]) << 32) |
+         (uint64_t(data[offset + 5]) << 40) |
+         (uint64_t(data[offset + 6]) << 48) |
+         (uint64_t(data[offset + 7]) << 56);
+}
+
+// splitmix64 finalizer — the avalanche step of the v6 PoW walk. Not required
+// to be cryptographically strong: address unpredictability comes from the 64
+// data bytes folded into the state at every fetch, which no table smaller
+// than the record set itself can substitute for.
+static inline uint64_t splitmix64(uint64_t z) {
+  z += UINT64_C(0x9E3779B97F4A7C15);
+  z = (z ^ (z >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
+  z = (z ^ (z >> 27)) * UINT64_C(0x94D049BB133111EB);
+  return z ^ (z >> 31);
 }
 
 /*
@@ -963,19 +1000,19 @@ static inline uint32_t load_u32_le(const uint8_t* data, size_t offset) {
  * For blocks prior to version 5, falls back to the legacy PoW function.
  *
  * For version 5 blocks:
- *   - Starts with the block's signed hashing blob.
+ *   - Starts with the block's signed hashing blob (the miner signature covers
+ *     the nonce, so every attempt requires re-signing with the key that
+ *     controls the coinbase reward — mining cannot be outsourced without
+ *     giving the worker that key).
  *   - Iteratively mixes the blob 128 times; in each iteration, accesses
  *     8 pseudo-random previous blocks' hashing blobs (from the main chain
  *     or alternative chains) to expand and "stir" the data.
- *   - Uses cached main-chain blobs when allowed to reduce reconstruction cost.
  *
- * For version 6 and later:
- *   - Introduces a deterministic sequence value derived from the intermediate
- *     hash to create a strict dependency between iterations.
- *   - Each memory access depends on the result of the previous step,
- *     enforcing sequential memory access reducing multi-core scaling,
- *     making the algorithm latency-bound rather than throughput-bound,
- *     thus more egalitarian.
+ * For version 6 and later the sampling layer is redefined (the signature
+ * scheme is unchanged): a sequential walk over fixed-size records expanded
+ * from the FULL bytes (block + transactions) of the last POW_SAMPLE_WINDOW_V6
+ * blocks, where each fetch address depends on the content of the previously
+ * fetched slice. Design, rationale and security claims: docs/POW-V6.md.
  *
  * The final mixed data is processed with yespower (y_slow_hash) to produce
  * the Proof-of-Work hash.
@@ -984,7 +1021,13 @@ bool Blockchain::getBlockLongHash(Crypto::cn_context& context, const Block& b, C
                                    const std::list<Crypto::Hash>& alt_chain, bool no_blobs) {
   if (b.majorVersion < CryptoNote::BLOCK_MAJOR_VERSION_5)
     return get_block_longhash(context, b, res);
+  if (b.majorVersion < CryptoNote::BLOCK_MAJOR_VERSION_6)
+    return getBlockLongHashV5(context, b, res, alt_chain, no_blobs);
+  return getBlockLongHashV6(b, res, alt_chain, no_blobs);
+}
 
+bool Blockchain::getBlockLongHashV5(Crypto::cn_context& context, const Block& b, Crypto::Hash& res,
+                                     const std::list<Crypto::Hash>& alt_chain, bool no_blobs) {
   BinaryArray pot;
   // reserve space to reduce reallocations
   pot.reserve(80 * 1024); // ~80 KB estimated from average blob size
@@ -994,7 +1037,7 @@ bool Blockchain::getBlockLongHash(Crypto::cn_context& context, const Block& b, C
 
   Crypto::Hash hash_1, hash_2;
   // currentHeight - 1 - unlockWindow is always <= getCurrentBlockchainHeight() - 1
-  // Avoid the redundant lock acquisition on every hash iteration by computing maxHeight 
+  // Avoid the redundant lock acquisition on every hash iteration by computing maxHeight
   // directly from the block template instead of getCurrentBlockchainHeight().
   const uint32_t currentHeight = boost::get<BaseInput>(b.baseTransaction.inputs[0]).blockIndex;
   const uint32_t unlockWindow = static_cast<uint32_t>(m_currency.minedMoneyUnlockWindow());
@@ -1002,39 +1045,15 @@ bool Blockchain::getBlockLongHash(Crypto::cn_context& context, const Block& b, C
 
 #define ITER 128
 
-  // v6 sequential state
-  uint32_t seq = 0;
-
   for (uint32_t i = 0; i < ITER; i++) {
     cn_fast_hash(pot.data(), pot.size(), hash_1);
-
-    // initialize seq from the first iteration's hash (same data, avoids redundant hash)
-    if (b.majorVersion >= CryptoNote::BLOCK_MAJOR_VERSION_6 && i == 0) {
-      const uint8_t* d = hash_1.data;
-      seq = load_u32_be(d, 0) ^ load_u32_be(d, 4) ^ load_u32_be(d, 8) ^ load_u32_be(d, 12);
-    }
 
     for (uint8_t j = 1; j <= 8; j++) {
 
       const uint8_t* d = hash_1.data;
       uint32_t n = load_u32_be(d, (j - 1) * 4);
 
-      uint32_t height_j;
-      if (b.majorVersion < CryptoNote::BLOCK_MAJOR_VERSION_6) {
-        height_j = n % maxHeight; // modulo bias is negligible and non-exploitable
-      }
-      else {
-        // sequential dependency
-        seq ^= n;
-        seq ^= seq >> 16;
-        seq *= 0x7feb352d;
-        seq ^= seq >> 15;
-        seq *= 0x846ca68b;
-        seq ^= seq >> 16;
-
-        // bias-free mapping
-        height_j = (uint64_t(seq) * maxHeight) >> 32;
-      }
+      uint32_t height_j = n % maxHeight; // modulo bias is negligible and non-exploitable
 
       bool found_alt = false; // reset for each j
 
@@ -1047,10 +1066,6 @@ bool Blockchain::getBlockLongHash(Crypto::cn_context& context, const Block& b, C
           if (!get_block_hashing_blob(ab, ba)) return false;
           pot.insert(pot.end(), ba.begin(), ba.end());
           found_alt = true;
-          // v6: mix memory content into seq
-          if (b.majorVersion >= CryptoNote::BLOCK_MAJOR_VERSION_6 && ba.size() >= 4) {
-            seq ^= load_u32_le(ba.data(), 0);
-          }
           break;
         }
       }
@@ -1064,10 +1079,6 @@ bool Blockchain::getBlockLongHash(Crypto::cn_context& context, const Block& b, C
           BinaryArray ba;
           if (!get_block_hashing_blob(bj, ba)) return false;
           pot.insert(pot.end(), ba.begin(), ba.end());
-          // v6: mix memory content into seq
-          if (b.majorVersion >= CryptoNote::BLOCK_MAJOR_VERSION_6 && ba.size() >= 4) {
-            seq ^= load_u32_le(ba.data(), 0);
-          }
         } else {
           BinaryArray ba;
           {
@@ -1079,18 +1090,10 @@ bool Blockchain::getBlockLongHash(Crypto::cn_context& context, const Block& b, C
 
           if (!ba.empty()) {
             pot.insert(pot.end(), ba.begin(), ba.end());
-            // v6: mix memory content into seq
-            if (b.majorVersion >= CryptoNote::BLOCK_MAJOR_VERSION_6 && ba.size() >= 4) {
-              seq ^= load_u32_le(ba.data(), 0);
-            }
           } else {
             std::vector<uint8_t> blobData;
             if (!m_db.getHashingBlob(height_j, blobData)) return false;
             pot.insert(pot.end(), blobData.begin(), blobData.end());
-            // v6: mix memory content into seq
-            if (b.majorVersion >= CryptoNote::BLOCK_MAJOR_VERSION_6 && blobData.size() >= 4) {
-              seq ^= load_u32_le(blobData.data(), 0);
-            }
           }
         }
       }
@@ -1103,6 +1106,301 @@ bool Blockchain::getBlockLongHash(Crypto::cn_context& context, const Block& b, C
 
   res = hash_2;
   return true;
+}
+
+/*
+ * v6 PoW sampling walk (docs/POW-V6.md).
+ *
+ * A single sequential chain of POW_FETCHES_V6 reads over the records of the
+ * trailing POW_SAMPLE_WINDOW_V6 blocks (excluding the reorg-mutable tip):
+ *
+ *   s        = fold(keccak(signed hashing blob))       // covers the nonce+signature
+ *   height_k = lo + hi32(splitmix64(s)) * span >> 32   // which block record
+ *   off_k    = hi32(splitmix64(s)) * (R-64+1) >> 32    // where inside the record
+ *   s       ^= the 64 fetched bytes                    // full-slice fold
+ *
+ * Because the next address depends on all 64 bytes of the previous slice at a
+ * uniformly random offset, no precomputed table smaller than the record set
+ * itself can drive the chain — the walk requires possession of (data derived
+ * from) the full recent chain, and its fetches cannot be issued in parallel.
+ * The fetched slices accumulate into the pot that feeds keccak + yespower, so
+ * every read is also an input to the final hash (no early-exit shortcut).
+ */
+bool Blockchain::getBlockLongHashV6(const Block& b, Crypto::Hash& res,
+                                     const std::list<Crypto::Hash>& alt_chain, bool no_blobs) {
+  using namespace CryptoNote::parameters;
+
+  // The walk needs the block's own height; miner-tx shape may not have been
+  // validated yet on every call path, so guard the variant access.
+  if (b.baseTransaction.inputs.size() != 1 ||
+      b.baseTransaction.inputs[0].type() != typeid(BaseInput)) {
+    return false;
+  }
+
+  BinaryArray pot;
+  pot.reserve(size_t(POW_FETCHES_V6) * POW_SLICE_SIZE_V6 + 256);
+
+  if (!get_signed_block_hashing_blob(b, pot))
+    return false;
+
+  Crypto::Hash h0;
+  cn_fast_hash(pot.data(), pot.size(), h0);
+  uint64_t s = load_u64_le(h0.data, 0)  ^ load_u64_le(h0.data, 8) ^
+               load_u64_le(h0.data, 16) ^ load_u64_le(h0.data, 24);
+
+  const uint32_t currentHeight = boost::get<BaseInput>(b.baseTransaction.inputs[0]).blockIndex;
+  const uint32_t unlockWindow = static_cast<uint32_t>(m_currency.minedMoneyUnlockWindow());
+  // Sample the trailing window below the reorg-exclusion zone. hi is an
+  // exclusive bound; the genesis-era clamp keeps span >= 1 on young chains.
+  const uint32_t hi = currentHeight > unlockWindow + 1 ? currentHeight - 1 - unlockWindow : 1;
+  const uint32_t lo = hi > POW_SAMPLE_WINDOW_V6 ? hi - POW_SAMPLE_WINDOW_V6 : 0;
+  const uint32_t span = hi - lo;
+
+  // When validating a block on an alternative chain, sampled heights past the
+  // split point resolve to that chain's own blocks. Index them by height once.
+  std::unordered_map<uint32_t, const BlockEntry*> altByHeight;
+  for (const auto& ch_ent : alt_chain) {
+    const BlockEntry& e = m_alternative_chains.at(ch_ent);
+    altByHeight.emplace(e.height, &e);
+  }
+
+  // Records built during this call (alt-chain entries and DB fallback).
+  // Capped so a --no-blobs node never balloons transient memory.
+  std::unordered_map<uint32_t, BinaryArray> memo;
+  constexpr size_t MEMO_CAP = 1024;
+  BinaryArray scratch;
+
+  uint8_t slice[POW_SLICE_SIZE_V6];
+
+  for (uint32_t k = 0; k < POW_FETCHES_V6; ++k) {
+    s = splitmix64(s);
+    const uint32_t height = lo + static_cast<uint32_t>(((s >> 32) * uint64_t(span)) >> 32);
+    s = splitmix64(s);
+    const uint32_t off = static_cast<uint32_t>(
+      ((s >> 32) * uint64_t(POW_RECORD_SIZE_V6 - POW_SLICE_SIZE_V6 + 1)) >> 32);
+
+    const BinaryArray* rec = nullptr;
+    auto mit = memo.find(height);
+    if (mit != memo.end()) {
+      rec = &mit->second;
+    } else {
+      auto ait = altByHeight.find(height);
+      if (ait != altByHeight.end()) {
+        if (!buildPowRecordFromEntry(*ait->second, scratch)) return false;
+      } else {
+        bool cached = false;
+        if (!no_blobs) {
+          std::lock_guard<decltype(m_blockchain_lock)> lk(m_blockchain_lock);
+          if (height >= m_powRecordsBase &&
+              height - m_powRecordsBase < m_powRecords.size()) {
+            memcpy(slice, m_powRecords[height - m_powRecordsBase].data() + off, POW_SLICE_SIZE_V6);
+            cached = true;
+          }
+        }
+        if (cached) {
+          for (size_t w = 0; w < POW_SLICE_SIZE_V6; w += 8) s ^= load_u64_le(slice, w);
+          pot.insert(pot.end(), slice, slice + POW_SLICE_SIZE_V6);
+          continue;
+        }
+        if (!buildPowRecordFromDb(height, scratch)) return false;
+      }
+      if (memo.size() < MEMO_CAP) {
+        rec = &memo.emplace(height, std::move(scratch)).first->second;
+      } else {
+        rec = &scratch;
+      }
+    }
+
+    memcpy(slice, rec->data() + off, POW_SLICE_SIZE_V6);
+    for (size_t w = 0; w < POW_SLICE_SIZE_V6; w += 8) s ^= load_u64_le(slice, w);
+    pot.insert(pot.end(), slice, slice + POW_SLICE_SIZE_V6);
+  }
+
+  // Bind the walk endpoint so the final chain state feeds the PoW hash.
+  for (int i = 0; i < 8; ++i) {
+    pot.push_back(static_cast<uint8_t>(s >> (8 * i)));
+  }
+
+  Crypto::Hash hash_1, hash_2;
+  cn_fast_hash(pot.data(), pot.size(), hash_1);
+  if (!Crypto::y_slow_hash(pot.data(), pot.size(), hash_1, hash_2))
+    return false;
+
+  res = hash_2;
+  return true;
+}
+
+// ─── v6 PoW records ──────────────────────────────────────────────────────────
+
+bool Blockchain::assemblePowBlockBytes(const Block& bl, const std::vector<TransactionEntry>& txs,
+                                        BinaryArray& bytes) {
+  if (!toBinaryArray(bl, bytes)) {
+    return false;
+  }
+  // txs[0] is the coinbase, already inside the serialized Block.
+  if (txs.size() != bl.transactionHashes.size() + 1) {
+    return false;
+  }
+  for (size_t t = 1; t < txs.size(); ++t) {
+    BinaryArray txBlob = toBinaryArray(txs[t].tx);
+    bytes.insert(bytes.end(), txBlob.begin(), txBlob.end());
+  }
+  return true;
+}
+
+/*
+ * Expands a block's full bytes into a fixed POW_RECORD_SIZE_V6 record:
+ *
+ *   c_0 = keccak(bytes)
+ *   c_i = keccak(c_{i-1} || bytes[64(i-1) mod L .. +64))   (wrapping)
+ *
+ * Every chunk re-absorbs a sliding window of the raw block bytes, so
+ * regenerating any part of a record requires the raw block itself, and the
+ * chunk chain makes on-demand regeneration ~record-build expensive — keeping
+ * the expanded window resident (~170 MB) is the only rational mining setup,
+ * which is the memory floor the algorithm is designed to impose.
+ */
+void Blockchain::expandPowRecord(const BinaryArray& blockBytes, BinaryArray& record) {
+  using namespace CryptoNote::parameters;
+  assert(!blockBytes.empty());
+
+  record.resize(POW_RECORD_SIZE_V6);
+  const size_t L = blockBytes.size();
+
+  Crypto::Hash c;
+  cn_fast_hash(blockBytes.data(), L, c);
+  memcpy(record.data(), c.data, sizeof(c.data));
+
+  uint8_t buf[sizeof(c.data) + 64];
+  const size_t chunks = POW_RECORD_SIZE_V6 / sizeof(c.data);
+  for (size_t i = 1; i < chunks; ++i) {
+    memcpy(buf, c.data, sizeof(c.data));
+    const size_t start = ((i - 1) * 64) % L;
+    for (size_t k = 0; k < 64; ++k) {
+      buf[sizeof(c.data) + k] = blockBytes[(start + k) % L];
+    }
+    cn_fast_hash(buf, sizeof(buf), c);
+    memcpy(record.data() + i * sizeof(c.data), c.data, sizeof(c.data));
+  }
+}
+
+bool Blockchain::buildPowRecordFromDb(uint32_t height, BinaryArray& record) {
+  std::vector<uint8_t> blockData;
+  if (!m_db.getBlockData(height, blockData)) {
+    return false;
+  }
+  Block blk;
+  if (!fromBinaryArray(blk, blockData)) {
+    return false;
+  }
+
+  // Stored block data is toBinaryArray(Block); stored tx entries hold
+  // toBinaryArray(tx) blobs — identical bytes to assemblePowBlockBytes().
+  BinaryArray bytes(blockData.begin(), blockData.end());
+  for (size_t t = 1; t <= blk.transactionHashes.size(); ++t) {
+    // tx_entries value format: [u32 tx_size][tx_blob][u32 num_gidx][u32 gidx...]
+    std::vector<uint8_t> entry;
+    if (!m_db.getTxEntry(height, static_cast<uint16_t>(t), entry)) {
+      return false;
+    }
+    uint32_t txSize = 0;
+    if (entry.size() < sizeof(uint32_t)) {
+      return false;
+    }
+    memcpy(&txSize, entry.data(), sizeof(uint32_t));
+    if (entry.size() < sizeof(uint32_t) + txSize) {
+      return false;
+    }
+    bytes.insert(bytes.end(), entry.begin() + sizeof(uint32_t),
+                 entry.begin() + sizeof(uint32_t) + txSize);
+  }
+
+  expandPowRecord(bytes, record);
+  return true;
+}
+
+bool Blockchain::buildPowRecordFromEntry(const BlockEntry& entry, BinaryArray& record) {
+  BinaryArray bytes;
+  if (!assemblePowBlockBytes(entry.bl, entry.transactions, bytes)) {
+    logger(ERROR, BRIGHT_RED) << "Cannot assemble PoW bytes for alternative block at height "
+      << entry.height << ": transaction bodies unavailable";
+    return false;
+  }
+  expandPowRecord(bytes, record);
+  return true;
+}
+
+bool Blockchain::resolveAltBlockTransactions(const Block& b, BlockEntry& entry) {
+  entry.transactions.clear();
+  entry.transactions.resize(1);
+  entry.transactions[0].tx = b.baseTransaction; // coinbase
+
+  if (b.transactionHashes.empty()) {
+    return true;
+  }
+
+  std::vector<Transaction> txs;
+  std::vector<Crypto::Hash> missed;
+  getTransactions(b.transactionHashes, txs, missed, true /* check pool */);
+  if (!missed.empty() || txs.size() != b.transactionHashes.size()) {
+    return false;
+  }
+
+  entry.transactions.reserve(1 + txs.size());
+  for (auto& tx : txs) {
+    entry.transactions.emplace_back();
+    entry.transactions.back().tx = std::move(tx);
+  }
+  return true;
+}
+
+bool Blockchain::shouldMaintainPowRecords(uint32_t height) const {
+  // Records are dead weight until heights can fall inside a v6 block's sample
+  // window (on mainnet the v6 upgrade height is not scheduled yet, so this
+  // stays false and the cache costs nothing).
+  using namespace CryptoNote::parameters;
+  const uint64_t v6Height = m_currency.upgradeHeight(CryptoNote::BLOCK_MAJOR_VERSION_6);
+  return uint64_t(height) + POW_SAMPLE_WINDOW_V6 + m_currency.minedMoneyUnlockWindow() + 32 >= v6Height;
+}
+
+void Blockchain::pushPowRecord(const BlockEntry& block) {
+  using namespace CryptoNote::parameters;
+  if (m_no_blobs || !shouldMaintainPowRecords(block.height)) {
+    return;
+  }
+
+  BinaryArray bytes;
+  if (!assemblePowBlockBytes(block.bl, block.transactions, bytes)) {
+    // Impossible for a block just accepted to the main chain; a gap here is
+    // repaired by the DB fallback in getBlockLongHashV6.
+    logger(ERROR, BRIGHT_RED) << "Failed to assemble PoW bytes at height " << block.height;
+    return;
+  }
+
+  BinaryArray record;
+  expandPowRecord(bytes, record);
+
+  if (m_powRecords.empty()) {
+    m_powRecordsBase = block.height;
+  } else if (uint64_t(block.height) != uint64_t(m_powRecordsBase) + m_powRecords.size()) {
+    // Continuity broken (shouldn't happen); reset rather than serve stale data.
+    m_powRecords.clear();
+    m_powRecordsBase = block.height;
+  }
+  m_powRecords.push_back(std::move(record));
+
+  const size_t cap = size_t(POW_SAMPLE_WINDOW_V6) + m_currency.minedMoneyUnlockWindow() + 32;
+  while (m_powRecords.size() > cap) {
+    m_powRecords.pop_front();
+    ++m_powRecordsBase;
+  }
+}
+
+void Blockchain::trimPowRecordsToChain(uint32_t chainHeight) {
+  while (!m_powRecords.empty() &&
+         uint64_t(m_powRecordsBase) + m_powRecords.size() > chainHeight) {
+    m_powRecords.pop_back();
+  }
 }
 
 // ─── Timestamp checks ────────────────────────────────────────────────────────
@@ -1606,6 +1904,18 @@ bool Blockchain::handle_alternative_block(const Block& b, const Crypto::Hash& id
     if (!current_diff) {
       logger(ERROR, BRIGHT_RED) << "!!!!!!! DIFFICULTY OVERHEAD !!!!!!!";
       return false;
+    }
+
+    // v6+ PoW samples full block bytes; if this block later serves as a sampled
+    // ancestor for a descendant alt block, we must be able to rebuild its bytes.
+    // Resolve tx bodies now (they must be available for the reorg to succeed at
+    // all). A miss is non-fatal here: the block is still stored, but a later
+    // descendant's PoW check will fail until the bodies arrive.
+    if (bei.bl.majorVersion >= CryptoNote::BLOCK_MAJOR_VERSION_6) {
+      if (!resolveAltBlockTransactions(b, bei)) {
+        logger(TRACE) << "Alternative block " << id << " at height " << bei.height
+          << ": some transaction bodies not yet available for PoW reconstruction";
+      }
     }
 
     Crypto::Hash proof_of_work = NULL_HASH;
@@ -2460,6 +2770,7 @@ bool Blockchain::pushBlock(const Block& blockData, const std::vector<Transaction
       if (m_blobs.size() > chainHeight) {
         m_blobs.resize(chainHeight);
       }
+      trimPowRecordsToChain(chainHeight);
     }
   };
 
@@ -2640,6 +2951,10 @@ bool Blockchain::pushBlock(BlockEntry& block, const Crypto::Hash& blockHash) {
   if (!m_no_blobs) {
     m_blobs.push_back(hashBlob);
   }
+
+  // v6 PoW record: BlockEntry.transactions is fully populated here (coinbase +
+  // all txs), so the record can be built without touching the DB.
+  pushPowRecord(block);
 
   m_db.putTimestamp(block.bl.timestamp, blockHash);
 
@@ -2906,6 +3221,11 @@ void Blockchain::removeLastBlock() {
 
   if (!m_no_blobs && !m_blobs.empty()) {
     m_blobs.pop_back();
+  }
+
+  // Keep the PoW record cache aligned with the (now shorter) chain.
+  if (!m_no_blobs) {
+    trimPowRecordsToChain(m_db.getChainHeight());
   }
 }
 

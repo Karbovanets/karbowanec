@@ -32,6 +32,7 @@ add_executable(SystemTests ${SystemTests})
 add_executable(TransfersTests ${TransfersTests})
 add_executable(UnitTests ${UnitTests})
 add_executable(LMDBReorgTests test_lmdb_reorg.cpp)
+add_executable(PowV6Tests test_pow_v6.cpp)
 add_executable(DifficultyTests Difficulty/Difficulty.cpp)
 add_executable(HashTargetTests HashTarget.cpp)
 add_executable(HashTests Hash/main.cpp)
@@ -45,6 +46,7 @@ target_link_libraries(SystemTests System gtest_main ${Boost_LIBRARIES})
 target_link_libraries(TransfersTests IntegrationTestLibrary Wallet gtest_main InProcessNode NodeRpcProxy P2P Rpc Http CryptoNoteProtocol BlockchainExplorer CryptoNoteCore Serialization System Logging Transfers Checkpoints Common Crypto Mnemonics upnpc-static ${Boost_LIBRARIES})
 target_link_libraries(UnitTests gtest_main PaymentGate Wallet TestGenerator InProcessNode NodeRpcProxy Rpc Http Transfers Serialization System Logging BlockchainExplorer CryptoNoteCore Checkpoints Common Crypto Mnemonics ${Boost_LIBRARIES})
 target_link_libraries(LMDBReorgTests TestGenerator Wallet CryptoNoteCore Serialization System Logging Common Crypto BlockchainExplorer Checkpoints ${Boost_LIBRARIES})
+target_link_libraries(PowV6Tests TestGenerator Wallet CryptoNoteCore Serialization System Logging Common Crypto BlockchainExplorer Checkpoints ${Boost_LIBRARIES})
 target_link_libraries(DifficultyTests CryptoNoteCore Serialization Crypto Logging Common ${Boost_LIBRARIES})
 target_link_libraries(HashTargetTests CryptoNoteCore Crypto)
 target_link_libraries(HashTests Crypto)
@@ -59,6 +61,8 @@ if(MSVC)
   target_link_libraries(UnitTests legacy_stdio_definitions.lib)
   target_link_libraries(LMDBReorgTests ws2_32)
   target_link_libraries(LMDBReorgTests legacy_stdio_definitions.lib)
+  target_link_libraries(PowV6Tests ws2_32)
+  target_link_libraries(PowV6Tests legacy_stdio_definitions.lib)
   target_link_libraries(PerformanceTests legacy_stdio_definitions.lib)
   target_link_libraries(NodeRpcProxyTests legacy_stdio_definitions.lib ${OPENSSL_LIBRARIES})
   target_link_libraries(IntegrationTests legacy_stdio_definitions.lib ${OPENSSL_LIBRARIES} ws2_32)
@@ -79,13 +83,14 @@ if(NOT MSVC)
   set_property(TARGET gtest gtest_main IntegrationTestLibrary IntegrationTests TestGenerator UnitTests SystemTests HashTargetTests TransfersTests APPEND_STRING PROPERTY COMPILE_FLAGS " -Wno-undef -Wno-sign-compare")
 endif()
 
-add_custom_target(tests DEPENDS CoreTests CryptoTests IntegrationTests NodeRpcProxyTests PerformanceTests SystemTests TransfersTests UnitTests LMDBReorgTests DifficultyTests HashTargetTests HashTests)
+add_custom_target(tests DEPENDS CoreTests CryptoTests IntegrationTests NodeRpcProxyTests PerformanceTests SystemTests TransfersTests UnitTests LMDBReorgTests PowV6Tests DifficultyTests HashTargetTests HashTests)
 
 set_property(TARGET
   tests
   IntegrationTestLibrary
   TestGenerator
   LMDBReorgTests
+  PowV6Tests
   CoreTests
   CryptoTests
   IntegrationTests
@@ -110,6 +115,7 @@ set_property(TARGET SystemTests PROPERTY OUTPUT_NAME "system_tests")
 set_property(TARGET TransfersTests PROPERTY OUTPUT_NAME "transfers_tests")
 set_property(TARGET UnitTests PROPERTY OUTPUT_NAME "unit_tests")
 set_property(TARGET LMDBReorgTests PROPERTY OUTPUT_NAME "lmdb_reorg_tests")
+set_property(TARGET PowV6Tests PROPERTY OUTPUT_NAME "pow_v6_tests")
 set_property(TARGET DifficultyTests PROPERTY OUTPUT_NAME "difficulty_tests")
 set_property(TARGET HashTargetTests PROPERTY OUTPUT_NAME "hash_target_tests")
 set_property(TARGET HashTests PROPERTY OUTPUT_NAME "hash_tests")
@@ -124,3 +130,4 @@ add_test(HashTargetTests hash_target_tests)
 add_test(SystemTests system_tests)
 add_test(UnitTests unit_tests)
 add_test(LMDBReorgTests lmdb_reorg_tests)
+add_test(PowV6Tests pow_v6_tests)

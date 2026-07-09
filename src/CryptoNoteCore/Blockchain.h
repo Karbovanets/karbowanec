@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <unordered_map>
 #include <parallel_hashmap/phmap.h>
 
@@ -291,6 +292,14 @@ namespace CryptoNote {
     // ── In-RAM caches ──────────────────────────────────────────────────────
     // Mining blob cache (loaded from hashing_blobs table on startup unless --no-blobs)
     hashing_blobs_container m_blobs;
+    // v6 PoW record cache: fixed-size records expanded from full block bytes
+    // (serialized block + transaction blobs) for the trailing sample window
+    // (see docs/POW-V6.md). m_powRecords[i] holds the record for height
+    // m_powRecordsBase + i. Maintained only once the v6 fork is within reach
+    // of the sample window; a miss falls back to on-demand construction from
+    // the DB, so the cache is an optimization, never a consensus input.
+    std::deque<BinaryArray> m_powRecords;
+    uint32_t                m_powRecordsBase = 0;
     // Ephemeral alternative chains (never persisted, rebuilt from P2P each run)
     blocks_ext_by_hash      m_alternative_chains;
     // Orphan blocks index (never persisted, populated during session)
@@ -344,6 +353,26 @@ namespace CryptoNote {
                            const std::list<Crypto::Hash>& alt_chain, bool no_blobs = false);
     bool getBlockLongHash(Crypto::cn_context& context, const Block& b, Crypto::Hash& res,
                            const std::list<Crypto::Hash>& alt_chain, bool no_blobs = false);
+    bool getBlockLongHashV5(Crypto::cn_context& context, const Block& b, Crypto::Hash& res,
+                             const std::list<Crypto::Hash>& alt_chain, bool no_blobs);
+    bool getBlockLongHashV6(const Block& b, Crypto::Hash& res,
+                             const std::list<Crypto::Hash>& alt_chain, bool no_blobs);
+    // v6 PoW record pipeline (see docs/POW-V6.md). "PoW bytes" of a block are
+    // its serialized Block structure followed by its non-coinbase transaction
+    // blobs in transactionHashes order — a pure function of the block, so the
+    // alternative-chain and main-chain paths produce identical bytes.
+    static bool assemblePowBlockBytes(const Block& bl, const std::vector<TransactionEntry>& txs,
+                                       BinaryArray& bytes);
+    static void expandPowRecord(const BinaryArray& blockBytes, BinaryArray& record);
+    bool buildPowRecordFromDb(uint32_t height, BinaryArray& record);
+    bool buildPowRecordFromEntry(const BlockEntry& entry, BinaryArray& record);
+    // Resolve a v6+ alt block's non-coinbase tx bodies (from pool + main chain)
+    // into entry.transactions so its full PoW bytes can be reconstructed if it
+    // later serves as a sampled ancestor. Returns false if any body is missing.
+    bool resolveAltBlockTransactions(const Block& b, BlockEntry& entry);
+    bool shouldMaintainPowRecords(uint32_t height) const;
+    void pushPowRecord(const BlockEntry& block);
+    void trimPowRecordsToChain(uint32_t chainHeight);
     bool prevalidate_miner_transaction(const Block& b, uint32_t height);
     bool validate_miner_transaction(const Block& b, uint32_t height,
                                      size_t cumulativeBlockSize,

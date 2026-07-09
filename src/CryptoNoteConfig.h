@@ -117,7 +117,19 @@ const uint32_t UPGRADE_HEIGHT_V4_1                           = 300000; // LWMA3
 const uint32_t UPGRADE_HEIGHT_V4_2                           = 500000; // Fee per-byte for extra, ban unmixable denominations
 const uint32_t UPGRADE_HEIGHT_V4_3                           = 667000; // Fixed min fee + fee per-byte for extra
 const uint32_t UPGRADE_HEIGHT_V5                             = 700000; // Block v5, back to LWMA1+, Alt. Signed Proof-of-Work
-const uint32_t UPGRADE_HEIGHT_V6                             = 4294967294; // Block v6
+const uint32_t UPGRADE_HEIGHT_V6                             = 4294967294; // Block v6, windowed sequential Signed PoW
+
+// Signed PoW v6 sampling parameters (see docs/POW-V6.md). The PoW walk reads
+// pseudo-random slices from expanded records of the last POW_SAMPLE_WINDOW_V6
+// blocks (full block bytes: block blob + transaction blobs), chained so that
+// each fetch address depends on the content of the previous slice.
+const uint32_t POW_SAMPLE_WINDOW_V6                          = 10800; // trailing blocks sampled (~30 days at 240s)
+const uint32_t POW_RECORD_SIZE_V6                            = 16384; // bytes, per-block record expanded from full block bytes
+const uint32_t POW_SLICE_SIZE_V6                             = 64;    // bytes read per fetch
+const uint32_t POW_FETCHES_V6                                = 4096;  // sequential fetches per hash attempt
+static_assert(POW_RECORD_SIZE_V6 % 32 == 0, "PoW record must be whole 32-byte chunks");
+static_assert(POW_SLICE_SIZE_V6 <= POW_RECORD_SIZE_V6, "PoW slice must fit in a record");
+static_assert(POW_SAMPLE_WINDOW_V6 > CRYPTONOTE_MINED_MONEY_UNLOCK_WINDOW, "PoW window must exceed the reorg-exclusion zone");
 
 const unsigned UPGRADE_VOTING_THRESHOLD                      = 90; // percent
 const uint32_t UPGRADE_VOTING_WINDOW                         = EXPECTED_NUMBER_OF_BLOCKS_PER_DAY;  // blocks
