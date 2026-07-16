@@ -890,7 +890,6 @@ STATIC INLINE void aes_pseudo_round_xor(const uint8_t *in, uint8_t *out, const u
 void cn_slow_hash(const void *data, size_t length, char *hash)
 {
     RDATA_ALIGN16 uint8_t expandedKey[240];
-    RDATA_ALIGN16 uint8_t hp_state[MEMORY];
 
     uint8_t text[INIT_SIZE_BYTE];
     RDATA_ALIGN16 uint64_t a[2];
@@ -907,6 +906,10 @@ void cn_slow_hash(const void *data, size_t length, char *hash)
     {
         hash_extra_blake, hash_extra_groestl, hash_extra_jh, hash_extra_skein
     };
+
+    int bLocalStateAllocation = (hp_state == NULL);
+    if (bLocalStateAllocation)
+        slow_hash_allocate_state();
 
     /* CryptoNight Step 1:  Use Keccak1600 to initialize the 'state' (and 'text') buffers from the data. */
 
@@ -970,7 +973,8 @@ void cn_slow_hash(const void *data, size_t length, char *hash)
     hash_permutation(&state.hs);
     extra_hashes[state.hs.b[0] & 3](&state, 200, hash);
 
-	aligned_free(hp_state);
+    if (bLocalStateAllocation)
+        slow_hash_free_state();
 }
 
 #else /* aarch64 && crypto */
