@@ -202,6 +202,161 @@ Crypto::Hash WalletServiceTest::generateRandomHash() {
   return hash;
 }
 
+class WalletServiceTest_resetWallet : public WalletServiceTest {
+};
+
+struct WalletResetStub : public IWalletBaseStub {
+  explicit WalletResetStub(System::Dispatcher& dispatcher) : IWalletBaseStub(dispatcher) {}
+
+  virtual void load(const std::string&, const std::string&) override {
+    ++loadCalls;
+    if (initialized) {
+      throw std::system_error(make_error_code(CryptoNote::error::WRONG_STATE));
+    }
+    if (failNextLoad) {
+      failNextLoad = false;
+      throw std::system_error(make_error_code(CryptoNote::error::WRONG_PASSWORD), "injected load failure");
+    }
+    initialized = true;
+  }
+
+  virtual void shutdown() override {
+    ++shutdownCalls;
+    requireInitialized();
+    initialized = false;
+  }
+
+  virtual void reset(const uint64_t scanHeight) override {
+    requireInitialized();
+    ++resetCalls;
+    lastResetHeight = scanHeight;
+    if (failNextReset) {
+      failNextReset = false;
+      throw std::runtime_error("injected reset failure");
+    }
+    if (failNextResetAfterShutdown) {
+      failNextResetAfterShutdown = false;
+      initialized = false;
+      throw std::system_error(make_error_code(CryptoNote::error::WRONG_VERSION), "injected reset failure after shutdown");
+    }
+  }
+
+  virtual size_t getTransactionCount() const override {
+    requireInitialized();
+    return 1;
+  }
+
+  virtual WalletTransaction getTransaction(size_t) const override {
+    requireInitialized();
+    ++indexedTransactionReads;
+    return WalletTransaction();
+  }
+
+  virtual WalletEvent getEvent() override {
+    requireInitialized();
+    ++refreshLoopEntries;
+    return IWalletBaseStub::getEvent();
+  }
+
+  void requireInitialized() const {
+    if (!initialized) {
+      throw std::system_error(make_error_code(CryptoNote::error::NOT_INITIALIZED));
+    }
+  }
+
+  bool initialized = false;
+  bool failNextLoad = false;
+  bool failNextReset = false;
+  bool failNextResetAfterShutdown = false;
+  size_t loadCalls = 0;
+  size_t shutdownCalls = 0;
+  size_t resetCalls = 0;
+  mutable size_t indexedTransactionReads = 0;
+  size_t refreshLoopEntries = 0;
+  uint64_t lastResetHeight = 0;
+};
+
+TEST_F(WalletServiceTest_resetWallet, rebuildsIndexAndRestartsEventLoop) {
+  WalletResetStub wallet(dispatcher);
+  std::unique_ptr<WalletService> service = createWalletService(wallet);
+  service->init();
+  dispatcher.yield();
+
+  EXPECT_EQ(1u, wallet.indexedTransactionReads);
+  EXPECT_EQ(1u, wallet.refreshLoopEntries);
+
+  EXPECT_FALSE(service->resetWallet(10));
+  dispatcher.yield();
+  EXPECT_EQ(1u, wallet.resetCalls);
+  EXPECT_EQ(10u, wallet.lastResetHeight);
+  EXPECT_EQ(2u, wallet.indexedTransactionReads);
+  EXPECT_EQ(2u, wallet.refreshLoopEntries);
+}
+
+TEST_F(WalletServiceTest_resetWallet, failedResetCanBeRetriedWithoutLosingEventLoop) {
+  WalletResetStub wallet(dispatcher);
+  std::unique_ptr<WalletService> service = createWalletService(wallet);
+  service->init();
+  dispatcher.yield();
+
+  wallet.failNextReset = true;
+  EXPECT_EQ(make_error_code(CryptoNote::error::INTERNAL_WALLET_ERROR), service->resetWallet(21));
+  dispatcher.yield();
+  EXPECT_TRUE(wallet.initialized);
+  EXPECT_EQ(1u, wallet.loadCalls);
+  EXPECT_EQ(2u, wallet.refreshLoopEntries);
+
+  EXPECT_FALSE(service->resetWallet(22));
+  dispatcher.yield();
+  EXPECT_EQ(2u, wallet.resetCalls);
+  EXPECT_EQ(22u, wallet.lastResetHeight);
+  EXPECT_EQ(3u, wallet.refreshLoopEntries);
+}
+
+TEST_F(WalletServiceTest_resetWallet, failureAfterShutdownReloadsWalletAndAllowsRetry) {
+  WalletResetStub wallet(dispatcher);
+  std::unique_ptr<WalletService> service = createWalletService(wallet);
+  service->init();
+  dispatcher.yield();
+
+  wallet.failNextResetAfterShutdown = true;
+  EXPECT_EQ(make_error_code(CryptoNote::error::WRONG_VERSION), service->resetWallet(41));
+  dispatcher.yield();
+  EXPECT_TRUE(wallet.initialized);
+  EXPECT_EQ(2u, wallet.loadCalls);
+  EXPECT_EQ(2u, wallet.indexedTransactionReads);
+  EXPECT_EQ(2u, wallet.refreshLoopEntries);
+
+  EXPECT_FALSE(service->resetWallet(42));
+  dispatcher.yield();
+  EXPECT_EQ(2u, wallet.resetCalls);
+  EXPECT_EQ(42u, wallet.lastResetHeight);
+  EXPECT_EQ(3u, wallet.indexedTransactionReads);
+  EXPECT_EQ(3u, wallet.refreshLoopEntries);
+}
+
+TEST_F(WalletServiceTest_resetWallet, unrecoverableReloadMarksServiceNotInitialized) {
+  WalletResetStub wallet(dispatcher);
+  std::unique_ptr<WalletService> service = createWalletService(wallet);
+  service->init();
+  dispatcher.yield();
+
+  const size_t refreshLoopEntries = wallet.refreshLoopEntries;
+  wallet.failNextLoad = true;
+  wallet.failNextResetAfterShutdown = true;
+  EXPECT_EQ(make_error_code(CryptoNote::error::WRONG_VERSION), service->resetWallet(51));
+  dispatcher.yield();
+  EXPECT_EQ(1u, wallet.resetCalls);
+
+  EXPECT_EQ(make_error_code(CryptoNote::error::NOT_INITIALIZED), service->resetWallet(52));
+  EXPECT_EQ(1u, wallet.resetCalls);
+
+  EXPECT_FALSE(wallet.initialized);
+  EXPECT_EQ(refreshLoopEntries, wallet.refreshLoopEntries);
+  EXPECT_NO_THROW(service.reset());
+  EXPECT_EQ(0u, wallet.shutdownCalls);
+}
+
 class WalletServiceTest_createAddress : public WalletServiceTest {
 };
 

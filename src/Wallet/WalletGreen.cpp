@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <ctime>
+#include <cstring>
 #include <cassert>
 #include <fstream>
 #include <future>
@@ -175,6 +176,8 @@ WalletGreen::~WalletGreen() {
   if (m_state == WalletState::INITIALIZED) {
     doShutdown();
   }
+  // Also covers a load() that threw part-way, before the state flipped.
+  wipeSecrets();
 
   m_dispatcher.yield(); //let remote spawns finish
 }
@@ -249,6 +252,60 @@ void WalletGreen::doShutdown() {
 
   std::queue<WalletEvent> noEvents;
   std::swap(m_events, noEvents);
+
+  wipeSecrets();
+
+  m_state = WalletState::NOT_INITIALIZED;
+}
+
+void WalletGreen::wipeSecrets() {
+  sodium_memzero(&m_key, sizeof(m_key));
+  if (!m_password.empty()) {
+    sodium_memzero(&m_password[0], m_password.size());
+  }
+  m_password.clear();
+  sodium_memzero(&m_viewSecretKey, sizeof(m_viewSecretKey));
+  sodium_memzero(&m_deterministicSeed, sizeof(m_deterministicSeed));
+}
+
+void WalletGreen::abortLoad() {
+  // Each step must be a no-op if load() never got that far.
+  try {
+    stopBlockchainSynchronizer();
+  } catch (const std::exception& e) {
+    m_logger(DEBUGGING) << "Ignoring synchronizer stop failure during load cleanup: " << e.what();
+  }
+
+  try {
+    if (m_walletsContainer.size() != 0) {
+      m_synchronizer.unsubscribeConsumerNotifications(m_viewPublicKey, this);
+    }
+  } catch (const std::exception&) {
+    // Not subscribed yet
+  }
+
+  try {
+    m_blockchainSynchronizer.removeObserver(this);
+    clearCaches(true, true);
+  } catch (const std::exception& e) {
+    m_logger(DEBUGGING) << "Ignoring cache cleanup failure during load cleanup: " << e.what();
+  }
+
+  try {
+    m_containerStorage.close();
+  } catch (const std::exception& e) {
+    m_logger(DEBUGGING) << "Ignoring container close failure during load cleanup: " << e.what();
+  }
+
+  m_walletsContainer.clear();
+  m_addressGenerationMode = AddressGenerationMode::INDEPENDENT_SPEND_KEYS;
+  m_nextDeterministicIndex = 0;
+  m_blockchain.clear();
+
+  std::queue<WalletEvent> noEvents;
+  std::swap(m_events, noEvents);
+
+  wipeSecrets();
 
   m_state = WalletState::NOT_INITIALIZED;
 }
@@ -330,28 +387,10 @@ EncryptedWalletRecord WalletGreen::encryptKeyPair(const PublicKey& publicKey, co
 }
 
 EncryptedWalletRecord WalletGreen::encryptKeyPair(const PublicKey& publicKey, const SecretKey& secretKey, uint64_t creationTimestamp) const {
-  return encryptKeyPair(publicKey, secretKey, creationTimestamp, m_key, getNextIv());
-}
-
-Crypto::chacha8_iv WalletGreen::getNextIv() const {
-  const auto* prefix = reinterpret_cast<const ContainerStoragePrefix*>(m_containerStorage.prefix());
-  return prefix->nextIv;
-}
-
-void WalletGreen::incIv(Crypto::chacha8_iv& iv) {
-  static_assert(sizeof(uint64_t) == sizeof(Crypto::chacha8_iv), "Bad Crypto::chacha8_iv size");
-  uint64_t* i = reinterpret_cast<uint64_t*>(&iv);
-  if (*i < std::numeric_limits<uint64_t>::max()) {
-    ++(*i);
-  } else {
-    *i = 0;
-  }
-}
-
-void WalletGreen::incNextIv() {
-  static_assert(sizeof(uint64_t) == sizeof(Crypto::chacha8_iv), "Bad Crypto::chacha8_iv size");
-  auto* prefix = reinterpret_cast<ContainerStoragePrefix*>(m_containerStorage.prefix());
-  incIv(prefix->nextIv);
+  // Every ciphertext gets a fresh random IV. ChaCha8 is a stream cipher: two
+  // plaintexts encrypted under the same (key, IV) leak their XOR, and the key
+  // records and the cache are largely predictable.
+  return encryptKeyPair(publicKey, secretKey, creationTimestamp, m_key, Crypto::randomChachaIV());
 }
 
 void WalletGreen::initWithKeys(const std::string& path, const std::string& password,
@@ -372,11 +411,10 @@ void WalletGreen::initWithKeys(const std::string& path, const std::string& passw
   Crypto::cn_context cnContext;
   Crypto::generate_chacha8_key(cnContext, password, m_key);
 
-  prefix->encryptedViewKeys = encryptKeyPair(viewPublicKey, viewSecretKey, _creationTimestamp, m_key, prefix->nextIv);
+  prefix->encryptedViewKeys = encryptKeyPair(viewPublicKey, viewSecretKey, _creationTimestamp, m_key, Crypto::randomChachaIV());
 
   newStorage.flush();
   m_containerStorage.swap(newStorage);
-  incNextIv();
 
   m_viewPublicKey = viewPublicKey;
   m_viewSecretKey = viewSecretKey;
@@ -473,6 +511,10 @@ void WalletGreen::load(const std::string& path, const std::string& password, std
   Crypto::cn_context cnContext;
   generate_chacha8_key(cnContext, password, m_key);
 
+  // From here on the container key, and later the wallet keys, are resident while the
+  // wallet is still NOT_INITIALIZED, so nothing else would clean them up if a step fails.
+  Tools::ScopeExit loadGuard([this] { abortLoad(); });
+
   std::ifstream walletFileStream(path, std::ios_base::binary);
   int version = walletFileStream.peek();
   if (version == EOF) {
@@ -491,6 +533,7 @@ void WalletGreen::load(const std::string& path, const std::string& password, std
     }
 
     loadContainerStorage(path);
+    reencryptIfIvReused();
     subscribeWallets();
 
     if (m_containerStorage.suffixSize() > 0) {
@@ -569,6 +612,7 @@ void WalletGreen::load(const std::string& path, const std::string& password, std
   m_extra = extra;
 
   m_state = WalletState::INITIALIZED;
+  loadGuard.cancel();
   m_logger(INFO, BRIGHT_WHITE) << "Container loaded, view public key " << m_viewPublicKey <<
     ", wallet count " << m_walletsContainer.size() <<
     ", actual balance " << m_currency.formatAmount(m_actualBalance) <<
@@ -603,6 +647,57 @@ void WalletGreen::loadContainerStorage(const std::string& path) {
 
     throw;
   }
+}
+
+bool WalletGreen::reencryptIfIvReused() {
+  auto ivValue = [](const Crypto::chacha8_iv& iv) {
+    uint64_t value;
+    static_assert(sizeof(value) == sizeof(iv), "Bad Crypto::chacha8_iv size");
+    std::memcpy(&value, &iv, sizeof(value));
+    return value;
+  };
+
+  std::set<uint64_t> ivs;
+  bool reused = false;
+
+  const ContainerStoragePrefix* prefix = reinterpret_cast<const ContainerStoragePrefix*>(m_containerStorage.prefix());
+  ivs.insert(ivValue(prefix->encryptedViewKeys.iv));
+  for (size_t i = 0; i < m_containerStorage.size(); ++i) {
+    reused |= !ivs.insert(ivValue(m_containerStorage[i].iv)).second;
+  }
+
+  if (m_containerStorage.suffixSize() > 0) {
+    Common::MemoryInputStream suffixStream(m_containerStorage.suffix(), m_containerStorage.suffixSize());
+    BinaryInputStreamSerializer suffixSerializer(suffixStream);
+    Crypto::chacha8_iv suffixIv;
+    suffixSerializer(suffixIv, "suffixIv");
+    reused |= !ivs.insert(ivValue(suffixIv)).second;
+  }
+
+  if (!reused) {
+    return false;
+  }
+
+  m_logger(WARNING, BRIGHT_YELLOW) << "Wallet file contains data encrypted with a reused IV, re-encrypting it";
+
+  m_containerStorage.atomicUpdate([this](ContainerStorage& newStorage) {
+    copyContainerStoragePrefix(m_containerStorage, m_key, newStorage, m_key);
+    copyContainerStorageKeys(m_containerStorage, m_key, newStorage, m_key);
+
+    if (m_containerStorage.suffixSize() > 0) {
+      BinaryArray containerData;
+      loadAndDecryptContainerData(m_containerStorage, m_key, containerData);
+      encryptAndSaveContainerData(newStorage, m_key, containerData.data(), containerData.size());
+      sodium_memzero(containerData.data(), containerData.size());
+    }
+  });
+
+  m_logger(WARNING, BRIGHT_RED) << "This wallet file was written with reused encryption IVs, "
+    "which can let anyone who obtained a copy of it recover its secret keys without the password. "
+    "The file has been repaired, but older copies and backups remain vulnerable: "
+    "the wallet keys may have been exposed, move your funds to a new wallet.";
+
+  return true;
 }
 
 void WalletGreen::loadWalletCache(std::unordered_set<Crypto::PublicKey>& addedKeys, std::unordered_set<Crypto::PublicKey>& deletedKeys, std::string& extra) {
@@ -718,12 +813,7 @@ void WalletGreen::copyContainerStorageKeys(ContainerStorage& src, const chacha8_
     uint64_t creationTimestamp;
     decryptKeyPair(encryptedSpendKeys, publicKey, secretKey, creationTimestamp, srcKey);
 
-    // push_back() can resize container, and dstPrefix address can be changed, so it is requested for each key pair
-    ContainerStoragePrefix* dstPrefix = reinterpret_cast<ContainerStoragePrefix*>(dst.prefix());
-    Crypto::chacha8_iv keyPairIv = dstPrefix->nextIv;
-    incIv(dstPrefix->nextIv);
-
-    dst.push_back(encryptKeyPair(publicKey, secretKey, creationTimestamp, dstKey, keyPairIv));
+    dst.push_back(encryptKeyPair(publicKey, secretKey, creationTimestamp, dstKey, Crypto::randomChachaIV()));
   }
 }
 
@@ -737,15 +827,12 @@ void WalletGreen::copyContainerStoragePrefix(ContainerStorage& src, const chacha
   Crypto::SecretKey secretKey;
   uint64_t creationTimestamp;
   decryptKeyPair(srcPrefix->encryptedViewKeys, publicKey, secretKey, creationTimestamp, srcKey);
-  dstPrefix->encryptedViewKeys = encryptKeyPair(publicKey, secretKey, creationTimestamp, dstKey, dstPrefix->nextIv);
-  incIv(dstPrefix->nextIv);
+  dstPrefix->encryptedViewKeys = encryptKeyPair(publicKey, secretKey, creationTimestamp, dstKey, Crypto::randomChachaIV());
 }
 
 void WalletGreen::encryptAndSaveContainerData(ContainerStorage& storage, const Crypto::chacha8_key& key, const void* containerData, size_t containerDataSize) {
-  ContainerStoragePrefix* prefix = reinterpret_cast<ContainerStoragePrefix*>(storage.prefix());
-
-  Crypto::chacha8_iv suffixIv = prefix->nextIv;
-  incIv(prefix->nextIv);
+  // The cache is rewritten under the same key on every save, so it needs a fresh IV each time too.
+  Crypto::chacha8_iv suffixIv = Crypto::randomChachaIV();
 
   BinaryArray encryptedContainer;
   encryptedContainer.resize(containerDataSize);
@@ -915,7 +1002,6 @@ void WalletGreen::convertAndLoadWalletFile(const std::string& path, std::ifstrea
 
   for (auto spendKeys : m_walletsContainer.get<RandomAccessIndex>()) {
     m_containerStorage.push_back(encryptKeyPair(spendKeys.spendPublicKey, spendKeys.spendSecretKey, spendKeys.creationTimestamp));
-    incNextIv();
   }
 
   saveWalletCache(m_containerStorage, m_key, WalletSaveLevel::SAVE_ALL, "");
@@ -1331,8 +1417,18 @@ std::vector<std::string> WalletGreen::doCreateAddressList(const std::vector<NewA
     if (minCreationTimestamp + m_currency.blockFutureTimeLimit() < currentTime) {
       m_logger(DEBUGGING) << "Reset is required";
       save(WalletSaveLevel::SAVE_KEYS_AND_TRANSACTIONS, m_extra);
+
+      // shutdown() scrubs the password, so keep what is needed to reopen the container
+      const std::string path = m_path;
+      std::string password = m_password;
+      Tools::ScopeExit passwordWiper([&password] {
+        if (!password.empty()) {
+          sodium_memzero(&password[0], password.size());
+        }
+      });
+
       shutdown();
-      load(m_path, m_password);
+      load(path, password);
     }
   } catch (const std::exception& e) {
     m_logger(ERROR, BRIGHT_RED) << "Failed to add wallets: " << e.what();
@@ -1365,7 +1461,6 @@ std::string WalletGreen::addWallet(const Crypto::PublicKey& spendPublicKey, cons
   }
 
   m_containerStorage.push_back(encryptKeyPair(spendPublicKey, spendSecretKey, creationTimestamp));
-  incNextIv();
 
   try {
     AccountSubscription sub;
@@ -1515,13 +1610,22 @@ void WalletGreen::reset(const uint64_t scanHeight)
     /* Stop and shutdown */
     stop();
 
+    /* shutdown() scrubs the password, so keep what is needed to reopen the container */
+    const std::string path = m_path;
+    std::string password = m_password;
+    Tools::ScopeExit passwordWiper([&password] {
+      if (!password.empty()) {
+        sodium_memzero(&password[0], password.size());
+      }
+    });
+
     /* Shutdown the wallet */
     shutdown();
 
     start();
 
     /* Reopen from truncated storage */
-    load(m_path, m_password);
+    load(path, password);
 }
 
 void WalletGreen::deleteAddress(const std::string& address) {
@@ -3373,6 +3477,10 @@ void WalletGreen::deleteUnlockTransactionJob(const Hash& transactionHash) {
 }
 
 void WalletGreen::startBlockchainSynchronizer() {
+  if (m_offlineMode) {
+    return;
+  }
+
   if (!m_walletsContainer.empty() && !m_blockchainSynchronizerStarted) {
     m_logger(DEBUGGING) << "Starting BlockchainSynchronizer";
     m_blockchainSynchronizer.start();

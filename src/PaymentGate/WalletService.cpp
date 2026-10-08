@@ -22,6 +22,7 @@
 #include "WalletService.h"
 
 
+#include <exception>
 #include <future>
 #include <assert.h>
 #include <sstream>
@@ -331,8 +332,11 @@ std::vector<CryptoNote::WalletOrder> convertWalletRpcOrdersToWalletOrders(const 
 void generateNewWallet(const CryptoNote::Currency& currency, const WalletConfiguration& conf, Logging::ILogger& logger, System::Dispatcher& dispatcher, CryptoNote::INode& node) {
   Logging::LoggerRef log(logger, "generateNewWallet");
 
-  CryptoNote::IWallet* wallet = new CryptoNote::WalletGreen(dispatcher, currency, node, logger);
+  CryptoNote::WalletGreen* wallet = new CryptoNote::WalletGreen(dispatcher, currency, node, logger);
   std::unique_ptr<CryptoNote::IWallet> walletGuard(wallet);
+
+  // Generation only writes a container and exits; it has nothing to synchronize.
+  wallet->setOfflineMode(true);
 
   std::string address;
   const uint32_t restoreAddressCount = conf.restoreAddressCount == 0 ? 1 : conf.restoreAddressCount;
@@ -437,19 +441,35 @@ void generateNewWallet(const CryptoNote::Currency& currency, const WalletConfigu
 
   wallet->save(CryptoNote::WalletSaveLevel::SAVE_KEYS_ONLY);
   log(Logging::INFO, Logging::BRIGHT_WHITE) << "Wallet is saved";
+
+  // Close explicitly so a teardown failure is reported rather than swallowed by the destructor.
+  try {
+    wallet->shutdown();
+  } catch (const std::exception& e) {
+    log(Logging::ERROR, Logging::BRIGHT_RED) << "Failed to close the generated container: " << e.what();
+  }
 }
 
 void changePassword(const CryptoNote::Currency& currency, const WalletConfiguration& conf, Logging::ILogger& logger, System::Dispatcher& dispatcher, CryptoNote::INode& node, const std::string newPassword) {
   Logging::LoggerRef log(logger, "changePassword");
   log(Logging::INFO, Logging::BRIGHT_WHITE) << "Changing wallet password...";
 
-  CryptoNote::IWallet* wallet = new CryptoNote::WalletGreen(dispatcher, currency, node, logger);
+  CryptoNote::WalletGreen* wallet = new CryptoNote::WalletGreen(dispatcher, currency, node, logger);
   std::unique_ptr<CryptoNote::IWallet> walletGuard(wallet);
+
+  // Re-keying only rewrites the container and exits; it has nothing to synchronize.
+  wallet->setOfflineMode(true);
 
   wallet->start();
   wallet->load(conf.walletFile, conf.walletPassword);
   wallet->changePassword(conf.walletPassword, newPassword);
   wallet->save();
+
+  try {
+    wallet->shutdown();
+  } catch (const std::exception& e) {
+    log(Logging::ERROR, Logging::BRIGHT_RED) << "Failed to close the container: " << e.what();
+  }
 }
 
 WalletService::WalletService(const CryptoNote::Currency& currency, System::Dispatcher& sys, CryptoNote::INode& node,
@@ -496,10 +516,56 @@ void WalletService::loadWallet() {
 }
 
 void WalletService::loadTransactionIdIndex() {
-  transactionIdIndex.clear();
+  std::map<std::string, size_t> rebuiltIndex;
 
   for (size_t i = 0; i < wallet.getTransactionCount(); ++i) {
-    transactionIdIndex.emplace(Common::podToHex(wallet.getTransaction(i).hash), i);
+    rebuiltIndex.emplace(Common::podToHex(wallet.getTransaction(i).hash), i);
+  }
+
+  transactionIdIndex.swap(rebuiltIndex);
+}
+
+void WalletService::recoverWalletAfterResetFailure() {
+  bool walletInitialized = false;
+
+  try {
+    wallet.start();
+
+    try {
+      wallet.getTransactionCount();
+      walletInitialized = true;
+    } catch (const std::system_error& x) {
+      if (x.code() != make_error_code(CryptoNote::error::NOT_INITIALIZED)) {
+        throw;
+      }
+
+      // reset() can fail in its final load() after the container was closed.
+      // Reopen the persisted wallet before recreating service-owned state.
+      loadWallet();
+      walletInitialized = true;
+    }
+
+    loadTransactionIdIndex();
+    refreshContext.spawn([this] { refresh(); });
+  } catch (const std::exception& x) {
+    logger(Logging::ERROR, Logging::BRIGHT_RED) << "Failed to restore wallet after reset error: " << x.what();
+
+    if (walletInitialized) {
+      try {
+        wallet.stop();
+        refreshContext.wait();
+        wallet.shutdown();
+      } catch (const std::exception& shutdownError) {
+        logger(Logging::ERROR, Logging::BRIGHT_RED) << "Failed to close wallet after reset recovery error: " << shutdownError.what();
+      }
+    }
+
+    transactionIdIndex.clear();
+    inited = false;
+  } catch (...) {
+    logger(Logging::ERROR, Logging::BRIGHT_RED) << "Failed to restore wallet after reset error: unknown error";
+    transactionIdIndex.clear();
+    inited = false;
   }
 }
 
@@ -561,7 +627,20 @@ std::error_code WalletService::resetWallet(const uint32_t scanHeight) {
       return make_error_code(CryptoNote::error::NOT_INITIALIZED);
     }
 
-    wallet.reset(scanHeight);
+    // reset() stops the wallet and reopens the container, which also ends the event
+    // loop. Quiesce the loop first, then rebuild the index and start a fresh one.
+    wallet.stop();
+    refreshContext.wait();
+    wallet.start();
+    try {
+      wallet.reset(scanHeight);
+      loadTransactionIdIndex();
+    } catch (...) {
+      std::exception_ptr resetError = std::current_exception();
+      recoverWalletAfterResetFailure();
+      std::rethrow_exception(resetError);
+    }
+    refreshContext.spawn([this] { refresh(); });
     logger(Logging::INFO, Logging::BRIGHT_WHITE) << "Wallet has been reset starting scanning from height " << scanHeight;
   }
   catch (std::system_error& x) {
@@ -1586,6 +1665,7 @@ void WalletService::replaceWithNewWallet(const Crypto::SecretKey& viewSecretKey,
 
   wallet.start();
   wallet.initializeWithViewKey(config.walletFile, config.walletPassword, viewSecretKey, scanHeight);
+  refreshContext.spawn([this] { refresh(); });
   inited = true;
 }
 
@@ -1614,6 +1694,7 @@ void WalletService::replaceWithNewWallet(const Crypto::SecretKey& viewSecretKey)
 
   wallet.start();
   wallet.initializeWithViewKey(config.walletFile, config.walletPassword, viewSecretKey);
+  refreshContext.spawn([this] { refresh(); });
   inited = true;
 }
 

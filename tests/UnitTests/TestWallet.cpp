@@ -20,7 +20,9 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <cstring>
 #include <numeric>
+#include <set>
 #include <system_error>
 #include <tuple>
 
@@ -34,6 +36,7 @@
 #include <Logging/ConsoleLogger.h>
 #include "Wallet/WalletErrors.h"
 #include "Wallet/WalletGreen.h"
+#include "Wallet/WalletIndices.h"
 #include "Wallet/WalletSerializationV2.h"
 #include "Wallet/WalletUtils.h"
 #include "WalletLegacy/WalletUserTransactionsCache.h"
@@ -3889,4 +3892,268 @@ TEST_F(WalletApi, walletExportFailedIfFileAlreadyExists) {
     ASSERT_TRUE(boost::filesystem::exists(BOB_WALLET_PATH));
     ASSERT_EQ(1, boost::filesystem::file_size(BOB_WALLET_PATH));
   }
+}
+
+namespace {
+
+// Container file layout: prefix | capacity | size | records[capacity] | suffix, where
+// the prefix is version | nextIv | encrypted view keys and the suffix is iv | size | cache.
+const size_t VIEW_RECORD_OFFSET = sizeof(uint8_t) + sizeof(Crypto::chacha8_iv);
+const size_t CONTAINER_PREFIX_SIZE = VIEW_RECORD_OFFSET + sizeof(CryptoNote::EncryptedWalletRecord);
+const size_t RECORDS_OFFSET = CONTAINER_PREFIX_SIZE + 2 * sizeof(uint64_t);
+
+std::string readWalletFile(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+void writeWalletFile(const std::string& path, const std::string& bytes) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  out.write(bytes.data(), bytes.size());
+}
+
+uint64_t readUint64(const std::string& bytes, size_t offset) {
+  uint64_t value;
+  std::memcpy(&value, bytes.data() + offset, sizeof(value));
+  return value;
+}
+
+size_t recordOffset(size_t index) {
+  return RECORDS_OFFSET + index * sizeof(CryptoNote::EncryptedWalletRecord);
+}
+
+size_t suffixOffset(const std::string& bytes) {
+  return recordOffset(static_cast<size_t>(readUint64(bytes, CONTAINER_PREFIX_SIZE)));
+}
+
+// Every IV in the file: view record, spend records and the cache.
+std::vector<std::string> collectContainerIvs(const std::string& bytes) {
+  const size_t ivSize = sizeof(Crypto::chacha8_iv);
+  std::vector<std::string> ivs;
+  ivs.push_back(bytes.substr(VIEW_RECORD_OFFSET, ivSize));
+
+  uint64_t count = readUint64(bytes, CONTAINER_PREFIX_SIZE + sizeof(uint64_t));
+  for (size_t i = 0; i < count; ++i) {
+    ivs.push_back(bytes.substr(recordOffset(i), ivSize));
+  }
+
+  if (bytes.size() >= suffixOffset(bytes) + ivSize) {
+    ivs.push_back(bytes.substr(suffixOffset(bytes), ivSize));
+  }
+
+  return ivs;
+}
+
+uint64_t readVarint(const std::string& bytes, size_t& pos) {
+  uint64_t value = 0;
+  for (int shift = 0;; shift += 7) {
+    uint8_t b = static_cast<uint8_t>(bytes[pos++]);
+    value |= static_cast<uint64_t>(b & 0x7f) << shift;
+    if ((b & 0x80) == 0) {
+      return value;
+    }
+  }
+}
+
+void writeVarint(std::string& out, uint64_t value) {
+  while (value >= 0x80) {
+    out.push_back(static_cast<char>((value & 0x7f) | 0x80));
+    value >>= 7;
+  }
+  out.push_back(static_cast<char>(value));
+}
+
+void reencrypt(std::string& data, const Crypto::chacha8_key& key, const Crypto::chacha8_iv& oldIv, const Crypto::chacha8_iv& newIv) {
+  std::string plain(data.size(), '\0');
+  Crypto::chacha8(data.data(), data.size(), key, oldIv, &plain[0]);
+  Crypto::chacha8(plain.data(), plain.size(), key, newIv, &data[0]);
+}
+
+// Rewrite a container so that every record and the cache share the view record's IV.
+void reuseViewRecordIv(std::string& bytes, const std::string& password) {
+  Crypto::cn_context context;
+  Crypto::chacha8_key key;
+  Crypto::generate_chacha8_key(context, password, key);
+
+  Crypto::chacha8_iv sharedIv;
+  std::memcpy(&sharedIv, bytes.data() + VIEW_RECORD_OFFSET, sizeof(sharedIv));
+
+  uint64_t count = readUint64(bytes, CONTAINER_PREFIX_SIZE + sizeof(uint64_t));
+  for (size_t i = 0; i < count; ++i) {
+    CryptoNote::EncryptedWalletRecord record;
+    std::memcpy(&record, bytes.data() + recordOffset(i), sizeof(record));
+
+    std::string data(reinterpret_cast<const char*>(record.data), sizeof(record.data));
+    reencrypt(data, key, record.iv, sharedIv);
+    std::memcpy(record.data, data.data(), sizeof(record.data));
+    record.iv = sharedIv;
+
+    std::memcpy(&bytes[recordOffset(i)], &record, sizeof(record));
+  }
+
+  // The suffix is the cache IV, then the encrypted cache as a varint count of
+  // varint-encoded bytes. It runs to the end of the file.
+  const size_t suffixAt = suffixOffset(bytes);
+  Crypto::chacha8_iv cacheIv;
+  std::memcpy(&cacheIv, bytes.data() + suffixAt, sizeof(cacheIv));
+
+  size_t pos = suffixAt + sizeof(cacheIv);
+  uint64_t cacheSize = readVarint(bytes, pos);
+  std::string cache;
+  for (uint64_t i = 0; i < cacheSize; ++i) {
+    cache.push_back(static_cast<char>(readVarint(bytes, pos)));
+  }
+
+  reencrypt(cache, key, cacheIv, sharedIv);
+
+  std::string suffix(reinterpret_cast<const char*>(&sharedIv), sizeof(sharedIv));
+  writeVarint(suffix, cacheSize);
+  for (char c : cache) {
+    writeVarint(suffix, static_cast<uint8_t>(c));
+  }
+
+  bytes = bytes.substr(0, suffixAt) + suffix;
+}
+
+bool allDistinct(const std::vector<std::string>& values) {
+  return values.size() == std::set<std::string>(values.begin(), values.end()).size();
+}
+
+class WalletGreenWithSecrets : public CryptoNote::WalletGreen {
+public:
+  using CryptoNote::WalletGreen::WalletGreen;
+
+  bool hasResidentSecrets() const {
+    const Crypto::chacha8_key zeroKey = {};
+    return std::memcmp(&m_key, &zeroKey, sizeof(m_key)) != 0 || !m_password.empty() || m_viewSecretKey != NULL_SECRET_KEY;
+  }
+};
+
+}
+
+TEST_F(WalletApi, resetEncryptsEveryContainerRecordUnderItsOwnIv) {
+  alice.createAddress();
+  alice.save();
+  alice.shutdown();
+
+  std::vector<std::string> before = collectContainerIvs(readWalletFile(ALICE_WALLET_PATH));
+  ASSERT_EQ(4u, before.size());
+  EXPECT_TRUE(allDistinct(before));
+
+  // reset() re-encrypts every key record and then saves the cache.
+  alice.load(ALICE_WALLET_PATH, "pass");
+  alice.reset(0);
+  alice.shutdown();
+
+  std::vector<std::string> after = collectContainerIvs(readWalletFile(ALICE_WALLET_PATH));
+  ASSERT_EQ(before.size(), after.size());
+  EXPECT_TRUE(allDistinct(after)) << "an IV was reused inside the container after reset";
+
+  std::set<std::string> seen(before.begin(), before.end());
+  for (const std::string& iv : after) {
+    EXPECT_EQ(0u, seen.count(iv)) << "reset reused a pre-reset IV";
+  }
+
+  alice.load(ALICE_WALLET_PATH, "pass");
+}
+
+TEST_F(WalletApi, walletWithReusedIvsLoadsAndIsReencrypted) {
+  alice.createAddress();
+  alice.save();
+
+  KeyPair viewKey = alice.getViewKey();
+  std::vector<std::string> addresses = { alice.getAddress(0), alice.getAddress(1) };
+  std::vector<KeyPair> spendKeys = { alice.getAddressSpendKey(0), alice.getAddressSpendKey(1) };
+  alice.shutdown();
+
+  std::string bytes = readWalletFile(ALICE_WALLET_PATH);
+  const char version = bytes[0];
+  reuseViewRecordIv(bytes, "pass");
+  writeWalletFile(ALICE_WALLET_PATH, bytes);
+
+  std::vector<std::string> reused = collectContainerIvs(bytes);
+  ASSERT_EQ(4u, reused.size());
+  ASSERT_EQ(1u, std::set<std::string>(reused.begin(), reused.end()).size());
+
+  ASSERT_NO_THROW(alice.load(ALICE_WALLET_PATH, "pass"));
+  ASSERT_EQ(2u, alice.getAddressCount());
+  EXPECT_EQ(viewKey.publicKey, alice.getViewKey().publicKey);
+  EXPECT_EQ(viewKey.secretKey, alice.getViewKey().secretKey);
+  for (size_t i = 0; i < addresses.size(); ++i) {
+    EXPECT_EQ(addresses[i], alice.getAddress(i));
+    EXPECT_EQ(spendKeys[i].publicKey, alice.getAddressSpendKey(i).publicKey);
+    EXPECT_EQ(spendKeys[i].secretKey, alice.getAddressSpendKey(i).secretKey);
+  }
+  alice.shutdown();
+
+  bytes = readWalletFile(ALICE_WALLET_PATH);
+  EXPECT_EQ(version, bytes[0]) << "the wallet file format must not change";
+
+  std::vector<std::string> repaired = collectContainerIvs(bytes);
+  ASSERT_EQ(4u, repaired.size());
+  EXPECT_TRUE(allDistinct(repaired));
+  EXPECT_EQ(0, std::count(repaired.begin(), repaired.end(), reused[0]));
+
+  // The repaired file opens with the same keys.
+  ASSERT_NO_THROW(alice.load(ALICE_WALLET_PATH, "pass"));
+  EXPECT_EQ(spendKeys[1].secretKey, alice.getAddressSpendKey(1).secretKey);
+}
+
+TEST_F(WalletApi, loadDoesNotRewriteWalletWithDistinctIvs) {
+  alice.save();
+  alice.shutdown();
+
+  std::vector<std::string> before = collectContainerIvs(readWalletFile(ALICE_WALLET_PATH));
+
+  alice.load(ALICE_WALLET_PATH, "pass");
+  alice.shutdown();
+
+  EXPECT_EQ(before, collectContainerIvs(readWalletFile(ALICE_WALLET_PATH)));
+
+  alice.load(ALICE_WALLET_PATH, "pass");
+}
+
+TEST_F(WalletApi, closingOrFailingToOpenWalletScrubsSecrets) {
+  alice.exportWallet(BOB_WALLET_PATH);
+
+  WalletGreenWithSecrets bob(dispatcher, currency, node, logger, TRANSACTION_SOFTLOCK_TIME);
+  bob.load(BOB_WALLET_PATH, "pass");
+  EXPECT_TRUE(bob.hasResidentSecrets());
+
+  bob.shutdown();
+  EXPECT_FALSE(bob.hasResidentSecrets());
+
+  // A wrong password still derives a key before the open fails.
+  EXPECT_ANY_THROW(bob.load(BOB_WALLET_PATH, "wrong"));
+  EXPECT_FALSE(bob.hasResidentSecrets());
+
+  ASSERT_NO_THROW(bob.load(BOB_WALLET_PATH, "pass"));
+  EXPECT_EQ(alice.getAddress(0), bob.getAddress(0));
+  bob.shutdown();
+  wait(100);
+}
+
+TEST_F(WalletApi, offlineModeNeverStartsSynchronization) {
+  {
+    WalletGreen bob(dispatcher, currency, node, logger, TRANSACTION_SOFTLOCK_TIME);
+    bob.setOfflineMode(true);
+    bob.initialize(BOB_WALLET_PATH, "pass");
+    bob.createAddress();
+    bob.save();
+    EXPECT_FALSE(bob.synchronizationStarted());
+
+    // An old creation timestamp takes the internal save/shutdown/load path.
+    KeyPair spendKey;
+    Crypto::generate_keys(spendKey.publicKey, spendKey.secretKey);
+    bob.createAddress(spendKey.secretKey, static_cast<uint64_t>(1));
+    EXPECT_FALSE(bob.synchronizationStarted());
+    bob.shutdown();
+  }
+
+  // Offline mode belongs to the process, not to the container.
+  WalletGreen carol(dispatcher, currency, node, logger, TRANSACTION_SOFTLOCK_TIME);
+  carol.load(BOB_WALLET_PATH, "pass");
+  EXPECT_TRUE(carol.synchronizationStarted());
+  carol.shutdown();
+  wait(100);
 }

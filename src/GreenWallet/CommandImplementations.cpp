@@ -22,6 +22,7 @@
 #endif
 
 #include "Mnemonics/electrum-words.h"
+#include "Wallet/WalletErrors.h"
 
 #include <future>
 
@@ -426,7 +427,36 @@ void reset(CryptoNote::INode &node, std::shared_ptr<WalletInfo> walletInfo)
 
     std::cout << InformationMsg("Resetting wallet...") << std::endl;
 
-    walletInfo->wallet.reset(scanHeight);
+    try
+    {
+        walletInfo->wallet.reset(scanHeight);
+    }
+    catch (const std::exception &e)
+    {
+        std::cout << WarningMsg("Failed to reset wallet: ")
+                  << WarningMsg(e.what()) << std::endl;
+
+        /* reset() closes and reopens the container. If it failed after
+           closing it, reopen it so the wallet stays usable */
+        walletInfo->wallet.start();
+
+        try
+        {
+            walletInfo->wallet.getAddressCount();
+        }
+        catch (const std::system_error &x)
+        {
+            if (x.code() != make_error_code(CryptoNote::error::NOT_INITIALIZED))
+            {
+                throw;
+            }
+
+            walletInfo->wallet.load(walletInfo->walletFileName,
+                                    walletInfo->walletPass);
+        }
+
+        return;
+    }
 
     syncWallet(node, walletInfo);
 }

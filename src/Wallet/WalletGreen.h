@@ -44,6 +44,13 @@ public:
 
   INode& getNode() { return m_node; }
 
+  // Never start background synchronization. For one-shot runs that only write a
+  // container (generate, change password) and exit: they have nothing to sync,
+  // and a started synchronizer must be joined on teardown even if it is blocked
+  // in a node call. Survives the internal shutdown/load cycle; not persisted.
+  void setOfflineMode(bool offline) { m_offlineMode = offline; }
+  bool synchronizationStarted() const { return m_blockchainSynchronizerStarted; }
+
   virtual void initialize(const std::string& path, const std::string& password) override;
   virtual void initializeWithViewKey(const std::string& path, const std::string& password, const Crypto::SecretKey& viewSecretKey) override;
   virtual void initializeWithViewKey(const std::string& path, const std::string& password, const Crypto::SecretKey& viewSecretKey, const uint64_t& creationTimestamp) override;
@@ -145,6 +152,15 @@ protected:
   void throwIfStopped() const;
   void throwIfTrackingMode() const;
   void doShutdown();
+  // Zero the container key, the password and the view secret key.
+  void wipeSecrets();
+  // Return to a clean NOT_INITIALIZED state after a load() that failed part-way:
+  // close the container, drop subscriptions and scrub secrets. Safe to call
+  // however far the load got.
+  void abortLoad();
+  // Re-encrypt every container record and the cache under fresh IVs if any two
+  // of them share an IV. Returns true if the container was rewritten.
+  bool reencryptIfIvReused();
   void clearCaches(bool clearTransactions, bool clearCachedData);
   void convertAndLoadWalletFile(const std::string& path, std::ifstream&& walletFileStream);
   static void decryptKeyPair(const EncryptedWalletRecord& cipher, Crypto::PublicKey& publicKey, Crypto::SecretKey& secretKey,
@@ -153,9 +169,6 @@ protected:
   static EncryptedWalletRecord encryptKeyPair(const Crypto::PublicKey& publicKey, const Crypto::SecretKey& secretKey, uint64_t creationTimestamp,
     const Crypto::chacha8_key& key, const Crypto::chacha8_iv& iv);
   EncryptedWalletRecord encryptKeyPair(const Crypto::PublicKey& publicKey, const Crypto::SecretKey& secretKey, uint64_t creationTimestamp) const;
-  Crypto::chacha8_iv getNextIv() const;
-  static void incIv(Crypto::chacha8_iv& iv);
-  void incNextIv();
   void initWithKeys(const std::string& path, const std::string& password, const Crypto::PublicKey& viewPublicKey, const Crypto::SecretKey& viewSecretKey, const uint64_t& _creationTimestamp);
   CryptoNote::KeyPair deriveHdSpendKey(uint32_t hdIndex) const;
   NewAddressData createHdAddressData(uint64_t creationTimestamp);
@@ -204,6 +217,8 @@ protected:
 #pragma pack(push, 1)
   struct ContainerStoragePrefix {
     uint8_t version;
+    // No longer used to derive IVs: every record and the cache carry their own
+    // random IV. Kept (set to a random value) because it is part of the file layout.
     Crypto::chacha8_iv nextIv;
     EncryptedWalletRecord encryptedViewKeys;
   };
@@ -387,6 +402,7 @@ protected:
   UncommitedTransactions m_uncommitedTransactions;
 
   bool m_blockchainSynchronizerStarted;
+  bool m_offlineMode = false;
   BlockchainSynchronizer m_blockchainSynchronizer;
   TransfersSyncronizer m_synchronizer;
 
