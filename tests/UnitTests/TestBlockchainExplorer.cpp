@@ -17,6 +17,7 @@
 
 #include "gtest/gtest.h"
 
+#include <ctime>
 #include <system_error>
 
 #include <boost/range/combine.hpp>

@@ -28,6 +28,7 @@
 #include <condition_variable>
 #include <future>
 #include <atomic>
+#include <ctime>
 
 #include "../IntegrationTestLib/TestWalletLegacy.h"
 

@@ -23,6 +23,8 @@
 #include "Serialization/ISerializer.h"
 #include "Serialization/SerializationOverloads.h"
 
+#include <ctime>
+
 using namespace Crypto;
 
 namespace CryptoNote {

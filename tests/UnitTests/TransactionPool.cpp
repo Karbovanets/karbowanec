@@ -18,6 +18,7 @@
 #include "gtest/gtest.h"
 
 #include <algorithm>
+#include <ctime>
 
 #include <boost/filesystem/operations.hpp>
 

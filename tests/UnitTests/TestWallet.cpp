@@ -25,6 +25,7 @@
 #include <set>
 #include <system_error>
 #include <tuple>
+#include <thread>
 
 #include "Common/StringTools.h"
 #include "CryptoNoteCore/Currency.h"

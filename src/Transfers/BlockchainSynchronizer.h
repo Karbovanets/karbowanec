@@ -28,6 +28,7 @@
 #include <mutex>
 #include <atomic>
 #include <future>
+#include <thread>
 
 #include "Logging/LoggerRef.h"
 

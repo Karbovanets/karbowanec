@@ -17,6 +17,8 @@
 
 #include "gtest/gtest.h"
 
+#include <thread>
+
 #include "Transfers/BlockchainSynchronizer.h"
 #include "Transfers/TransfersConsumer.h"
 

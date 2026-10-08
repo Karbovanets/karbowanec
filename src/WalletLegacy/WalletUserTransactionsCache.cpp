@@ -26,6 +26,7 @@
 #include "Serialization/ISerializer.h"
 #include "Serialization/SerializationOverloads.h"
 #include <algorithm>
+#include <ctime>
 
 using namespace Crypto;
 

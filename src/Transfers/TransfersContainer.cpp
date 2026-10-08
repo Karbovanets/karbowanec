@@ -26,6 +26,8 @@
 #include "Serialization/BinaryOutputStreamSerializer.h"
 #include "Serialization/SerializationOverloads.h"
 
+#include <ctime>
+
 using namespace Common;
 using namespace Crypto;
 using namespace Logging;

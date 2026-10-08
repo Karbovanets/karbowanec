@@ -17,6 +17,8 @@
 
 #include "gtest/gtest.h"
 
+#include <ctime>
+
 #include "IWalletLegacy.h"
 
 #include "crypto/crypto.h"

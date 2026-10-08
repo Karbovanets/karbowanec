@@ -16,6 +16,9 @@
 // along with Karbo.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "Account.h"
+
+#include <ctime>
+
 #include "CryptoNoteSerialization.h"
 #include "crypto/crypto.h"
 extern "C"

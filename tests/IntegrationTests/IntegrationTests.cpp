@@ -17,6 +17,8 @@
 
 #include "gtest/gtest.h"
 
+#include <thread>
+
 #include "../IntegrationTestLib/BaseFunctionalTests.h"
 #include "../IntegrationTestLib/NodeObserver.h"
 

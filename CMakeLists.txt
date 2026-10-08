@@ -497,7 +497,9 @@ set(Boost_NO_BOOST_CMAKE ON)
 set(Boost_USE_STATIC_LIBS ON)
 set(Boost_USE_STATIC_RUNTIME ON)
 
-find_package(Boost REQUIRED COMPONENTS coroutine context system filesystem thread date_time chrono regex serialization program_options atomic)
+# "system" is omitted: Boost.System is header-only since Boost 1.69 and its
+# compiled library no longer exists in Boost 1.90+.
+find_package(Boost REQUIRED COMPONENTS coroutine context filesystem thread date_time chrono serialization program_options atomic)
 message(STATUS "Boost Found: ${Boost_INCLUDE_DIRS}")
 include_directories(SYSTEM ${Boost_INCLUDE_DIRS})
 

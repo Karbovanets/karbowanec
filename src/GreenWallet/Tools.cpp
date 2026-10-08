@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <chrono>
+#include <ctime>
 #include <thread>
 
 #include <Common/Base58.h>

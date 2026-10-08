@@ -29,6 +29,7 @@
 #include <fstream>
 #include <thread>
 #include <cstdio>
+#include <ctime>
 
 #include <boost/foreach.hpp>
 #include <boost/uuid/random_generator.hpp>

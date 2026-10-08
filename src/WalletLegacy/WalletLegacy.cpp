@@ -35,6 +35,7 @@
 #include <crypto/random.h>
 #include <set>
 #include <tuple>
+#include <thread>
 #include <utility>
 #include <string.h>
 #include <time.h>

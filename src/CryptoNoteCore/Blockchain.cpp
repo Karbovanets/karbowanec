@@ -24,6 +24,7 @@
 #include <numeric>
 #include <cstdio>
 #include <cmath>
+#include <ctime>
 #include <cstring>
 #include <filesystem>
 #include <boost/foreach.hpp>

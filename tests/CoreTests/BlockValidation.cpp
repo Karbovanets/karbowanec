@@ -22,6 +22,8 @@
 #include "Common/StringTools.h"
 #include "Wallet/TransactionBuilder.h"
 
+#include <ctime>
+
 using namespace Common;
 using namespace Crypto;
 using namespace CryptoNote;

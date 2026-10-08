@@ -21,6 +21,7 @@
 
 #include <numeric>
 #include <future>
+#include <thread>
 
 #include "CommonTypes.h"
 #include "Common/BinaryArray.hpp"

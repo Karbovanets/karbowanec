@@ -20,6 +20,8 @@
 #include "CryptoNoteCore/CryptoNoteTools.h"
 #include "Wallet/TransactionBuilder.h"
 
+#include <ctime>
+
 using namespace CryptoNote;
 
 namespace
