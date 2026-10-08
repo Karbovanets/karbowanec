@@ -90,6 +90,9 @@ RpcServer::HandlerFunction binMethod(bool (RpcServer::*handler)(typename Command
     boost::value_initialized<typename Command::response> res;
 
     if (!loadFromBinaryKeyValue(static_cast<typename Command::request&>(req), request.getBody())) {
+      response.setStatus(CryptoNote::HttpResponse::STATUS_400);
+      response.setBody("Failed to parse request body");
+      response.addHeader("Content-Type", "text/plain");
       return false;
     }
 
@@ -108,6 +111,9 @@ RpcServer::HandlerFunction jsonMethod(bool (RpcServer::*handler)(typename Comman
     boost::value_initialized<typename Command::response> res;
 
     if (!loadFromJson(static_cast<typename Command::request&>(req), request.getBody())) {
+      response.setStatus(CryptoNote::HttpResponse::STATUS_400);
+      response.setBody("Failed to parse request body as JSON");
+      response.addHeader("Content-Type", "text/plain");
       return false;
     }
 
@@ -132,6 +138,9 @@ RpcServer::HandlerFunction httpMethod(bool (RpcServer::*handler)(typename Comman
     boost::value_initialized<typename Command::response> res;
 
     if (!loadFromJson(static_cast<typename Command::request&>(req), request.getBody())) {
+      response.setStatus(CryptoNote::HttpResponse::STATUS_400);
+      response.setBody("Failed to parse request body as JSON");
+      response.addHeader("Content-Type", "text/plain");
       return false;
     }
 
@@ -661,7 +670,13 @@ void RpcServer::processRequest(const CryptoNote::HttpRequest& request, CryptoNot
       return;
     }
 
-    it->second.handler(this, request, response);
+    // A handler that fails without describing the failure would otherwise leave
+    // an empty 200 behind; answer 500 so the client always gets a verdict.
+    if (!it->second.handler(this, request, response) && response.getBody().empty()) {
+      response.setStatus(CryptoNote::HttpResponse::STATUS_500);
+      response.setBody("Internal error");
+      response.addHeader("Content-Type", "text/plain");
+    }
 
   }
   catch (const JsonRpc::JsonRpcError& err) {

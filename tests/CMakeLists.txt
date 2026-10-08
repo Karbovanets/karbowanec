@@ -43,7 +43,7 @@ target_link_libraries(NodeRpcProxyTests NodeRpcProxy CryptoNoteCore Rpc Http Ser
 target_link_libraries(PerformanceTests Wallet CryptoNoteCore Serialization Logging Common Crypto ${Boost_LIBRARIES})
 target_link_libraries(SystemTests System gtest_main ${Boost_LIBRARIES})
 target_link_libraries(TransfersTests IntegrationTestLibrary Wallet gtest_main InProcessNode NodeRpcProxy P2P Rpc Http CryptoNoteProtocol BlockchainExplorer CryptoNoteCore Serialization System Logging Transfers Checkpoints Common Crypto Mnemonics upnpc-static ${Boost_LIBRARIES})
-target_link_libraries(UnitTests gtest_main PaymentGate Wallet TestGenerator InProcessNode NodeRpcProxy Rpc Http Transfers Serialization System Logging BlockchainExplorer CryptoNoteCore Checkpoints Common Crypto Mnemonics ${Boost_LIBRARIES})
+target_link_libraries(UnitTests gtest_main PaymentGate Wallet TestGenerator InProcessNode NodeRpcProxy Rpc Http Transfers Serialization System Logging BlockchainExplorer CryptoNoteCore Checkpoints Common Crypto Mnemonics ${Boost_LIBRARIES} ${OPENSSL_LIBRARIES})
 target_link_libraries(LMDBReorgTests TestGenerator Wallet CryptoNoteCore Serialization System Logging Common Crypto BlockchainExplorer Checkpoints ${Boost_LIBRARIES})
 target_link_libraries(DifficultyTests CryptoNoteCore Serialization Crypto Logging Common ${Boost_LIBRARIES})
 target_link_libraries(HashTargetTests CryptoNoteCore Crypto)

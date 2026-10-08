@@ -5,9 +5,12 @@
 
 #include "HttpClient.h"
 #include "HttpParser.h"
+#include <System/ContextGroup.h>
+#include <System/InterruptedException.h>
 #include <System/Ipv4Resolver.h>
 #include <System/Ipv4Address.h>
 #include <System/TcpConnector.h>
+#include <System/Timer.h>
 #include <System/SslTcpStreambuf.h>
 
 namespace CryptoNote {
@@ -79,6 +82,17 @@ namespace CryptoNote {
     }
   }
 
+  // Host header value for this connection. The port is included unless it is the
+  // default for the scheme, which is what every other client does and what name-based
+  // virtual hosts expect.
+  std::string HttpClient::hostHeaderValue() const {
+    const uint16_t defaultPort = m_useSsl ? 443 : 80;
+    if (m_port == defaultPort) {
+      return m_address;
+    }
+    return m_address + ":" + std::to_string(m_port);
+  }
+
   void HttpClient::request(const HttpRequest& req, HttpResponse& res) {
     if (!m_connected) {
       if (m_useSsl) {
@@ -89,26 +103,87 @@ namespace CryptoNote {
       }
     }
 
+    // HTTP/1.1 requires Host, and the request is serialized as HTTP/1.1. A daemon
+    // reached directly does not mind its absence, but anything name-based in front
+    // of one — a reverse proxy terminating TLS, for instance — answers 400
+    // without it. Set it here rather than at every call
+    // site: this is the only place that knows which host the connection went to.
+    HttpRequest withHost = req;
+    if (withHost.getHeaders().count("Host") == 0) {
+      withHost.addHeader("Host", hostHeaderValue());
+    }
+    const HttpRequest& outgoing = withHost;
+
     try {
       std::iostream stream(m_useSsl ?
         static_cast<std::streambuf*>(m_sslStreamBuf.get()) :
         static_cast<std::streambuf*>(m_streamBuf.get()));
       HttpParser parser;
 
-      stream << req;
-      stream.flush();
+      bool timedOut = runWithTimeout([&] {
+        stream << outgoing;
+        stream.flush();
 
-      if (!stream) {
-        throw std::runtime_error("Failed to send request");
+        if (!stream) {
+          throw std::runtime_error("Failed to send request");
+        }
+
+        parser.receiveResponse(stream, res);
+      });
+
+      if (timedOut) {
+        throw std::runtime_error("HTTP request timed out waiting for a response");
       }
-
-      parser.receiveResponse(stream, res);
-
     }
     catch (const std::exception&) {
       disconnect();
       throw;
     }
+  }
+
+  bool HttpClient::runWithTimeout(const std::function<void()>& operation) {
+    // Declared before the ContextGroup so the group -- and with it the sleeping
+    // watchdog -- is torn down first, mirroring HttpServer::readWithWatchdog.
+    System::Timer timer(m_dispatcher);
+    System::ContextGroup watchdog(m_dispatcher);
+    bool expired = false;
+
+    watchdog.spawn([&] {
+      try {
+        timer.sleep(m_requestTimeout);
+        expired = true;
+        // Force the blocked read/write to fail, the same lever HttpServer uses
+        // to unblock a pending read from its own watchdog.
+        boost::system::error_code ec;
+        m_connection.getSocket().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+        m_connection.getSocket().close(ec);
+      } catch (const System::InterruptedException&) {
+        // operation() finished in time; the watchdog was cancelled below.
+      }
+    });
+
+    std::exception_ptr failure;
+    try {
+      operation();
+    } catch (...) {
+      failure = std::current_exception();
+    }
+
+    // Cancel and let the watchdog finish before its verdict is read.
+    watchdog.interrupt();
+    watchdog.wait();
+
+    if (expired) {
+      // Whatever operation() threw here is just the aborted-connection noise;
+      // the timeout itself is the real story, reported by the caller.
+      return true;
+    }
+
+    if (failure) {
+      std::rethrow_exception(failure);
+    }
+
+    return false;
   }
 
   void HttpClient::connect() {
@@ -149,6 +224,10 @@ namespace CryptoNote {
 
   bool HttpClient::isConnected() const {
     return m_connected;
+  }
+
+  void HttpClient::setRequestTimeout(std::chrono::milliseconds timeout) {
+    m_requestTimeout = timeout;
   }
 
   void HttpClient::disconnect() {

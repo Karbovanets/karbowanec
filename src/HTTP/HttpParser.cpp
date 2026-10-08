@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <stdexcept>
 
+#include "CryptoNoteConfig.h"
+
 namespace CryptoNote {
 
 HttpParser::HttpParser() {
@@ -140,10 +142,40 @@ void HttpParser::receiveHeaders(std::istream& stream, HttpRequest::Headers& head
 }
 
 void HttpParser::receiveBody(std::istream& stream, std::string& body, size_t bodyLength) {
-  body.resize(bodyLength);
-  stream.read(&body[0], bodyLength);
+  // Bound the allocation before trusting a peer-supplied Content-Length:
+  // resize() would otherwise commit memory for whatever size a client (or,
+  // via receiveResponse, a malicious daemon) claims, before a single body
+  // byte is read. Reused from the P2P layer, which polices the same class of
+  // untrusted length-prefixed payload (see NetNode.cpp); it comfortably
+  // covers the largest legitimate body — a hex-encoded sendrawtransaction —
+  // while still being far below an actual allocation an attacker should be
+  // able to force.
+  if (bodyLength > P2P_DEFAULT_PACKET_MAX_SIZE) {
+    throw std::runtime_error("HTTP body too large");
+  }
 
-  if (!stream || stream.gcount() != static_cast<std::streamsize>(bodyLength)) {
+  // Grow with the bytes that actually arrive instead of committing the whole
+  // claimed length up front. The cap above bounds a single body; reading
+  // incrementally is what bounds the sum across connections, since a peer that
+  // announces a large Content-Length and then sends nothing now holds only
+  // what it sent. The buffer stays small deliberately — this runs on a
+  // dispatcher context stack, not a thread stack.
+  char buffer[8192];
+  body.clear();
+
+  while (body.size() < bodyLength) {
+    const size_t wanted = std::min(sizeof(buffer), bodyLength - body.size());
+    stream.read(buffer, wanted);
+
+    const std::streamsize received = stream.gcount();
+    if (received <= 0) {
+      break;
+    }
+
+    body.append(buffer, static_cast<size_t>(received));
+  }
+
+  if (body.size() != bodyLength) {
     throw std::runtime_error("Failed to read complete HTTP body");
   }
 }
