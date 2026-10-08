@@ -32,6 +32,7 @@
 #include <boost/format.hpp>
 #include "math.h"
 #include "CryptoNote.h"
+#include "crypto/crypto-util.h"
 
 #if defined(WIN32)
 #undef ERROR
@@ -400,7 +401,7 @@ bool DaemonCommandsHandler::start_mining(const std::vector<std::string> &args) {
     return true;
   }
 
-  if (!args.size()) {
+  if (args.size() < 2) {
     std::cout << "Please, specify wallet address to mine for: start_mining <spend key> <view key> [threads=1]" << std::endl;
     return true;
   }
@@ -430,7 +431,23 @@ bool DaemonCommandsHandler::start_mining(const std::vector<std::string> &args) {
     threads_count = (ok && 0 < threads_count) ? threads_count : 1;
   }
 
-  m_core.get_miner().start(keys, threads_count);
+  // Mining on an unsynchronized chain only produces work on a stale tip, so
+  // until the node catches up just arm the miner and let it start on sync.
+  const bool synced = m_core.currency().isTestnet() || protocolQuery.isSynchronized();
+  const bool started = synced ? m_core.get_miner().start(keys, threads_count)
+                              : m_core.get_miner().startWhenSynchronized(keys, threads_count);
+  if (started && !synced && protocolQuery.isSynchronized()) {
+    m_core.get_miner().on_synchronized(); // synchronized while arming
+  }
+  sodium_memzero(&keys, sizeof(keys));
+  sodium_memzero(&private_key_hash, sizeof(private_key_hash));
+
+  if (!started) {
+    std::cout << "Failed to start mining (already mining?)." << std::endl;
+  } else if (!synced) {
+    std::cout << "Node is not synchronized yet. Mining with " << threads_count
+              << " thread(s) will start automatically once synchronization completes." << std::endl;
+  }
   return true;
 }
 //--------------------------------------------------------------------------------

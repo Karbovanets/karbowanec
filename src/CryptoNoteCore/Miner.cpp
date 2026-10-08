@@ -18,6 +18,7 @@
 
 #include "Miner.h"
 
+#include <cstring>
 #include <future>
 #include <numeric>
 #include <sstream>
@@ -32,6 +33,7 @@
 
 #include "crypto/crypto.h"
 #include "crypto/random.h"
+#include "crypto/crypto-util.h"
 #include "Common/CommandLine.h"
 #include "Common/StringTools.h"
 #include "Serialization/SerializationTools.h"
@@ -71,6 +73,16 @@ namespace CryptoNote
   //-----------------------------------------------------------------------------------------------------
   miner::~miner() {
     stop();
+    clearMiningKeys();
+  }
+  //-----------------------------------------------------------------------------------------------------
+  void miner::clearMiningKeys() {
+    sodium_memzero(&m_mine_account, sizeof(m_mine_account));
+  }
+  //-----------------------------------------------------------------------------------------------------
+  bool miner::hasMiningKeys() const {
+    static const AccountKeys empty = boost::value_initialized<AccountKeys>();
+    return memcmp(&m_mine_account, &empty, sizeof(m_mine_account)) != 0;
   }
   //-----------------------------------------------------------------------------------------------------
   bool miner::set_block_template(const Block& bl, const Difficulty& di) {
@@ -224,6 +236,7 @@ namespace CryptoNote
 
       Crypto::secret_key_to_public_key(m_mine_account.spendSecretKey, m_mine_account.address.spendPublicKey);
       Crypto::secret_key_to_public_key(m_mine_account.viewSecretKey, m_mine_account.address.viewPublicKey);
+      sodium_memzero(&private_key_hash, sizeof(private_key_hash));
 
       m_do_mining = true;
     }
@@ -265,6 +278,9 @@ namespace CryptoNote
 
     if (!m_template_no) {
       if (!request_block_template()) { //lets update block template
+        if (!m_do_mining) {
+          clearMiningKeys();
+        }
         return false;
       }
     }
@@ -278,6 +294,19 @@ namespace CryptoNote
     }
 
     logger(INFO) << "Mining has started with " << threads_count << " threads, good luck!";
+    return true;
+  }
+  //-----------------------------------------------------------------------------------------------------
+  bool miner::startWhenSynchronized(const AccountKeys& acc, size_t threads_count)
+  {
+    if (is_mining()) {
+      logger(ERROR) << "Starting miner but it's already started";
+      return false;
+    }
+
+    m_mine_account = acc;
+    m_threads_total = static_cast<uint32_t>(threads_count);
+    m_do_mining = true;
     return true;
   }
   
@@ -309,6 +338,9 @@ namespace CryptoNote
     if (!mining)
     {
       logger(TRACE) << "Not mining - nothing to stop";
+      if (!keepMiningRequested) {
+        clearMiningKeys();
+      }
       return false;
     }
 
@@ -321,6 +353,11 @@ namespace CryptoNote
     m_threads.clear();
     m_current_hash_rate = 0;
     m_last_hash_rates.clear();
+    // A stop that keeps mining requested is a pause (e.g. all peers disconnected)
+    // and mining resumes with the same keys; any other stop ends mining.
+    if (!keepMiningRequested) {
+      clearMiningKeys();
+    }
     logger(INFO) << "Mining has been stopped, " << m_threads.size() << " finished" ;
     return true;
   }

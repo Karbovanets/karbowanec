@@ -376,8 +376,7 @@ int main(int argc, char* argv[])
       << ENDL
       << "Use \"help\" command to see the list of available commands." << ENDL
       << ENDL
-      << "Note: in case you need to interrupt the process, use \"exit\" command. "
-      << "Otherwise, the current progress won't be saved." << ENDL
+      << "Note: use \"exit\" command to shut the daemon down gracefully." << ENDL
       << "**********************************************************************" << ENDL;
 
 

@@ -1040,7 +1040,10 @@ bool Blockchain::getBlockLongHash(Crypto::cn_context& context, const Block& b, C
 
       // Alt-chain lookup first
       for (const auto& ch_ent : alt_chain) {
-        const Block& ab = m_alternative_chains.at(ch_ent).bl;
+        // A missing entry must fail the PoW computation rather than throw out of the hashing path.
+        auto altIt = m_alternative_chains.find(ch_ent);
+        if (altIt == m_alternative_chains.end()) return false;
+        const Block& ab = altIt->second.bl;
         uint32_t ah = boost::get<BaseInput>(ab.baseTransaction.inputs[0]).blockIndex;
         if (ah == height_j) {
           BinaryArray ba;
@@ -1750,7 +1753,8 @@ bool Blockchain::getTransactionsWithOutputGlobalIndexes(
       missed_txs.push_back(tx_id);
     } else {
       TransactionEntry te = transactionByIndex({block, txSlot});
-      if (te.m_global_output_indexes.empty()) {
+      // A transaction without outputs legitimately has no global output indexes.
+      if (te.m_global_output_indexes.empty() && !te.tx.outputs.empty()) {
         logger(ERROR, BRIGHT_RED) << "internal error: global indexes for transaction "
           << tx_id << " is empty";
         return false;
@@ -2034,7 +2038,8 @@ bool Blockchain::getTransactionOutputGlobalIndexes(const Crypto::Hash& tx_id,
     return false;
   }
   TransactionEntry te = transactionByIndex({block, txSlot});
-  if (te.m_global_output_indexes.empty()) {
+  // A transaction without outputs legitimately has no global output indexes.
+  if (te.m_global_output_indexes.empty() && !te.tx.outputs.empty()) {
     logger(ERROR, BRIGHT_RED) << "internal error: global indexes for transaction " << tx_id << " is empty";
     return false;
   }

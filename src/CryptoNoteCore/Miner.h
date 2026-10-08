@@ -44,6 +44,12 @@ namespace CryptoNote {
     bool set_block_template(const Block& bl, const Difficulty& diffic);
     bool on_block_chain_update();
     bool start(const AccountKeys& acc, size_t threads_count);
+    // Store the keys and threads count without spawning threads; mining begins
+    // in on_synchronized() once the node has caught up with the network.
+    bool startWhenSynchronized(const AccountKeys& acc, size_t threads_count);
+    bool is_mining_requested() const { return m_do_mining; }
+    // True while mining keys are held, i.e. mining runs or is armed to start.
+    bool hasMiningKeys() const;
     uint64_t get_speed();
     void send_stop_signal();
     bool stop(bool keepMiningRequested = false);
@@ -60,6 +66,7 @@ namespace CryptoNote {
     bool worker_thread(uint32_t th_local_index);
     bool request_block_template();
     void merge_hr(bool do_log = false);
+    void clearMiningKeys();
 
     struct miner_config
     {
