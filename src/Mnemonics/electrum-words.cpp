@@ -255,7 +255,9 @@ bool words_to_bytes(std::string words, Crypto::SecretKey& dst, std::string &lang
 	std::vector<std::string> seed;
 
 	boost::algorithm::trim(words);
-	boost::split(seed, words, boost::is_any_of(" "), boost::token_compress_on);
+	// Split on any whitespace so that pasted seeds containing tabs, line breaks
+	// or repeated spaces are parsed the same as single-space separated ones.
+	boost::split(seed, words, boost::is_any_of(" \t\r\n\v\f"), boost::token_compress_on);
 
 	// error on non-compliant word list
 	if (seed.size() != seed_length/2 && seed.size() != seed_length && seed.size() != seed_length + 1)
@@ -356,6 +358,16 @@ bool bytes_to_words(const Crypto::SecretKey& src, std::string& words, const std:
 }
 
 /*!
+* \brief Gets the English word list.
+* \return The English dictionary.
+*/
+const std::vector<std::string>& get_english_word_list()
+{
+	std::shared_ptr<Language::Base>& language = Language::c_languageMap.at(Language::English::c_name);
+	return language->get_word_list();
+}
+
+/*!
 * \brief Gets a list of seed languages that are supported.
 * \param languages The vector is set to the list of languages.
 */
@@ -377,7 +389,7 @@ bool get_is_old_style_seed(std::string seed)
 {
     std::vector<std::string> word_list;
     boost::algorithm::trim(seed);
-    boost::split(word_list, seed, boost::is_any_of(" "), boost::token_compress_on);
+    boost::split(word_list, seed, boost::is_any_of(" \t\r\n\v\f"), boost::token_compress_on);
     return word_list.size() != (seed_length + 1);
 }
 

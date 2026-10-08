@@ -42,6 +42,7 @@
 #include <string>
 #include <cstdint>
 #include <map>
+#include <vector>
 #include <boost/algorithm/string.hpp>
 #include "crypto/crypto.h"  // for declaration of Crypto::SecretKey
 #include "language_base.h"
@@ -86,6 +87,12 @@ void get_language_list(std::vector<std::string> &languages);
 	*/
 bool get_is_old_style_seed(std::string seed);
 
+/*!
+	* \brief Gets the English word list.
+	* \return The English dictionary, used to report unknown seed words.
+	*/
+const std::vector<std::string>& get_english_word_list();
+
     /* Templates have to be implemented in the header to be accessible
        elsewhere */
 
@@ -97,10 +104,7 @@ bool get_is_old_style_seed(std::string seed);
     template <typename T>
     void log_incorrect_words(std::vector<std::string> words, T &stream)
     {
-      //Language::Base *language = Language::Singleton<Language::English>::instance();
-	  Language::Base *language = NULL;
-	  
-      const std::vector<std::string> &dictionary = language->get_word_list();
+      const std::vector<std::string> &dictionary = get_english_word_list();
 
       Common::Console::setTextColor(Common::Console::Color::BrightRed);
 
@@ -148,7 +152,8 @@ bool get_is_old_style_seed(std::string seed);
 
       std::vector<std::string> words;
 
-      words = boost::split(words, mnemonic_phrase, ::isspace);
+      boost::algorithm::trim(mnemonic_phrase);
+      boost::split(words, mnemonic_phrase, boost::is_any_of(" \t\r\n\v\f"), boost::token_compress_on);
 
       if (words.size() != mnemonic_phrase_length)
       {

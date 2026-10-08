@@ -101,6 +101,12 @@ void AsyncConsoleReader::consoleThread() {
       break;
     }
   }
+
+  // If input ended (EOF or a read error) rather than being stopped or paused,
+  // close the queue so that a reader blocked in getline() is released.
+  if (!m_stop) {
+    m_queue.close();
+  }
 }
 
 bool AsyncConsoleReader::waitInput() {

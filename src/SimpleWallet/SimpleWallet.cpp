@@ -170,7 +170,7 @@ void seedLoader(const char *seed_file, std::string& seed) {
     while(true) {
       sub = getc(fd);
       if (sub == EOF) break;
-      if (sub != 0x20 && sub != 0x0A) {
+      if (sub != ' ' && sub != '\t' && sub != '\r' && sub != '\n' && sub != '\v' && sub != '\f') {
         seed_buffer += (char) sub;
         sub_space = false;
       } else {
@@ -178,8 +178,12 @@ void seedLoader(const char *seed_file, std::string& seed) {
       }
     }
     fclose(fd);
-    seed_buffer.resize(seed_buffer.length() - 1);
-    seed_buffer += (char) 0x00;
+    // A separator is only appended after a word, so strip it only if the file
+    // ended with whitespace. An empty file or one without a trailing newline
+    // must not lose characters.
+    if (!seed_buffer.empty() && seed_buffer.back() == ' ') {
+      seed_buffer.pop_back();
+    }
     seed = seed_buffer;
   }
 }
@@ -2559,6 +2563,19 @@ int main(int argc, char* argv[]) {
 #endif
 
   setbuf(stdout, NULL);
+
+  // Boost.Program_options rejects an explicitly empty value (`--password=`),
+  // but an empty wallet password is valid. Pass it as a separate empty token.
+  std::vector<char*> args(argv, argv + argc);
+  for (size_t i = 1; i < args.size(); ++i) {
+    if (std::strcmp(args[i], "--password=") == 0) {
+      args[i] = const_cast<char*>("--password");
+      args.insert(args.begin() + i + 1, const_cast<char*>(""));
+      ++i;
+    }
+  }
+  argc = static_cast<int>(args.size());
+  argv = args.data();
 
   po::options_description desc_general("General options");
   command_line::add_arg(desc_general, command_line::arg_help);
