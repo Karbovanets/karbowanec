@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <limits>
 #include <stdexcept>
 #include <Common/StreamTools.h>
 #include "SerializationOverloads.h"
@@ -38,8 +39,14 @@ void BinaryInputStreamSerializer::endObject() {
 }
 
 bool BinaryInputStreamSerializer::beginArray(size_t& size, Common::StringView name) {
-  readVarintAs<uint64_t>(stream, size);
+  // The count comes from untrusted input. Reject values that do not fit size_t
+  // instead of silently truncating them. Callers must not pre-allocate from it.
+  const uint64_t count = readVarint<uint64_t>(stream);
+  if (count > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+    throw std::runtime_error("array size does not fit in size_t");
+  }
 
+  size = static_cast<size_t>(count);
   return true;
 }
 
@@ -93,11 +100,17 @@ bool BinaryInputStreamSerializer::operator()(std::string& value, Common::StringV
   if (size > 100 * 1024 * 1024) {
     throw std::runtime_error("string size is too big");
   } else if (size > 0) {
-    std::vector<char> temp;
-    temp.resize(size);
-    checkedRead(&temp[0], size);
-    value.reserve(size);
-    value.assign(&temp[0], size);
+    // Read in growing chunks so memory is only committed for bytes that were
+    // actually received, not for whatever length the input declares.
+    std::string temp;
+    size_t offset = 0;
+    while (offset < size) {
+      const size_t chunk = std::min(static_cast<size_t>(size) - offset, std::max<size_t>(offset, 64 * 1024));
+      temp.resize(offset + chunk);
+      checkedRead(&temp[offset], chunk);
+      offset += chunk;
+    }
+    value.swap(temp);
   } else {
     value.clear();
   }

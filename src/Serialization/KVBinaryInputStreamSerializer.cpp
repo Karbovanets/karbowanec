@@ -75,10 +75,15 @@ std::string readString(Common::IInputStream& s) {
     throw std::runtime_error("string size is too big");
   }
 
+  // Read in growing chunks so memory is only committed for bytes that were
+  // actually received, not for whatever length the input declares.
   std::string str;
-  str.resize(size);
-  if (size) {
-    read(s, &str[0], size);
+  size_t offset = 0;
+  while (offset < size) {
+    const size_t chunk = std::min(size - offset, std::max<size_t>(offset, 64 * 1024));
+    str.resize(offset + chunk);
+    read(s, &str[offset], chunk);
+    offset += chunk;
   }
   return str;
 }

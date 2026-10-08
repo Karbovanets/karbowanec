@@ -21,6 +21,7 @@
 
 #include "ISerializer.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <list>
@@ -96,6 +97,12 @@ serializeAsBinary(std::list<T>& value, Common::StringView name, CryptoNote::ISer
   }
 }
 
+// Upper bound on how many elements an input count may pre-allocate. Containers
+// still grow to whatever the input actually decodes to, so this never limits
+// valid data; it only stops a short blob declaring a huge count from committing
+// memory before any element has been read.
+const size_t SERIALIZATION_MAX_PREALLOC_ELEMENTS = 4096;
+
 template <typename Cont>
 bool serializeContainer(Cont& value, Common::StringView name, CryptoNote::ISerializer& serializer) {
   size_t size = value.size();
@@ -107,10 +114,18 @@ bool serializeContainer(Cont& value, Common::StringView name, CryptoNote::ISeria
     return false;
   }
 
-  value.resize(size);
-
-  for (auto& item : value) {
-    serializer(const_cast<typename Cont::value_type&>(item), "");
+  if (serializer.type() == ISerializer::INPUT) {
+    // Grow as elements are decoded instead of sizing to the declared count, so
+    // a bogus count runs the input dry and throws rather than allocating.
+    value.clear();
+    for (size_t i = 0; i < size; ++i) {
+      value.emplace_back();
+      serializer(value.back(), "");
+    }
+  } else {
+    for (auto& item : value) {
+      serializer(const_cast<typename Cont::value_type&>(item), "");
+    }
   }
 
   serializer.endArray();
@@ -158,7 +173,7 @@ bool serializeMap(MapT& value, Common::StringView name, CryptoNote::ISerializer&
   }
 
   if (serializer.type() == CryptoNote::ISerializer::INPUT) {
-    reserve(size);
+    reserve(std::min(size, SERIALIZATION_MAX_PREALLOC_ELEMENTS));
 
     for (size_t i = 0; i < size; ++i) {
       typename MapT::key_type key;

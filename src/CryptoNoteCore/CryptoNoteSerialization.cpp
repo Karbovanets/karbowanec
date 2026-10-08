@@ -117,10 +117,19 @@ bool serializeVarintVector(std::vector<uint32_t>& vector, CryptoNote::ISerialize
     return false;
   }
 
-  vector.resize(size);
-
-  for (size_t i = 0; i < size; ++i) {
-    serializer(vector[i], "");
+  if (serializer.type() == CryptoNote::ISerializer::INPUT) {
+    // Grow as values are decoded instead of sizing to the declared count.
+    vector.clear();
+    vector.reserve(std::min(size, CryptoNote::SERIALIZATION_MAX_PREALLOC_ELEMENTS));
+    for (size_t i = 0; i < size; ++i) {
+      uint32_t value = 0;
+      serializer(value, "");
+      vector.push_back(value);
+    }
+  } else {
+    for (size_t i = 0; i < size; ++i) {
+      serializer(vector[i], "");
+    }
   }
 
   serializer.endArray();

@@ -162,12 +162,18 @@ void serialize(TransactionDetails& transaction, ISerializer& serializer) {
   } else {
     size_t size = 0;
     serializer(size, "signaturesSize");
+    if (size > transaction.inputs.size()) {
+      throw std::runtime_error("Serialization error: unexpected signatures size");
+    }
     transaction.signatures.resize(size);
 
     std::vector<std::pair<size_t, Crypto::Signature>> signaturesForSerialization;
     serializer(signaturesForSerialization, "signatures");
 
     for (const auto& signatureWithIndex : signaturesForSerialization) {
+      if (signatureWithIndex.first >= size) {
+        throw std::runtime_error("Serialization error: signature index out of range");
+      }
       transaction.signatures[signatureWithIndex.first].push_back(signatureWithIndex.second);
     }
   }
