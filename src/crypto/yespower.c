@@ -44,11 +44,25 @@
 #define _YESPOWER_OPT_C_PASS_ 1
 #endif
 
+/*
+ * Define YESPOWER_NO_SIMD to force the portable scalar code (e.g., to check
+ * the SIMD code paths against it).
+ */
+#ifndef YESPOWER_NO_SIMD
 /* MSVC does not define __SSE2__ for x64, where SSE2 is always available. */
 #ifndef YESPOWER_USE_SSE2
 #if defined(__SSE2__) || \
     (defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64)) && !defined(_M_ARM64EC))
 #define YESPOWER_USE_SSE2 1
+#endif
+#endif
+
+/* NEON is mandatory on AArch64.  MSVC does not define __ARM_NEON. */
+#if !defined(YESPOWER_USE_NEON) && !defined(YESPOWER_USE_SSE2)
+#if (defined(__ARM_NEON) && defined(__aarch64__)) || \
+    (defined(_MSC_VER) && defined(_M_ARM64))
+#define YESPOWER_USE_NEON 1
+#endif
 #endif
 #endif
 
@@ -77,6 +91,12 @@
 #warning "Note: AVX and XOP are not enabled.  That's OK."
 #else
 #pragma message("Note: AVX and XOP are not enabled.  That's OK.")
+#endif
+#elif defined(YESPOWER_USE_NEON)
+#ifdef __GNUC__
+#warning "Note: NEON is enabled.  That's great."
+#else
+#pragma message("Note: NEON is enabled.  That's great.")
 #endif
 #elif defined(__x86_64__) || defined(__i386__)
 #ifdef __GNUC__
@@ -118,6 +138,8 @@
 #endif
 #elif defined(__SSE__)
 #include <xmmintrin.h>
+#elif defined(YESPOWER_USE_NEON)
+#include <arm_neon.h>
 #endif
 
 #include <errno.h>
@@ -235,6 +257,8 @@ static int free_region(yespower_region_t *region)
 
 #ifdef __SSE__
 #define PREFETCH(x, hint) _mm_prefetch((const char *)(x), (hint));
+#elif defined(YESPOWER_USE_NEON) && defined(__GNUC__)
+#define PREFETCH(x, hint) __builtin_prefetch((const void *)(x), 0, 3);
 #else
 #undef PREFETCH
 #endif
@@ -242,8 +266,10 @@ static int free_region(yespower_region_t *region)
 typedef union {
     uint32_t w[16];
     uint64_t d[8];
-#ifdef YESPOWER_USE_SSE2
+#if defined(YESPOWER_USE_SSE2)
     __m128i q[4];
+#elif defined(YESPOWER_USE_NEON)
+    uint32x4_t q[4];
 #endif
 } salsa20_blk_t;
 
@@ -372,7 +398,95 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
 
 #define INTEGERIFY _mm_cvtsi128_si32(X0)
 
-#else /* !defined(YESPOWER_USE_SSE2) */
+#elif defined(YESPOWER_USE_NEON)
+
+/* NEON version of the SSE2 code above, using the same data layout. */
+#define DECL_X \
+    uint32x4_t X0, X1, X2, X3;
+#define DECL_Y \
+    uint32x4_t Y0, Y1, Y2, Y3;
+#define READ_X(in) \
+    X0 = (in).q[0]; X1 = (in).q[1]; X2 = (in).q[2]; X3 = (in).q[3];
+#define WRITE_X(out) \
+    (out).q[0] = X0; (out).q[1] = X1; (out).q[2] = X2; (out).q[3] = X3;
+
+#define ARX(out, in1, in2, s) { \
+    uint32x4_t tmp = vaddq_u32(in1, in2); \
+    out = veorq_u32(out, vsriq_n_u32(vshlq_n_u32(tmp, s), tmp, 32 - s)); \
+}
+
+#define SALSA20_2ROUNDS \
+    /* Operate on "columns" */ \
+    ARX(X1, X0, X3, 7) \
+    ARX(X2, X1, X0, 9) \
+    ARX(X3, X2, X1, 13) \
+    ARX(X0, X3, X2, 18) \
+    /* Rearrange data */ \
+    X1 = vextq_u32(X1, X1, 3); \
+    X2 = vextq_u32(X2, X2, 2); \
+    X3 = vextq_u32(X3, X3, 1); \
+    /* Operate on "rows" */ \
+    ARX(X3, X0, X1, 7) \
+    ARX(X2, X3, X0, 9) \
+    ARX(X1, X2, X3, 13) \
+    ARX(X0, X1, X2, 18) \
+    /* Rearrange data */ \
+    X1 = vextq_u32(X1, X1, 1); \
+    X2 = vextq_u32(X2, X2, 2); \
+    X3 = vextq_u32(X3, X3, 3);
+
+/**
+ * Apply the Salsa20 core to the block provided in (X0 ... X3).
+ */
+#define SALSA20_wrapper(out, rounds) { \
+    uint32x4_t Z0 = X0, Z1 = X1, Z2 = X2, Z3 = X3; \
+    rounds \
+    (out).q[0] = X0 = vaddq_u32(X0, Z0); \
+    (out).q[1] = X1 = vaddq_u32(X1, Z1); \
+    (out).q[2] = X2 = vaddq_u32(X2, Z2); \
+    (out).q[3] = X3 = vaddq_u32(X3, Z3); \
+}
+
+/**
+ * Apply the Salsa20/2 core to the block provided in X.
+ */
+#define SALSA20_2(out) \
+    SALSA20_wrapper(out, SALSA20_2ROUNDS)
+
+#define SALSA20_8ROUNDS \
+    SALSA20_2ROUNDS SALSA20_2ROUNDS SALSA20_2ROUNDS SALSA20_2ROUNDS
+
+/**
+ * Apply the Salsa20/8 core to the block provided in X.
+ */
+#define SALSA20_8(out) \
+    SALSA20_wrapper(out, SALSA20_8ROUNDS)
+
+#define XOR_X(in) \
+    X0 = veorq_u32(X0, (in).q[0]); \
+    X1 = veorq_u32(X1, (in).q[1]); \
+    X2 = veorq_u32(X2, (in).q[2]); \
+    X3 = veorq_u32(X3, (in).q[3]);
+
+#define XOR_X_2(in1, in2) \
+    X0 = veorq_u32((in1).q[0], (in2).q[0]); \
+    X1 = veorq_u32((in1).q[1], (in2).q[1]); \
+    X2 = veorq_u32((in1).q[2], (in2).q[2]); \
+    X3 = veorq_u32((in1).q[3], (in2).q[3]);
+
+#define XOR_X_WRITE_XOR_Y_2(out, in) \
+    (out).q[0] = Y0 = veorq_u32((out).q[0], (in).q[0]); \
+    (out).q[1] = Y1 = veorq_u32((out).q[1], (in).q[1]); \
+    (out).q[2] = Y2 = veorq_u32((out).q[2], (in).q[2]); \
+    (out).q[3] = Y3 = veorq_u32((out).q[3], (in).q[3]); \
+    X0 = veorq_u32(X0, Y0); \
+    X1 = veorq_u32(X1, Y1); \
+    X2 = veorq_u32(X2, Y2); \
+    X3 = veorq_u32(X3, Y3);
+
+#define INTEGERIFY vgetq_lane_u32(X0, 0)
+
+#else /* !defined(YESPOWER_USE_SSE2) && !defined(YESPOWER_USE_NEON) */
 
 #define DECL_X \
     salsa20_blk_t X;
@@ -721,7 +835,50 @@ static volatile uint64_t Smask2var = Smask2;
     PWXFORM_SIMD(X2) \
     PWXFORM_SIMD(X3)
 
-#else /* !defined(YESPOWER_USE_SSE2) */
+#elif defined(YESPOWER_USE_NEON)
+
+/*
+ * NEON equivalent of PMULUDQ: deinterleave the low and high 32-bit halves
+ * of the 64-bit lanes and do a widening multiply.
+ */
+#define PWXFORM_SIMD(X) { \
+    uint64_t x = vgetq_lane_u64(vreinterpretq_u64_u32(X), 0) & Smask2; \
+    uint32x4_t lo = vuzp1q_u32(X, X); \
+    uint32x4_t hi = vuzp2q_u32(X, X); \
+    uint64x2_t p = vmull_u32(vget_low_u32(hi), vget_low_u32(lo)); \
+    p = vaddq_u64(p, vld1q_u64((const uint64_t *)(S0 + (uint32_t)x))); \
+    p = veorq_u64(p, vld1q_u64((const uint64_t *)(S1 + (x >> 32)))); \
+    X = vreinterpretq_u32_u64(p); \
+}
+
+#define PWXFORM_SIMD_WRITE(X, Sw) \
+    PWXFORM_SIMD(X) \
+    MAYBE_MEMORY_BARRIER \
+    vst1q_u32((uint32_t *)(Sw + w), X); \
+    MAYBE_MEMORY_BARRIER
+
+#define PWXFORM_ROUND \
+    PWXFORM_SIMD(X0) \
+    PWXFORM_SIMD(X1) \
+    PWXFORM_SIMD(X2) \
+    PWXFORM_SIMD(X3)
+
+#define PWXFORM_ROUND_WRITE4 \
+    PWXFORM_SIMD_WRITE(X0, S0) \
+    PWXFORM_SIMD_WRITE(X1, S1) \
+    w += 16; \
+    PWXFORM_SIMD_WRITE(X2, S0) \
+    PWXFORM_SIMD_WRITE(X3, S1) \
+    w += 16;
+
+#define PWXFORM_ROUND_WRITE2 \
+    PWXFORM_SIMD_WRITE(X0, S0) \
+    PWXFORM_SIMD_WRITE(X1, S1) \
+    w += 16; \
+    PWXFORM_SIMD(X2) \
+    PWXFORM_SIMD(X3)
+
+#else /* !defined(YESPOWER_USE_SSE2) && !defined(YESPOWER_USE_NEON) */
 
 #define PWXFORM_SIMD(x0, x1) { \
     uint64_t x = x0 & Smask2; \
