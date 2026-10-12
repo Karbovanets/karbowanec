@@ -83,7 +83,6 @@ jobs:
   build-mingw:
     name: MinGW
     runs-on: windows-2022
-    if: false
 
     defaults:
       run:
@@ -130,12 +129,6 @@ jobs:
           cmake --version
 
           pacman -Q | grep boost || true
-
-          echo "Boost regex files:"
-          find /mingw64 -iname "*boost*regex*" || true
-
-          echo "Boost system files:"
-          find /mingw64 -iname "*boost*system*" || true
 
           test -d /mingw64/include/boost
 
