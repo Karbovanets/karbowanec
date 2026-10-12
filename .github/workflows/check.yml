@@ -256,6 +256,30 @@ jobs:
           echo "release_name=$release_name.zip" >> $GITHUB_OUTPUT
           echo "artifact_path=$build_folder/$release_name" >> $GITHUB_OUTPUT
 
+      - name: Yespower known answers (NEON and scalar)
+        run: |
+          set -euo pipefail
+
+          kat_sources="tests/UnitTests/TestYespower.cpp external/gtest/src/gtest-all.cc external/gtest/src/gtest_main.cc"
+          kat_includes="-Iinclude -Isrc -Iexternal/gtest/include -Iexternal/gtest"
+
+          # NEON: the Crypto and Common libraries from the release build above.
+          clang++ -O2 -std=c++17 -arch arm64 -mmacosx-version-min=11.0 $kat_includes \
+            $kat_sources build/src/libCommon.a build/src/libCrypto.a -o yespower_kat_neon
+          ./yespower_kat_neon --gtest_filter='Yespower.*'
+
+          # Scalar: yespower.c rebuilt with SIMD disabled.
+          mkdir -p build-yespower-scalar
+          clang -O2 -arch arm64 -mmacosx-version-min=11.0 -DYESPOWER_NO_SIMD -Isrc/crypto \
+            -c src/crypto/yespower.c -o build-yespower-scalar/yespower.o 2>&1 | tee build-yespower-scalar/yespower.log
+          grep -q "building generic code" build-yespower-scalar/yespower.log
+          clang -O2 -arch arm64 -mmacosx-version-min=11.0 -Isrc/crypto \
+            -c src/crypto/blake256.c -o build-yespower-scalar/blake256.o
+          clang++ -O2 -std=c++17 -arch arm64 -mmacosx-version-min=11.0 $kat_includes \
+            $kat_sources src/Common/StringTools.cpp \
+            build-yespower-scalar/yespower.o build-yespower-scalar/blake256.o -o yespower_kat_scalar
+          ./yespower_kat_scalar --gtest_filter='Yespower.*'
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -263,6 +287,42 @@ jobs:
           path: ${{ steps.build.outputs.artifact_path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  yespower-linux-arm64:
+    name: Yespower KAT (Linux ARM64)
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Yespower known answers (NEON and scalar)
+        run: |
+          set -euo pipefail
+
+          for variant in neon scalar; do
+            out="build-yespower-$variant"
+            mkdir -p "$out"
+
+            if [ "$variant" = scalar ]; then
+              defs="-DYESPOWER_NO_SIMD"
+              expect="building generic code"
+            else
+              defs=""
+              expect="NEON is enabled"
+            fi
+
+            echo "::group::$variant"
+            gcc -O2 $defs -Isrc/crypto -c src/crypto/yespower.c -o "$out/yespower.o" 2>&1 | tee "$out/yespower.log"
+            grep -q "$expect" "$out/yespower.log"
+            gcc -O2 -Isrc/crypto -c src/crypto/blake256.c -o "$out/blake256.o"
+            g++ -O2 -std=c++17 -pthread \
+              -Iinclude -Isrc -Iexternal/gtest/include -Iexternal/gtest \
+              tests/UnitTests/TestYespower.cpp src/Common/StringTools.cpp \
+              external/gtest/src/gtest-all.cc external/gtest/src/gtest_main.cc \
+              "$out/yespower.o" "$out/blake256.o" -o "$out/yespower_kat"
+            "$out/yespower_kat" --gtest_filter='Yespower.*'
+            echo "::endgroup::"
+          done
 
   build-ubuntu24:
     name: Ubuntu 24.04
